@@ -1,0 +1,38 @@
+name: multiarch-oci
+on:
+  push:
+  pull_request:
+permissions: {contents: read}
+jobs:
+  assemble:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Build both platforms and assemble the OCI index
+        env: {GOTOOLCHAIN: local, SOURCE_DATE_EPOCH: '0'}
+        run: |
+          set -euo pipefail
+          scripts/ci/build-verified-layout.sh layout-amd64 payload-amd64 amd64
+          scripts/ci/build-verified-layout.sh layout-arm64 payload-arm64 arm64
+          python3 scripts/ci/assemble-multiarch.py multiarch-layout layout-amd64 layout-arm64
+          python3 - <<'PY'
+          import json
+          index = json.load(open("multiarch-layout/index.json", encoding="utf-8"))
+          platforms = {(item["platform"]["os"], item["platform"]["architecture"]) for item in index["manifests"]}
+          assert platforms == {("linux", "amd64"), ("linux", "arm64")}
+          PY
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+            -cf multiarch-layout.tar multiarch-layout
+          sha256sum multiarch-layout.tar > multiarch-layout.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: multiarch-oci-layout
+          path: |
+            multiarch-layout.tar
+            multiarch-layout.sha256
+          if-no-files-found: error
+          retention-days: 14

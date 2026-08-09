@@ -1,0 +1,136 @@
+name: security-analysis
+on:
+  push:
+  pull_request:
+  schedule: [{cron: '17 3 * * 1'}]
+permissions: {contents: read}
+jobs:
+  static-analysis:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Validate workflow supply-chain controls
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/verify-workflows.py
+      - name: Static analysis and security regression tests
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -json ./... > govulncheck.json
+          { go list -deps -test -json ./...; \
+            (cd cmd/platform-factory-installer && GOWORK=off go list -deps -test -json ./...); \
+            (cd plugins/containerd && GOWORK=off go list -deps -test -json ./...); \
+            (cd plugins/kubevirt && GOWORK=off go list -deps -test -json ./...); } | \
+            python3 scripts/ci/check-license-policy.py --packages \
+              --policy .github/license-policy.json --output license-report.json
+          go test -race ./...
+          # microvm-init launches the guest entrypoint and its authenticated
+          # guest-agent endpoint executes the validated in-guest command.
+          # platform-factory launches
+          # allowlisted container runtimes plus its explicit microVM runner
+          # and fixed systemd/KubeVirt clients. internal/executor runs one
+          # already-validated pipeline stage's command; a memory-limited
+          # stage re-execs into a fresh child (rlimit_linux.go) that sets
+          # its own RLIMIT_AS before exec'ing the real target, rather than
+          # lowering the calling process's own limit (which empirically,
+          # not just in theory, starved unrelated concurrent allocations
+          # in that process). internal/plugin launches an out-of-process
+          # plugin subprocess speaking the versioned RPC protocol; on Linux
+          # it also re-execs itself into a fresh user/network/IPC/UTS
+          # namespace before exec'ing the real plugin target
+          # (sandbox_linux.go), the same re-exec-a-helper pattern as the
+          # executor sandbox above, applied to a different call site
+          # because plugin targets are third-party binaries rather than
+          # platform-factory itself. Their tests build and launch throwaway
+          # fixtures (a demo plugin binary, a trivial ELF binary, a
+          # sandbox-probe binary that only observes and reports network/
+          # privilege state) the same way. internal/ociruntime's supervisor
+          # re-execs the current binary (os.Executable(), not a third-party
+          # path) into a detached `__serve` child that owns one guest's KVM
+          # lifecycle (supervisor_linux.go), the same self-re-exec shape as
+          # the two cases above. All arguments are passed as arrays without
+          # a shell. apparmor_linux_test.go invokes the fixed, discovered
+          # apparmor_parser binary only to load and remove a generated test
+          # profile on Linux. cmd/platform-factory-installer shells out only to
+          # the fixed `go` and `git` toolchain binaries with explicit
+          # argument arrays, no shell, to build the components the caller
+          # selected and read version metadata - the same pattern
+          # scripts/local/bootstrap.sh already uses (a shell script, so not
+          # scanned here). Process execution remains forbidden elsewhere.
+          test -z "$(find cmd internal -name '*.go' -type f \
+              ! -path 'cmd/microvm-init/main.go' \
+              ! -path 'cmd/microvm-init/guest_agent.go' \
+              ! -path 'cmd/microvm-init/identity_linux.go' \
+              ! -path 'cmd/microvm-init/identity_other.go' \
+            ! -path 'cmd/platform-factory/main.go' \
+            ! -path 'cmd/platform-factory/exitcriteria_test.go' \
+            ! -path 'cmd/platform-factory-installer/main.go' \
+            ! -path 'internal/executor/executor.go' \
+            ! -path 'internal/executor/rlimit_linux.go' \
+            ! -path 'internal/executor/rlimit_linux_test.go' \
+            ! -path 'internal/executor/rlimit_other.go' \
+            ! -path 'internal/executor/sandbox_linux.go' \
+            ! -path 'internal/executor/sandbox_linux_test.go' \
+            ! -path 'internal/executor/sandbox_other.go' \
+            ! -path 'internal/executor/sandboxed.go' \
+            ! -path 'internal/executor/cgroup_linux.go' \
+            ! -path 'conformance/conformance.go' \
+            ! -path 'conformance/conformance_test.go' \
+            ! -path 'internal/plugin/client.go' \
+            ! -path 'internal/plugin/subprocess_test.go' \
+            ! -path 'internal/plugin/thirdparty_test.go' \
+            ! -path 'internal/plugin/sandbox_linux.go' \
+            ! -path 'internal/plugin/sandbox_other.go' \
+            ! -path 'internal/plugin/sandbox_linux_test.go' \
+            ! -path 'internal/sbom/sbom_test.go' \
+            ! -path 'internal/ociruntime/supervisor_linux.go' \
+            ! -path 'internal/ociruntime/apparmor_linux_test.go' \
+            -exec grep -nE 'os/exec|exec\.Command' {} + || true)"
+          test -z "$(find cmd internal -name '*.go' -type f \
+            -exec grep -n 'InsecureSkipVerify' {} + || true)"
+          # No import path (loading a local layout into a container runtime,
+          # or any future registry fetch) may depend on the Skopeo CLI: the
+          # local-runtime import in cmd/platform-factory/import.go already builds
+          # OCI/Docker-Save archives natively. This is deliberately a
+          # separate, self-documenting check from the os/exec allowlist
+          # above, which would already catch a shelled-out Skopeo call.
+          test -z "$(grep -rniI 'skopeo' cmd internal --include='*.go' || true)"
+          # Signing and verification in the product's own publish path
+          # (launch --publish) use the native Ed25519/ECDSA engine in
+          # internal/signing, never the Cosign CLI. Cosign only appears in
+          # ci-release.yml/ci-microvm.yml/ci-benchmark.yml/ci-supply-chain-e2e.yml,
+          # which are separate CI-owned trust stages per ADR-006/ADR-007
+          # (keyless GHCR signing, evidence-bundle signing, and external
+          # admission-control interop testing) - never cmd/ or internal/ code.
+          test -z "$(grep -rniI 'cosign' cmd internal --include='*.go' || true)"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: security-analysis-reports
+          path: |
+            govulncheck.json
+            license-report.json
+          if-no-files-found: warn
+          retention-days: 30
+  pr-policy:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # The policy compares against the PR base SHA; the checkout default of
+      # fetch-depth: 1 does not guarantee that object is available.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {fetch-depth: 0}
+      - name: Enforce repository and workflow policy
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/verify-workflows.py
+          test -z "$(git ls-files | grep -E '(^|/)(coverage\.out|coverage\.txt|oci-image|oci-builder|service)$' || true)"
+          test -z "$(grep -RInE --exclude=README.md --exclude-dir=.git --exclude-dir=.github 'TODO|FIXME|placeholder' . || true)"
+          git diff --check "${{ github.event.pull_request.base.sha }}" HEAD

@@ -1,0 +1,15 @@
+{
+  "subject_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sources_pinned": true,
+  "base_pinned": true,
+  "toolchain_pinned": true,
+  "plugins_pinned": true,
+  "non_root": true,
+  "read_only_rootfs": true,
+  "capabilities_dropped": true,
+  "secrets_absent": true,
+  "sbom": true,
+  "provenance": true,
+  "signature": true,
+  "reproducible": true
+}

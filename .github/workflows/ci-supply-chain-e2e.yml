@@ -1,0 +1,292 @@
+name: ghcr-cosign-admission-e2e
+on:
+  workflow_dispatch:
+  push: {branches: [main]}
+permissions: {contents: read}
+jobs:
+  publish-sign-admit:
+    permissions: {contents: read, packages: write, id-token: write}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        # policy-controller v0.10.x only supports plain signatures in Cosign's
+        # legacy OCI representation. Keep this integration test on Cosign 2
+        # until plain bundle signatures are supported by policy-controller.
+        with: {cosign-release: 'v2.6.1'}
+      - name: Build and publish the demonstration image to GHCR
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/$(printf '%s' "$REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          scripts/ci/build-verified-layout.sh oci-image service amd64 | tee e2e-layout-validation.txt
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+          docker build --pull=false --tag "$IMAGE:e2e-${GITHUB_SHA}" .
+          docker push "$IMAGE:e2e-${GITHUB_SHA}" | tee e2e-push.txt
+          docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:e2e-${GITHUB_SHA}" > image-reference.txt
+          docker build --pull=false --label "demo.unsigned=${GITHUB_SHA}" --tag "$IMAGE:unsigned-${GITHUB_SHA}" .
+          docker push "$IMAGE:unsigned-${GITHUB_SHA}" | tee e2e-unsigned-push.txt
+          docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:unsigned-${GITHUB_SHA}" > unsigned-image-reference.txt
+      - name: Keyless-sign and independently verify the digest
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          image=$(cat image-reference.txt)
+          # Refresh the short-lived GHCR credential in the signing step. Cosign
+          # 2 uses the Docker credential store through go-containerregistry and
+          # must not depend on authentication state inherited from another step.
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+          cosign sign --yes "$image"
+          cat > provenance-predicate.json <<EOF
+          {
+            "builder": {
+              "id": "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci-supply-chain-e2e.yml@${GITHUB_REF}"
+            },
+            "buildType": "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci-supply-chain-e2e.yml",
+            "invocation": {
+              "configSource": {
+                "uri": "git+https://github.com/${GITHUB_REPOSITORY}",
+                "digest": {
+                  "sha1": "${GITHUB_SHA}"
+                },
+                "entryPoint": ".github/workflows/ci-supply-chain-e2e.yml"
+              },
+              "parameters": {
+                "ref": "${GITHUB_REF}"
+              },
+              "environment": {
+                "runId": "${GITHUB_RUN_ID}",
+                "runAttempt": "${GITHUB_RUN_ATTEMPT}"
+              }
+            },
+            "buildConfig": {},
+            "metadata": {
+              "buildInvocationId": "${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            },
+            "materials": [
+              {
+                "uri": "git+https://github.com/${GITHUB_REPOSITORY}",
+                "digest": {
+                  "sha1": "${GITHUB_SHA}"
+                }
+              }
+            ]
+          }
+          EOF
+          cosign attest --yes \
+            --type slsaprovenance \
+            --predicate provenance-predicate.json \
+            "$image"
+          cosign triangulate "$image" | tee signature-reference.txt
+          cosign download signature "$image" > downloaded-signatures.json
+          test -s downloaded-signatures.json
+          cosign verify \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci-supply-chain-e2e.yml@" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$image" | tee e2e-cosign-verification.json
+          cosign verify-attestation \
+            --type slsaprovenance \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci-supply-chain-e2e.yml@" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$image" | tee e2e-provenance-verification.json
+      - name: Create a disposable Kubernetes cluster
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go install sigs.k8s.io/kind@v0.32.0
+          "$(go env GOPATH)/bin/kind" create cluster --wait 90s \
+            --config scripts/ci/kind-multinode.yaml \
+            --image kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+          kubectl version --output=yaml | tee kubernetes-version.yaml
+      - name: Prove multi-node RuntimeClass selection and fail-closed execution
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go run ./plugins/containerd/cmd/platform-factory-containerd runtimeclass > platform-factory-runtimeclass.yaml
+          tests/kind/test-kind-runtimeclass.sh
+      - name: Install Sigstore policy-controller and enforce verification
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          diagnostics() {
+            kubectl get deployment,pods,jobs --namespace cosign-system -o wide \
+              > policy-controller-status.txt 2>&1 || true
+            kubectl get events --all-namespaces --sort-by=.lastTimestamp \
+              > kubernetes-events.txt 2>&1 || true
+          }
+          trap diagnostics ERR
+          helm repo add sigstore https://sigstore.github.io/helm-charts
+          for attempt in 1 2 3; do
+            if helm repo update &&
+              helm upgrade --install policy-controller sigstore/policy-controller \
+                --version 0.10.6 --namespace cosign-system --create-namespace \
+                --set webhook.failurePolicy=Fail --wait --atomic --timeout 5m; then
+              break
+            fi
+            diagnostics
+            if [ "$attempt" -eq 3 ]; then
+              echo "policy-controller installation failed after $attempt attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
+          helm list --namespace cosign-system --output yaml > policy-controller-release.yaml
+          kubectl get deployment,pods --namespace cosign-system -o wide \
+            | tee policy-controller-status.txt
+          image=$(cat image-reference.txt)
+          repository=${image%@sha256:*}
+          kubectl create secret docker-registry ghcr-read \
+            --namespace default \
+            --docker-server=ghcr.io \
+            --docker-username="${GITHUB_ACTOR}" \
+            --docker-password="$REGISTRY_TOKEN"
+          cat > cluster-image-policy.yaml <<EOF
+          apiVersion: policy.sigstore.dev/v1beta1
+          kind: ClusterImagePolicy
+          metadata:
+            name: platform-factory-keyless
+          spec:
+            images:
+              - glob: "${repository}@**"
+            authorities:
+              - name: require-workflow-signature
+                keyless:
+                  url: https://fulcio.sigstore.dev
+                  identities:
+                    - issuer: https://token.actions.githubusercontent.com
+                      subjectRegExp: "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci-supply-chain-e2e.yml@.*"
+          EOF
+          for attempt in 1 2 3; do
+            kubectl apply -f cluster-image-policy.yaml && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep $((attempt * 5))
+          done
+          cat > provenance-policy.yaml <<EOF
+          apiVersion: policy.sigstore.dev/v1beta1
+          kind: ClusterImagePolicy
+          metadata:
+            name: platform-factory-provenance
+          spec:
+            images:
+              - glob: "${repository}@**"
+            authorities:
+              - name: require-workflow-provenance
+                keyless:
+                  url: https://fulcio.sigstore.dev
+                  identities:
+                    - issuer: https://token.actions.githubusercontent.com
+                      subjectRegExp: "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci-supply-chain-e2e.yml@.*"
+                attestations:
+                  - name: require-slsa-v1
+                    predicateType: https://slsa.dev/provenance/v0.2
+                    policy:
+                      type: cue
+                      data: |
+                        predicateType: "https://slsa.dev/provenance/v0.2"
+                        predicate: buildType: "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci-supply-chain-e2e.yml"
+          EOF
+          for attempt in 1 2 3; do
+            kubectl apply -f provenance-policy.yaml && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep $((attempt * 5))
+          done
+          kubectl label namespace default policy.sigstore.dev/include=true --overwrite
+      - name: Prove signed admission and unsigned rejection
+        run: |
+          set -euo pipefail
+          image=$(cat image-reference.txt)
+          pull_secret='{"spec":{"imagePullSecrets":[{"name":"ghcr-read"}]}}'
+          if ! kubectl run signed --image="$image" --restart=Never \
+            --overrides="$pull_secret" 2> signed-rejection.txt; then
+            kubectl logs --namespace cosign-system \
+              --selector=app.kubernetes.io/name=policy-controller \
+              --all-containers --prefix --tail=-1 \
+              > policy-controller.log 2>&1 || true
+            kubectl get events --all-namespaces --sort-by=.lastTimestamp \
+              > kubernetes-events.txt 2>&1 || true
+            cosign download signature "$image" \
+              > admission-signatures.json 2> admission-signatures-error.txt || true
+            cat signed-rejection.txt >&2
+            exit 1
+          fi
+          kubectl get pod signed -o yaml > admitted-pod.yaml
+          unsigned_image=$(cat unsigned-image-reference.txt)
+          if kubectl run unsigned --image="$unsigned_image" --restart=Never \
+            --overrides="$pull_secret" 2> unsigned-rejection.txt; then
+            echo "unsigned digest was unexpectedly admitted" >&2
+            exit 1
+          fi
+          kubectl get clusterimagepolicy platform-factory-keyless -o yaml > installed-policy.yaml
+          kubectl get clusterimagepolicy platform-factory-provenance -o yaml \
+            > installed-provenance-policy.yaml
+      - name: Install the signed workload and prove rollback
+        run: |
+          set -euo pipefail
+          image=$(cat image-reference.txt)
+          kubectl create deployment platform-factory-target --image="$image"
+          kubectl patch deployment platform-factory-target --type=merge -p \
+            '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"ghcr-read"}]}}}}'
+          kubectl rollout status deployment/platform-factory-target --timeout=2m
+          kubectl set env deployment/platform-factory-target ROLLBACK_PROBE=revision-2
+          kubectl rollout status deployment/platform-factory-target --timeout=2m
+          kubectl rollout history deployment/platform-factory-target \
+            > rollout-history-before.txt
+          kubectl rollout undo deployment/platform-factory-target
+          kubectl rollout status deployment/platform-factory-target --timeout=2m
+          if kubectl get deployment platform-factory-target -o json \
+            | jq -e '.spec.template.spec.containers[0].env // [] | any(.name == "ROLLBACK_PROBE")'; then
+            echo "rollback did not restore the original pod template" >&2
+            exit 1
+          fi
+          kubectl get deployment platform-factory-target -o yaml > rollback-deployment.yaml
+          kubectl rollout history deployment/platform-factory-target \
+            > rollout-history-after.txt
+          printf 'TARGET_ROLLBACK_OK deployment=platform-factory-target\n' \
+            | tee rollback-validation.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: ghcr-cosign-admission-evidence
+          path: |
+            image-reference.txt
+            unsigned-image-reference.txt
+            signature-reference.txt
+            downloaded-signatures.json
+            provenance-predicate.json
+            admission-signatures.json
+            admission-signatures-error.txt
+            e2e-*.txt
+            e2e-*.json
+            kubernetes-version.yaml
+            kubernetes-events.txt
+            kind-multinode-nodes.txt
+            kind-runtimeclass-pods.txt
+            kind-runtimeclass-events.txt
+            platform-factory-runtimeclass.yaml
+            platform-factory-runtimeclass-live.yaml
+            cluster-image-policy.yaml
+            provenance-policy.yaml
+            installed-policy.yaml
+            installed-provenance-policy.yaml
+            policy-controller-release.yaml
+            policy-controller-status.txt
+            policy-controller.log
+            admitted-pod.yaml
+            signed-rejection.txt
+            unsigned-rejection.txt
+            rollback-deployment.yaml
+            rollout-history-before.txt
+            rollout-history-after.txt
+            rollback-validation.txt
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,32 @@
+{
+  "name": "invalid-input-digest",
+  "pipeline": {
+    "api_version": "secure-oci.dev/v1alpha1",
+    "name": "bad-digest",
+    "inputs": [
+      {
+        "id": "source",
+        "kind": "git",
+        "source": "https://example.test/repo.git",
+        "digest": "sha256:short"
+      }
+    ],
+    "stages": [
+      {
+        "id": "build",
+        "command": {
+          "executable": "/usr/bin/true"
+        }
+      }
+    ]
+  },
+  "expect": {
+    "valid": false,
+    "issues": [
+      {
+        "path": "inputs[0].digest",
+        "message": "must be a sha256 digest"
+      }
+    ]
+  }
+}

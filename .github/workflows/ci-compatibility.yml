@@ -1,0 +1,89 @@
+name: oci-tool-compatibility
+on:
+  push:
+  pull_request:
+  schedule: [{cron: '37 4 * * 1'}]
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  docker-containerd-skopeo:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Install OCI compatibility clients
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          # The hosted runner already ships Docker plus containerd.io. The
+          # Ubuntu `containerd` package conflicts with those packages and
+          # removes the Docker daemon, so install only the missing client.
+          sudo apt-get install -y --no-install-recommends skopeo
+          command -v ctr
+          docker version | tee compatibility-versions.txt
+          containerd --version | tee -a compatibility-versions.txt
+          skopeo --version | tee -a compatibility-versions.txt
+      - name: Build and independently validate the OCI layout
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          scripts/ci/build-verified-layout.sh oci-image service amd64 | tee compatibility-layout.txt
+      - name: Consume through Skopeo and Docker
+        run: |
+          set -euo pipefail
+          reference=$(python3 -c 'import json; print(json.load(open("oci-image/index.json"))["manifests"][0]["annotations"]["org.opencontainers.image.ref.name"])')
+          test "$reference" = 'platform-factory:latest'
+          printf 'level=INFO component=ci operation=compatibility phase=skopeo reference=%s\n' "$reference" \
+            | tee compatibility-reference.txt
+          skopeo inspect --raw "oci:oci-image:$reference" > skopeo-manifest.json
+          skopeo copy "oci:oci-image:$reference" docker-archive:compatibility-image.tar:platform-factory:compatibility
+          docker load --input compatibility-image.tar | tee docker-load.txt
+          docker image inspect platform-factory:compatibility > docker-inspect.json
+      - name: Consume through containerd
+        run: |
+          set -euo pipefail
+          sudo ctr images import compatibility-image.tar | tee containerd-import.txt
+          sudo ctr images list | tee containerd-images.txt
+          sudo ctr images check | tee containerd-check.txt
+          grep -F 'docker.io/library/platform-factory:compatibility' containerd-images.txt
+      - name: Validate the native MicroVM CRI runtime facade
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          tests/microvm/test-containerd-contract.sh
+          go build -trimpath -o platform-factory-containerd ./plugins/containerd/cmd/platform-factory-containerd
+          go build -trimpath -o platform-factory-runtime ./cmd/platform-factory-runtime
+          ./platform-factory-containerd config > containerd-platform-factory.toml
+          ./platform-factory-containerd runtimeclass > platform-factory-runtimeclass.yaml
+          grep -F 'runtime_type = "io.containerd.platform-factory.v1"' containerd-platform-factory.toml
+          grep -F 'sandboxer = "shim"' containerd-platform-factory.toml
+          grep -F 'handler: platform-factory' platform-factory-runtimeclass.yaml
+          ./platform-factory-runtime features | grep -F '"io.github.platform-factory.runtime":"native-kvm"'
+      - name: Link compatibility evidence to this workflow run
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/write-traceability.py traceability.json \
+            compatibility-versions.txt compatibility-layout.txt skopeo-manifest.json \
+            docker-load.txt docker-inspect.json containerd-import.txt \
+            containerd-images.txt containerd-check.txt containerd-platform-factory.toml \
+            platform-factory-runtimeclass.yaml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: oci-compatibility-evidence
+          path: |
+            compatibility-*.txt
+            compatibility-image.tar
+            skopeo-manifest.json
+            docker-*.json
+            docker-load.txt
+            containerd-*.txt
+            containerd-platform-factory.toml
+            platform-factory-runtimeclass.yaml
+            traceability.json
+          if-no-files-found: warn
+          retention-days: 30

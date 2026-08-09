@@ -1,0 +1,105 @@
+name: launch-matrix
+on:
+  push:
+  pull_request:
+  schedule: [{cron: '43 4 * * 1'}]
+permissions: {contents: read}
+jobs:
+  launch:
+    strategy:
+      fail-fast: false
+      matrix: {runtime: [docker, podman]}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Ensure the ${{ matrix.runtime }} runtime is available
+        run: |
+          set -euo pipefail
+          if ! command -v '${{ matrix.runtime }}' >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y '${{ matrix.runtime }}'
+          fi
+          '${{ matrix.runtime }}' --version
+          if [ '${{ matrix.runtime }}' = podman ]; then
+            if ! command -v runc >/dev/null; then
+              sudo apt-get update
+              sudo apt-get install -y runc
+            fi
+            runc --version
+            mkdir -p "${HOME}/.config/containers/containers.conf.d"
+            printf '[engine]\nruntime="runc"\n' \
+              >"${HOME}/.config/containers/containers.conf.d/80-platform-factory-ci-runtime.conf"
+            test "$(podman info --format '{{.Host.OCIRuntime.Name}}')" = runc
+          fi
+      - name: Build platform-factory
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go build -trimpath -o platform-factory ./cmd/platform-factory
+      - name: Scaffold a supported compiled project
+        env: {GOTOOLCHAIN: local, CGO_ENABLED: '0'}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/launch-project
+          cat > /tmp/launch-project/main.go <<'GO'
+          package main
+
+          import "fmt"
+
+          func main() { fmt.Println("launch-e2e-ok") }
+          GO
+          cat > /tmp/launch-project/go.mod <<'GO'
+          module example.test/launch-project
+
+          go 1.25
+          GO
+          (cd /tmp/launch-project && go build -trimpath -ldflags '-s -w -buildid=' -o app .)
+          cat > /tmp/launch-project/.config_image.yaml <<'YAML'
+          version: 1
+          language: compiled
+          artifact: app
+          image: example/launch-e2e
+          tag: ci
+          runtime_engine: ${{ matrix.runtime }}
+          YAML
+      - name: Explain the launch plan without mutation
+        run: |
+          set -euo pipefail
+          ./platform-factory launch --dry-run /tmp/launch-project | tee plan.json
+          python3 - <<'PY'
+          import json
+          plan = json.load(open("plan.json"))
+          assert plan["api_version"] == "platform-factory.dev/project-plan/v1", plan
+          assert plan["valid"] is True, plan
+          assert {phase["name"] for phase in plan["phases"]} == {"freeze", "build", "run"}, plan
+          PY
+          test ! -e /tmp/launch-project/.platform-factory
+      - name: Launch the project end to end with ${{ matrix.runtime }}
+        run: |
+          set -euo pipefail
+          output=$(./platform-factory launch /tmp/launch-project)
+          echo "$output"
+          echo "$output" | grep -q 'launch-e2e-ok'
+          test -f /tmp/launch-project/.platform-factory/freeze.lock.json
+          ./platform-factory verify /tmp/launch-project/.platform-factory/image
+      - name: Prove clean project rebuilds are identical with platform-factory diff
+        run: |
+          set -euo pipefail
+          mv /tmp/launch-project/.platform-factory/image /tmp/launch-image-a
+          ./platform-factory project build /tmp/launch-project
+          ./platform-factory diff --format text /tmp/launch-image-a /tmp/launch-project/.platform-factory/image
+      - name: Build and verify the amd64 and arm64 image matrix
+        env: {GOTOOLCHAIN: local, CGO_ENABLED: '0'}
+        run: |
+          set -euo pipefail
+          (cd /tmp/launch-project && GOARCH=amd64 go build -trimpath -ldflags '-s -w -buildid=' -o app-amd64 .)
+          (cd /tmp/launch-project && GOARCH=arm64 go build -trimpath -ldflags '-s -w -buildid=' -o app-arm64 .)
+          ./platform-factory build --output /tmp/launch-multiarch \
+            --image example/launch-e2e --tag multiarch \
+            --platform linux/amd64=/tmp/launch-project/app-amd64 \
+            --platform linux/arm64=/tmp/launch-project/app-arm64
+          ./platform-factory verify /tmp/launch-multiarch

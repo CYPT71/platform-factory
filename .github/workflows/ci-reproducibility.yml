@@ -1,0 +1,123 @@
+name: reproducibility
+on:
+  push:
+  pull_request:
+  schedule: [{cron: '23 4 * * 1'}]
+permissions: {contents: read}
+jobs:
+  portable-rebuild:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Verify deterministic rebuilds on the host OS
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+          SOURCE_DATE_EPOCH: '0'
+          TZ: UTC
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
+        run: |
+          set -euo pipefail
+          go test ./internal/oci ./internal/runtime ./internal/hypervisor/... ./cmd/platform-factory \
+            -run "Test(BuildIsDeterministic|BuildSemanticLayersIsDeterministic|RunBuildRebuildVerifiesReproducibility|ProjectDoubleBuildProducesIdenticalDigest|ProbeNativeIsActionable)" \
+            -count=1
+      - name: Verify the local macOS install includes the native VMM
+        if: runner.os == 'macOS'
+        shell: bash
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          environment=$(mktemp -d)
+          scripts/local/bootstrap.sh --env "$environment/platform-factory"
+          grep -q '"native_vmm":true' "$environment/platform-factory/environment.json"
+          otool -L "$environment/platform-factory/bin/platform-factory" \
+            | grep -F '/System/Library/Frameworks/Virtualization.framework/'
+  rebuild-a:
+    strategy:
+      fail-fast: false
+      matrix: {architecture: [amd64, arm64]}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Build independently reproducible layout A
+        env: {GOTOOLCHAIN: local, SOURCE_DATE_EPOCH: '0'}
+        run: |
+          set -euo pipefail
+          scripts/ci/build-verified-layout.sh layout oci-builder "${{ matrix.architecture }}"
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf layout.tar layout oci-builder
+          sha256sum layout.tar > layout.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reproducibility-a-${{ matrix.architecture }}
+          path: |
+            layout.tar
+            layout.sha256
+          if-no-files-found: error
+          retention-days: 14
+  rebuild-b:
+    strategy:
+      fail-fast: false
+      matrix: {architecture: [amd64, arm64]}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Build independently reproducible layout B
+        env: {GOTOOLCHAIN: local, SOURCE_DATE_EPOCH: '0'}
+        run: |
+          set -euo pipefail
+          scripts/ci/build-verified-layout.sh layout oci-builder "${{ matrix.architecture }}"
+          tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf layout.tar layout oci-builder
+          sha256sum layout.tar > layout.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reproducibility-b-${{ matrix.architecture }}
+          path: |
+            layout.tar
+            layout.sha256
+          if-no-files-found: error
+          retention-days: 14
+  compare:
+    needs: [rebuild-a, rebuild-b]
+    strategy:
+      fail-fast: false
+      matrix: {architecture: [amd64, arm64]}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: reproducibility-a-${{ matrix.architecture }}
+          path: a
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: reproducibility-b-${{ matrix.architecture }}
+          path: b
+      - name: Compare independent rebuild bytes
+        run: |
+          set -euo pipefail
+          cmp a/layout.tar b/layout.tar
+          cmp a/layout.sha256 b/layout.sha256
+          cp a/layout.sha256 "reproducibility-${{ matrix.architecture }}.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reproducibility-evidence-${{ matrix.architecture }}
+          path: reproducibility-${{ matrix.architecture }}.sha256
+          if-no-files-found: error
+          retention-days: 14

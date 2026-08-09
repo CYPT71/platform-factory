@@ -1,0 +1,6 @@
+{
+  "platform": "linux/amd64",
+  "capabilities": ["kvm", "network"],
+  "cached_content": ["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+  "max_parallel": 2
+}

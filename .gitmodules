@@ -1,0 +1,3 @@
+[submodule ".wiki-worktree"]
+	path = .wiki-worktree
+	url = git@github.com:CYPT71/platform-factory.wiki.git

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SecureOci.Plugin</RootNamespace>
+    <PackageId>SecureOci.Plugin</PackageId>
+    <Description>SDK for out-of-process secure-oci language plugins: the versioned, length-prefixed JSON-RPC protocol plugins speak over stdin/stdout, and the plugin-side Server.</Description>
+  </PropertyGroup>
+</Project>

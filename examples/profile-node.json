@@ -1,0 +1,11 @@
+{
+  "entrypoint": "/usr/local/bin/node",
+  "profile": "node",
+  "args": ["/app/server.js"],
+  "working_dir": "/app",
+  "env": {"NODE_ENV": "production"},
+  "user": "65532:65532",
+  "home": "/home/nonroot",
+  "identity_files": true,
+  "writable_paths": ["/tmp"]
+}

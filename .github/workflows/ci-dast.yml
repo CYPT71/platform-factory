@@ -1,0 +1,98 @@
+name: dast-validation
+
+on:
+  push:
+  pull_request:
+  schedule: [{cron: '13 5 * * 3'}]
+
+permissions: {contents: read}
+
+jobs:
+  zap-and-nuclei:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Start the example HTTP target
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go build -trimpath -o /tmp/example-service ./cmd/example-service
+          nohup /tmp/example-service > target.log 2>&1 &
+          echo "$!" > target.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat target.log >&2
+          exit 1
+      - name: Run OWASP ZAP baseline
+        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
+        with:
+          target: http://172.17.0.1:8080
+          fail_action: true
+          allow_issue_writing: false
+          cmd_options: -I
+          artifact_name: zap-baseline-report
+      - name: Pre-install Nuclei templates with an authenticated, retried download
+        env:
+          GITHUB_TOKEN: '${{ github.token }}'
+          NUCLEI_TEMPLATES_SHA: 3887f9deba3194900fbfb1022d8155887325c384
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.8.0
+          mkdir -p "${HOME}/nuclei-templates"
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --location --retry 3 \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/projectdiscovery/nuclei-templates/tarball/${NUCLEI_TEMPLATES_SHA}" \
+              | tar -xz --strip-components=1 -C "${HOME}/nuclei-templates"; then
+              break
+            fi
+            echo "template install attempt ${attempt} failed; retrying" >&2
+            sleep $((attempt * 10))
+          done
+          test -n "$(find "${HOME}/nuclei-templates" -name '*.yaml' -print -quit 2>/dev/null)"
+      - name: Run Nuclei against the example target
+        env: {GITHUB_TOKEN: '${{ github.token }}', GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          # Run the nuclei binary installed and template-seeded in the
+          # previous step directly, rather than through nuclei-action. The
+          # action re-installs nuclei from source on every run (minutes of
+          # module downloads) and points at its own, empty config directory,
+          # so it exits fatally right after the banner with "no templates
+          # provided for scan". Invoking the already-validated binary with an
+          # explicit -templates directory makes the scan deterministic and
+          # runs on the host network namespace where the target listens.
+          nuclei="$(go env GOPATH)/bin/nuclei"
+          "$nuclei" \
+            -u http://127.0.0.1:8080 \
+            -severity medium,high,critical \
+            -no-interactsh \
+            -disable-update-check \
+            -templates "${HOME}/nuclei-templates" \
+            -jsonl-export nuclei-findings.jsonl
+      - name: Require no Nuclei medium-or-higher findings
+        run: |
+          set -euo pipefail
+          test ! -s nuclei-findings.jsonl
+          printf 'DAST_VALIDATION_OK zap=baseline nuclei=medium-high-critical\n' \
+            | tee dast-validation.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: dast-validation-evidence
+          path: |
+            target.log
+            nuclei-findings.jsonl
+            dast-validation.txt
+          if-no-files-found: warn
+          retention-days: 30

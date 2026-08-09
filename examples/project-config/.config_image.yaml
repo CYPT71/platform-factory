@@ -1,0 +1,14 @@
+version: 1
+language: python
+runtime: .platform-factory/deps/python/bin/python
+artifact: app.py
+image: example/python-service
+tag: local
+platform: linux/amd64
+entrypoint: /app/.platform-factory/deps/python/bin/python
+args: [/app/app.py]
+isolation: container
+runtime_engine: podman
+network: bridge
+ports:
+  - 127.0.0.1:8080:8080

@@ -1,0 +1,76 @@
+# Code Owners
+
+This file defines individuals or teams that are responsible for code in specific
+paths or files. Every code change must be reviewed by at least one owner of the
+code being modified.
+
+## Ownership Rules
+
+Owners are responsible for:
+- Reviewing and approving pull requests for their areas
+- Maintaining code quality and security in their areas
+- Triaging issues related to their areas
+- Ensuring tests pass and coverage requirements are met
+
+## Critical Components (Require 2+ Reviews)
+
+# Core security-critical components
+/api/* @secure-oci-maintainers
+/cmd/secure-oci @secure-oci-maintainers
+/internal/pipeline @secure-oci-maintainers
+/internal/executor @secure-oci-maintainers
+/internal/sandbox @secure-oci-maintainers
+/internal/signing @secure-oci-crypto-team
+/internal/mtls @secure-oci-crypto-team
+
+# Cryptography
+/internal/signing/* @secure-oci-crypto-team
+/internal/mtls/* @secure-oci-crypto-team
+
+# Registry
+/internal/registry/* @secure-oci-registry-team
+
+# Publication
+/internal/oci/* @secure-oci-publish-team
+/cmd/secure-oci/* @secure-oci-maintainers
+
+# Plugins
+/internal/plugin/* @secure-oci-plugin-team
+/cmd/secure-oci-plugin-* @secure-oci-plugin-team
+
+# MicroVM
+/internal/microvm/* @secure-oci-microvm-team
+/internal/hypervisor/* @secure-oci-microvm-team
+/cmd/microvm-* @secure-oci-microvm-team
+
+# CI/CD
+.github/workflows/* @secure-oci-devops-team
+scripts/ci/* @secure-oci-devops-team
+
+## Standard Components (Require 1+ Review)
+
+# API
+/api/* @secure-oci-maintainers
+
+# Internal packages
+/internal/* @secure-oci-maintainers
+
+# Commands
+/cmd/* @secure-oci-maintainers
+
+# SDK
+/sdk/* @secure-oci-maintainers
+
+# Examples
+examples/* @secure-oci-maintainers
+
+# Tests
+tests/* @secure-oci-maintainers
+
+# Documentation
+docs/* @secure-oci-maintainers
+.wiki-worktree/* @secure-oci-maintainers
+
+## Default
+
+* @secure-oci-maintainers

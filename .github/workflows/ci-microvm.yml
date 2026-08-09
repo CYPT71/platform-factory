@@ -1,0 +1,419 @@
+name: microvm-boot
+
+on: [push, pull_request]
+
+permissions: {contents: read}
+
+jobs:
+  prepare-hvf-guest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Restore the ARM64 HVF guest cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/microvm/arm64
+          key: microvm-hvf-arm64-${{ hashFiles('scripts/microvm/build-kernel.sh', 'scripts/microvm/kernel-common.config', 'scripts/microvm/kernel-arm64.config', 'cmd/microvm-init/**', 'cmd/microvm-initramfs/**', 'cmd/example-service/**', 'internal/rootfs/**', 'internal/oci/**') }}
+      - name: Install the ARM64 kernel cross-build toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu make flex bison bc libssl-dev libelf-dev
+      - name: Build or restore the ARM64 HVF kernel
+        env:
+          MICROVM_CROSS_COMPILE: '1'
+          CROSS_COMPILE: aarch64-linux-gnu-
+        run: |
+          set -euo pipefail
+          scripts/microvm/build-kernel.sh arm64 .cache/microvm/arm64/kernel
+          test -s .cache/microvm/arm64/kernel
+          grep -qx 'CONFIG_VIRTIO_CONSOLE=y' .cache/microvm/arm64/kernel.config.resolved
+          grep -qx 'CONFIG_POSIX_MQUEUE=y' .cache/microvm/arm64/kernel.config.resolved
+          grep -qx 'CONFIG_POSIX_MQUEUE_SYSCTL=y' .cache/microvm/arm64/kernel.config.resolved
+      - name: Build the ARM64 OCI initramfs
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          if test -s .cache/microvm/arm64/initramfs.cpio.gz; then
+            echo "ARM64 initramfs restored from the GitHub cache"
+            exit 0
+          fi
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
+            -ldflags='-s -w -X main.debugExitEnabled=true' \
+            -o /tmp/example-service ./cmd/example-service
+          go run ./cmd/oci-builder -binary /tmp/example-service \
+            -output /tmp/oci-image -arch arm64
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
+            -ldflags='-s -w' -o /tmp/microvm-init ./cmd/microvm-init
+          go build -trimpath -ldflags='-s -w' \
+            -o /tmp/microvm-initramfs ./cmd/microvm-initramfs
+          mkdir -p .cache/microvm/arm64
+          /tmp/microvm-initramfs -layout /tmp/oci-image -platform linux/arm64 \
+            -init /tmp/microvm-init -output .cache/microvm/arm64/initramfs.cpio.gz
+          test -s .cache/microvm/arm64/initramfs.cpio.gz
+  boot-under-hvf:
+    needs: prepare-hvf-guest
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.25.12'
+          cache: true
+      - name: Restore the ARM64 HVF guest from the GitHub cache
+        id: restore-hvf-guest
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/microvm/arm64
+          key: microvm-hvf-arm64-${{ hashFiles('scripts/microvm/build-kernel.sh', 'scripts/microvm/kernel-common.config', 'scripts/microvm/kernel-arm64.config', 'cmd/microvm-init/**', 'cmd/microvm-initramfs/**', 'cmd/example-service/**', 'internal/rootfs/**', 'internal/oci/**') }}
+          fail-on-cache-miss: true
+      - name: Validate the local ARM64 HVF guest cache
+        env:
+          HVF_CACHE_HIT: ${{ steps.restore-hvf-guest.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          test "$HVF_CACHE_HIT" = true
+          test -s .cache/microvm/arm64/kernel
+          test -s .cache/microvm/arm64/initramfs.cpio.gz
+      - name: Boot Linux with the native macOS HVF stack
+        env:
+          GOTOOLCHAIN: local
+          PLATFORM_FACTORY_ALLOW_UNAVAILABLE_HVF: '1'
+          PLATFORM_FACTORY_TEST_KERNEL_IMAGE: ${{ github.workspace }}/.cache/microvm/arm64/kernel
+          PLATFORM_FACTORY_TEST_INITRD: ${{ github.workspace }}/.cache/microvm/arm64/initramfs.cpio.gz
+        run: |
+          set -euo pipefail
+          tests/microvm/test-hvf-local.sh
+
+  boot-under-kvm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Confirm the runner exposes /dev/kvm
+        run: |
+          set -euo pipefail
+          test -e /dev/kvm
+          ls -la /dev/kvm
+          grep -Em1 'vmx|svm' /proc/cpuinfo
+      - name: Grant the runner user access to /dev/kvm
+        # The hosted runner's own group membership snapshot predates this
+        # job, so adding the user to the kvm group here wouldn't take
+        # effect without a new login session. Give only the ephemeral runner
+        # user access instead of making the hypervisor device world-writable.
+        run: |
+          set -euo pipefail
+          sudo chown "$(id -u):$(id -g)" /dev/kvm
+          sudo chmod 600 /dev/kvm
+      - name: Exercise the project-owned KVM VM and vCPU primitive
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/hypervisor/kvm -run '^TestRunFlatPayloadBootsAndHalts$' -count=1
+      - name: Install QEMU and the kernel build toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 cpio build-essential flex bison bc libssl-dev libelf-dev podman \
+            containernetworking-plugins apparmor-utils
+      - name: Prove the OCI runtime can apply a loaded AppArmor profile
+        # internal/ociruntime/apparmor_linux_test.go's own integration
+        # coverage (TestApplyApparmorProfileTransitionsCurrentThread and the
+        # LoadConfig tests around it) skips itself unless AppArmor is
+        # enabled, apparmor_parser is installed, and the caller is root -
+        # true here (this runner, right after the line above), false in
+        # every plain `go test ./...` run, local or CI. Run it explicitly
+        # under sudo so it actually executes instead of silently skipping
+        # everywhere.
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          sudo env "PATH=$PATH" go test ./internal/ociruntime/... \
+            -run 'AppArmor|Apparmor|Selinux' -v -count=1
+      - name: Install crictl (pinned)
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go install sigs.k8s.io/cri-tools/cmd/crictl@v1.33.0
+          # test-containerd-kvm.sh invokes crictl via sudo, which uses its
+          # own secure_path and ignores both the caller's PATH and
+          # GITHUB_PATH; GOPATH/bin is never on it. Install straight to
+          # /usr/local/bin, which is.
+          sudo install -m 0755 "$(go env GOPATH)/bin/crictl" /usr/local/bin/crictl
+      - name: Restore the AMD64 KVM guest cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/microvm/amd64
+          key: microvm-kvm-amd64-${{ hashFiles('scripts/microvm/build-kernel.sh', 'scripts/microvm/kernel-common.config', 'scripts/microvm/kernel-amd64.config') }}
+      - name: Verify local KVM readiness (non-destructive check)
+        run: |
+          set -euo pipefail
+          scripts/microvm/check-kvm.sh
+      - name: Build cmd/example-service into an OCI image layout
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags='-s -w -X main.debugExitEnabled=true' \
+            -o /tmp/example-service ./cmd/example-service
+          go run ./cmd/oci-builder -binary /tmp/example-service -output /tmp/oci-image -arch amd64
+      - name: Build or restore the microVM kernel
+        run: |
+          set -euo pipefail
+          echo "::group::Kernel preparation"
+          timeout --signal=TERM 25m scripts/microvm/build-kernel.sh \
+            amd64 .cache/microvm/amd64/kernel 2>&1 | tee kernel-build.txt
+          echo "::endgroup::"
+          test -s .cache/microvm/amd64/kernel
+          test -s .cache/microvm/amd64/kernel.provenance.json
+          test -s .cache/microvm/amd64/kernel.sbom.cdx.json
+          for option in DEVMEM DEVPORT KEXEC KEXEC_FILE HIBERNATION CRASH_DUMP \
+            FB LEGACY_PTYS LEGACY_TIOCSTI BPF_SYSCALL IA32_EMULATION \
+            X86_X32_ABI MAGIC_SYSRQ; do
+            if grep -Eq "^CONFIG_${option}=[ym]$" .cache/microvm/amd64/kernel.config.resolved; then
+              echo "kernel hardening regression: CONFIG_${option} is enabled" >&2
+              exit 1
+            fi
+          done
+
+          # Check the resolved Kconfig, because dependencies may silently turn
+          # requested symbols off.
+          for option in PRINTK BINFMT_ELF FUTEX EPOLL EVENTFD SIGNALFD \
+            TIMERFD POSIX_TIMERS MULTIUSER TTY DEVTMPFS DEVTMPFS_MOUNT \
+            PROC_FS SYSFS BLK_DEV_INITRD RD_GZIP VIRTIO_CONSOLE; do
+            if ! grep -qx "CONFIG_${option}=y" .cache/microvm/amd64/kernel.config.resolved; then
+              echo "kernel runtime regression: CONFIG_${option} is not built in" >&2
+              exit 1
+            fi
+          done
+
+          grep -qx 'CONFIG_SYN_COOKIES=y' .cache/microvm/amd64/kernel.config.resolved
+          grep -qx 'CONFIG_POSIX_MQUEUE=y' .cache/microvm/amd64/kernel.config.resolved
+          grep -qx 'CONFIG_POSIX_MQUEUE_SYSCTL=y' .cache/microvm/amd64/kernel.config.resolved
+          grep -qx 'CONFIG_SERIAL_8250_NR_UARTS=2' .cache/microvm/amd64/kernel.config.resolved
+          grep -qx 'CONFIG_SERIAL_8250_RUNTIME_UARTS=2' .cache/microvm/amd64/kernel.config.resolved
+      - name: Boot the kernel with the project-owned native KVM runner
+        env:
+          GOTOOLCHAIN: local
+          PLATFORM_FACTORY_TEST_BZIMAGE: ${{ github.workspace }}/.cache/microvm/amd64/kernel
+          PLATFORM_FACTORY_TEST_INITRD: /tmp/native-initramfs.cpio.gz
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' \
+            -o /tmp/native-microvm-init ./cmd/microvm-init
+          # cmd/microvm-initramfs converts and packs the OCI layout natively
+          # (internal/rootfs.Convert + a native cpio/newc writer), without
+          # invoking the external tar or cpio binaries scripts/microvm still
+          # uses for the QEMU-based production backend below.
+          go build -trimpath -ldflags='-s -w' -o /tmp/microvm-initramfs ./cmd/microvm-initramfs
+          /tmp/microvm-initramfs -layout /tmp/oci-image -init /tmp/native-microvm-init \
+            -output /tmp/native-initramfs.cpio.gz | tee native-initramfs-assembly.json
+          go test ./internal/hypervisor/kvm -run '^TestRunLinuxWithRealKVM$' -count=1 -v \
+            | tee native-kvm-linux-boot.txt
+      - name: Prove Podman owns the native-KVM MicroVM lifecycle
+        env:
+          GOTOOLCHAIN: local
+          PLATFORM_FACTORY_EVIDENCE_DIR: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          tests/microvm/test-podman-kvm.sh \
+            /tmp/oci-image platform-factory:latest \
+            "${{ github.workspace }}/.cache/microvm/amd64/kernel" \
+            /tmp/native-microvm-init
+      - name: Prove Docker owns the native-KVM MicroVM lifecycle
+        env:
+          GOTOOLCHAIN: local
+          PLATFORM_FACTORY_EVIDENCE_DIR: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          tests/microvm/test-docker-kvm.sh \
+            /tmp/oci-image platform-factory:latest \
+            "${{ github.workspace }}/.cache/microvm/amd64/kernel" \
+            /tmp/native-microvm-init
+      - name: Prove containerd owns the native-KVM MicroVM lifecycle
+        env:
+          GOTOOLCHAIN: local
+          PLATFORM_FACTORY_EVIDENCE_DIR: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          tests/microvm/test-containerd-kvm.sh \
+            /tmp/oci-image platform-factory:latest \
+            "${{ github.workspace }}/.cache/microvm/amd64/kernel" \
+            /tmp/native-microvm-init
+      - name: Install kernel-hardening-checker (pinned)
+        run: |
+          set -euo pipefail
+          sudo python3 -m pip install --break-system-packages --quiet \
+            "git+https://github.com/a13xp0p0v/kernel-hardening-checker@afc376f2a935994793343cfeb05953583cc30191"
+      - name: Scan the built kernel's resolved config for hardening gaps
+        # Informational, not a hard gate yet: this is a general-purpose Linux
+        # hardening baseline, and scripts/microvm builds a deliberately
+        # minimal, single-purpose, single-tenant kernel (no modules, no
+        # untrusted local users) that intentionally omits large parts of
+        # what the checker expects of a general-purpose distro kernel. The
+        # report is still real evidence that the config was analyzed; a
+        # future change can turn specific checks into a gate once an
+        # accepted baseline for this kernel profile exists.
+        run: |
+          set -euo pipefail
+          echo "::group::Kernel hardening report"
+          set +e
+          kernel-hardening-checker -c .cache/microvm/amd64/kernel.config.resolved -m verbose \
+            | tee kernel-hardening-report.txt
+          verbose_status=${PIPESTATUS[0]}
+          set -e
+          echo "::endgroup::"
+          echo "kernel-hardening-checker verbose exit status: ${verbose_status}"
+          set +e
+          kernel-hardening-checker -c .cache/microvm/amd64/kernel.config.resolved -m json \
+            > kernel-hardening-report.json
+          json_status=$?
+          set -e
+          echo "kernel-hardening-checker JSON exit status: ${json_status}"
+          test -s kernel-hardening-report.txt
+          test -s kernel-hardening-report.json
+      - name: Verify the native initramfs assembly is byte-reproducible
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /tmp/microvm-init ./cmd/microvm-init
+          go build -trimpath -ldflags='-s -w' -o /tmp/microvm-initramfs ./cmd/microvm-initramfs
+          /tmp/microvm-initramfs -layout /tmp/oci-image -init /tmp/microvm-init -output /tmp/initramfs-a.cpio.gz
+          sleep 2
+          /tmp/microvm-initramfs -layout /tmp/oci-image -init /tmp/microvm-init -output /tmp/initramfs-b.cpio.gz
+          sha256sum /tmp/initramfs-a.cpio.gz /tmp/initramfs-b.cpio.gz | tee initramfs-reproducibility.txt
+          cmp /tmp/initramfs-a.cpio.gz /tmp/initramfs-b.cpio.gz
+      - name: Boot the image under KVM and smoke-test it
+        env:
+          GOTOOLCHAIN: local
+          MICROVM_KERNEL: ${{ github.workspace }}/.cache/microvm/amd64/kernel
+          MICROVM_SMOKE_TEST_PATH: /healthz
+          MICROVM_BOOT_MANIFEST: boot-manifest.json
+        run: |
+          set -euo pipefail
+          echo "::group::KVM boot and guest console"
+          timeout --signal=TERM 5m scripts/microvm/run-microvm.sh \
+            /tmp/oci-image 2>&1 | tee microvm-boot.txt
+          echo "::endgroup::"
+          test -s boot-manifest.json
+      - name: Boot the image again and verify a guest-initiated graceful shutdown
+        env:
+          GOTOOLCHAIN: local
+          MICROVM_KERNEL: ${{ github.workspace }}/.cache/microvm/amd64/kernel
+          MICROVM_SHUTDOWN_TEST_PATH: /debug/exit
+        run: |
+          set -euo pipefail
+          echo "::group::KVM graceful-shutdown test"
+          timeout --signal=TERM 5m scripts/microvm/run-microvm.sh \
+            /tmp/oci-image 2>&1 | tee microvm-shutdown.txt
+          echo "::endgroup::"
+      - name: Stage kernel evidence outside the hidden cache directory
+        run: |
+          set -euo pipefail
+          mkdir kernel-evidence
+          cp .cache/microvm/amd64/kernel.config.resolved kernel-evidence/
+          cp .cache/microvm/amd64/kernel.provenance.json kernel-evidence/
+          cp .cache/microvm/amd64/kernel.sbom.cdx.json kernel-evidence/
+          test -s kernel-evidence/kernel.config.resolved
+          test -s kernel-evidence/kernel.provenance.json
+          test -s kernel-evidence/kernel.sbom.cdx.json
+      - name: Link boot evidence to this workflow run
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/write-traceability.py traceability.json \
+            kernel-build.txt native-kvm-linux-boot.txt microvm-boot.txt microvm-shutdown.txt \
+            podman-microvm-result.txt podman-microvm-ps.json podman-microvm-logs.txt \
+            docker-microvm-result.txt docker-microvm-ps.json docker-microvm-logs.txt \
+            docker-microvm-info.txt docker-microvm-inspect-final.json docker-microvm-daemon.log \
+            containerd-microvm-result.txt containerd-microvm-logs.txt \
+            .cache/microvm/amd64/kernel.config.resolved .cache/microvm/amd64/kernel.provenance.json \
+            .cache/microvm/amd64/kernel.sbom.cdx.json \
+            kernel-hardening-report.json initramfs-reproducibility.txt boot-manifest.json \
+            native-initramfs-assembly.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: microvm-boot-evidence
+          path: |
+            microvm-boot.txt
+            microvm-shutdown.txt
+            kernel-build.txt
+            native-kvm-linux-boot.txt
+            native-initramfs-assembly.json
+            podman-microvm-*.txt
+            podman-microvm-*.json
+            docker-microvm-*
+            containerd-microvm-*
+            kernel-evidence/kernel.config.resolved
+            kernel-evidence/kernel.sbom.cdx.json
+            kernel-hardening-report.txt
+            kernel-hardening-report.json
+            initramfs-reproducibility.txt
+            traceability.json
+          if-no-files-found: warn
+          retention-days: 14
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: microvm-signable-evidence
+          path: |
+            kernel-evidence/kernel.provenance.json
+            kernel-evidence/kernel.sbom.cdx.json
+            kernel-hardening-report.json
+            boot-manifest.json
+          if-no-files-found: error
+          retention-days: 14
+
+  sign-kernel-evidence:
+    needs: boot-under-kvm
+    # Keyless Cosign signing mints a Sigstore certificate under this
+    # workflow's identity. Restricted to push (post-merge) so a
+    # pull_request run - including from a fork, which still gets a real
+    # OIDC token - can never obtain one; see Threat-Model-and-Residual-Risks
+    # in the wiki for the equivalent reasoning applied to ci-release.yml.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions: {contents: read, id-token: write}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: {name: microvm-signable-evidence}
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with: {cosign-release: 'v3.0.6'}
+      - name: Merge kernel provenance, SBOM, hardening report, and boot-bundle manifest into one signable file
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/write-microvm-evidence-bundle.py \
+            kernel-evidence/kernel.provenance.json kernel-evidence/kernel.sbom.cdx.json \
+            kernel-hardening-report.json boot-manifest.json microvm-evidence-bundle.json
+      - name: Sign and verify the evidence bundle (keyless)
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes --bundle microvm-evidence-bundle.cosign.bundle microvm-evidence-bundle.json
+          cosign verify-blob \
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci-microvm.yml@" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --bundle microvm-evidence-bundle.cosign.bundle microvm-evidence-bundle.json \
+            | tee microvm-evidence-verification.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: microvm-signed-kernel-evidence
+          path: |
+            microvm-evidence-bundle.json
+            microvm-evidence-bundle.cosign.bundle
+            microvm-evidence-verification.txt
+          if-no-files-found: error
+          retention-days: 90

@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
+# Host-side microVM manager. This image is intentionally not the guest image:
+# it runs QEMU and therefore requires an explicit /dev/kvm device grant.
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS build
+RUN apk add --no-cache go
+WORKDIR /src
+COPY go.mod ./
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/platform-factory ./cmd/platform-factory
+
+FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+RUN apk add --no-cache \
+    bash bc bison build-base coreutils cpio curl elfutils-dev flex go \
+    openssl-dev perl python3 qemu-system-aarch64 qemu-system-x86_64 tar xz
+COPY --from=build /out/platform-factory /usr/local/bin/platform-factory
+COPY scripts/ /opt/platform-factory/scripts/
+COPY cmd/microvm-init/ /opt/platform-factory/cmd/microvm-init/
+COPY go.mod /opt/platform-factory/go.mod
+WORKDIR /opt/platform-factory
+ENTRYPOINT ["/usr/local/bin/platform-factory"]

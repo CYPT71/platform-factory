@@ -1,0 +1,30 @@
+{
+  "name": "invalid-duplicate-stage",
+  "pipeline": {
+    "api_version": "secure-oci.dev/v1alpha1",
+    "name": "duplicated",
+    "stages": [
+      {
+        "id": "build",
+        "command": {
+          "executable": "/usr/bin/true"
+        }
+      },
+      {
+        "id": "build",
+        "command": {
+          "executable": "/usr/bin/false"
+        }
+      }
+    ]
+  },
+  "expect": {
+    "valid": false,
+    "issues": [
+      {
+        "path": "stages[1].id",
+        "message": "duplicates stage build"
+      }
+    ]
+  }
+}

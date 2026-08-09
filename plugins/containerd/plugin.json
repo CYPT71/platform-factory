@@ -1,0 +1,23 @@
+{
+  "api_version": "platform-factory.dev/plugin-manifest/v1",
+  "name": "containerd",
+  "version": "1.0.0",
+  "family": "runtime",
+  "capabilities": [
+    "runtime.create",
+    "runtime.stop",
+    "runtime.start",
+    "runtime.delete",
+    "runtime.logs",
+    "runtime.inspect",
+    "runtime.list"
+  ],
+  "permissions": {
+    "network": ["unix:///run/containerd/containerd.sock"],
+    "filesystem": ["/var/lib/containerd"],
+    "secrets": []
+  },
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "executable": "platform-factory-containerd",
+  "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

@@ -1,0 +1,8 @@
+{
+  "name": "exit-code",
+  "stage": {
+    "id": "exit-code",
+    "command": {"executable": "/bin/sh", "args": ["-c", "exit 3"]}
+  },
+  "expect": {"exit_code": 3, "stdout": ""}
+}

@@ -1,0 +1,11 @@
+{
+  "entrypoint": "/usr/bin/dotnet",
+  "profile": "dotnet",
+  "args": ["/app/service.dll"],
+  "working_dir": "/app",
+  "env": {"DOTNET_EnableDiagnostics": "0"},
+  "user": "65532:65532",
+  "home": "/home/nonroot",
+  "identity_files": true,
+  "writable_paths": ["/tmp"]
+}

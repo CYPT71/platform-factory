@@ -1,0 +1,20 @@
+{
+  "api_version": "platform-factory.dev/plugin-manifest/v1",
+  "name": "lang-go",
+  "version": "1.0.0",
+  "family": "language",
+  "capabilities": [
+    "language.detect",
+    "language.build",
+    "language.test",
+    "language.run"
+  ],
+  "permissions": {
+    "network": [],
+    "filesystem": ["/tmp"],
+    "secrets": []
+  },
+  "platforms": ["linux/amd64", "linux/arm64"],
+  "executable": "platform-factory-plugin-lang-go",
+  "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

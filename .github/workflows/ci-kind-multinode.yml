@@ -1,0 +1,68 @@
+name: kind-multinode-runtime
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  runtimeclass-and-worker-loss:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      KIND_EXPERIMENTAL_PROVIDER: podman
+      PLATFORM_FACTORY_CONTAINER_ENGINE: podman
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Create the common one-plus-two kind cluster
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          podman info
+          go install sigs.k8s.io/kind@v0.32.0
+          "$(go env GOPATH)/bin/kind" create cluster --name platform-factory-distributed \
+            --wait 90s --config scripts/ci/kind-multinode.yaml \
+            --image kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+      - name: Prove RuntimeClass scheduling contract
+        env:
+          GOTOOLCHAIN: local
+          PLATFORM_FACTORY_KIND_NAMESPACE: platform-factory-runtimeclass
+        run: |
+          set -euo pipefail
+          go run ./plugins/containerd/cmd/platform-factory-containerd runtimeclass > platform-factory-runtimeclass.yaml
+          tests/kind/test-kind-runtimeclass.sh
+      - name: Prove distributed cancellation and restart durability
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          tests/kind/test-kind-distributed-cancellation.sh
+      - name: Prove control-plane recovery after worker loss
+        run: |
+          set -euo pipefail
+          tests/kind/test-kind-worker-loss.sh
+      - name: Prove recovery from a real network partition
+        run: |
+          set -euo pipefail
+          tests/kind/test-kind-network-partition.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: kind-multinode-runtime-evidence
+          path: |
+            kind-multinode-nodes.txt
+            kind-runtimeclass-*.txt
+            platform-factory-runtimeclass*.yaml
+            kind-worker-loss-*.txt
+            kind-partition-*.txt
+            kind-cancellation-*.txt
+            kind-cancellation-*.log
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Remove the disposable cluster
+        if: always()
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          "$(go env GOPATH)/bin/kind" delete cluster --name platform-factory-distributed

@@ -1,0 +1,11 @@
+{
+  "entrypoint": "/usr/local/bin/python3",
+  "profile": "python",
+  "args": ["/app/main.py"],
+  "working_dir": "/app",
+  "env": {"PYTHONDONTWRITEBYTECODE": "1", "PYTHONUNBUFFERED": "1"},
+  "user": "65532:65532",
+  "home": "/home/nonroot",
+  "identity_files": true,
+  "writable_paths": ["/tmp"]
+}

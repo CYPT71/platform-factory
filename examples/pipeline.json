@@ -1,0 +1,72 @@
+{
+  "api_version": "secure-oci.dev/v1alpha1",
+  "name": "hello-pipeline",
+  "inputs": [
+    {
+      "id": "source",
+      "kind": "directory",
+      "source": "app",
+      "digest": "sha256:4206cff3eb1e62ea0e98f2e40b7df58983cdeb2be405e6068e63fd6df95fe58a"
+    }
+  ],
+  "stages": [
+    {
+      "id": "vet",
+      "command": {
+        "executable": "sh",
+        "args": ["-c", "mkdir -p \"$PLATFORM_FACTORY_ROOT/go-cache\" \"$PLATFORM_FACTORY_ROOT/go-mod-cache\" && GOCACHE=\"$PLATFORM_FACTORY_ROOT/go-cache\" GOMODCACHE=\"$PLATFORM_FACTORY_ROOT/go-mod-cache\" go vet ./..."],
+        "working_dir": "/workspace"
+      },
+      "mounts": [
+        {"source": "source", "target": "/workspace", "read_only": true}
+      ]
+    },
+    {
+      "id": "test",
+      "command": {
+        "executable": "sh",
+        "args": ["-c", "mkdir -p \"$PLATFORM_FACTORY_ROOT/go-cache\" \"$PLATFORM_FACTORY_ROOT/go-mod-cache\" && GOCACHE=\"$PLATFORM_FACTORY_ROOT/go-cache\" GOMODCACHE=\"$PLATFORM_FACTORY_ROOT/go-mod-cache\" go test ./..."],
+        "working_dir": "/workspace"
+      },
+      "mounts": [
+        {"source": "source", "target": "/workspace", "read_only": true}
+      ]
+    },
+    {
+      "id": "build",
+      "depends_on": ["vet", "test"],
+      "command": {
+        "executable": "sh",
+        "args": ["-c", "mkdir -p \"$PLATFORM_FACTORY_ROOT/go-cache\" \"$PLATFORM_FACTORY_ROOT/go-mod-cache\" \"$PLATFORM_FACTORY_ROOT/out\" && GOCACHE=\"$PLATFORM_FACTORY_ROOT/go-cache\" GOMODCACHE=\"$PLATFORM_FACTORY_ROOT/go-mod-cache\" go build -o \"$PLATFORM_FACTORY_ROOT/out/hello\" ."],
+        "working_dir": "/workspace"
+      },
+      "mounts": [
+        {"source": "source", "target": "/workspace", "read_only": true}
+      ],
+      "outputs": [
+        {"name": "binary", "path": "/out/hello"}
+      ]
+    },
+    {
+      "id": "package",
+      "depends_on": ["build"],
+      "command": {
+        "executable": "sh",
+        "args": [
+          "-c",
+          "mkdir -p \"$PLATFORM_FACTORY_ROOT/out/dist\" && cp \"$PLATFORM_FACTORY_ROOT/out/hello\" \"$PLATFORM_FACTORY_ROOT/out/dist/hello-pipeline\" && chmod +x \"$PLATFORM_FACTORY_ROOT/out/dist/hello-pipeline\""
+        ],
+        "working_dir": "/out"
+      },
+      "inputs": [
+        {"stage": "build", "name": "binary"}
+      ],
+      "outputs": [
+        {"name": "app", "path": "/out/dist/hello-pipeline"}
+      ]
+    }
+  ],
+  "outputs": [
+    {"name": "app", "stage": "package", "artifact": "app"}
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@secure-oci/plugin-sdk",
+  "version": "1.0.0",
+  "description": "SDK for out-of-process secure-oci language plugins: the versioned, length-prefixed JSON-RPC protocol plugins speak over stdin/stdout, and the plugin-side Server.",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {}
+}

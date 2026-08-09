@@ -1,0 +1,8 @@
+{
+  "name": "stdout-capture",
+  "stage": {
+    "id": "stdout-capture",
+    "command": {"executable": "/bin/sh", "args": ["-c", "printf hello"]}
+  },
+  "expect": {"exit_code": 0, "stdout": "hello"}
+}

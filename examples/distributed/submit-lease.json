@@ -1,0 +1,6 @@
+{
+  "payload": "build-stage:compile",
+  "required_platform": "linux/amd64",
+  "required_capabilities": ["kvm"],
+  "preferred_content": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

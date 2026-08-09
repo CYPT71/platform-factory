@@ -1,0 +1,27 @@
+{
+  "name": "invalid-unknown-capability",
+  "pipeline": {
+    "api_version": "secure-oci.dev/v1alpha1",
+    "name": "needs-magic",
+    "required_capabilities": [
+      "time-travel"
+    ],
+    "stages": [
+      {
+        "id": "build",
+        "command": {
+          "executable": "/usr/bin/true"
+        }
+      }
+    ]
+  },
+  "expect": {
+    "valid": false,
+    "issues": [
+      {
+        "path": "required_capabilities[0]",
+        "message": "unknown capability time-travel"
+      }
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "api_version": "secure-oci.dev/policy/v1",
+  "require_pins": true,
+  "require_hardening": true,
+  "require_sbom": true,
+  "require_provenance": true,
+  "require_signature": true,
+  "require_reproducible": true
+}

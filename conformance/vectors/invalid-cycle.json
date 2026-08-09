@@ -1,0 +1,36 @@
+{
+  "name": "invalid-cycle",
+  "pipeline": {
+    "api_version": "secure-oci.dev/v1alpha1",
+    "name": "cyclic",
+    "stages": [
+      {
+        "id": "a",
+        "depends_on": [
+          "b"
+        ],
+        "command": {
+          "executable": "/usr/bin/true"
+        }
+      },
+      {
+        "id": "b",
+        "depends_on": [
+          "a"
+        ],
+        "command": {
+          "executable": "/usr/bin/true"
+        }
+      }
+    ]
+  },
+  "expect": {
+    "valid": false,
+    "issues": [
+      {
+        "path": "stages",
+        "message": "dependency cycle contains a, b"
+      }
+    ]
+  }
+}

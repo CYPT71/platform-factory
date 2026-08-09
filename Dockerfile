@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
+# Build context must contain an OCI layout at ./oci-image (for example, a
+# downloaded secure-oci-layout Actions artifact).
+FROM --platform=$BUILDPLATFORM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS verify
+WORKDIR /layout
+RUN apk add --no-cache python3
+COPY scripts/ci/verify-oci-layout.py /usr/local/bin/verify-oci-layout
+COPY oci-image/ ./
+# Run the same strict verifier used by CI before any layer is extracted. It
+# validates descriptor digests and sizes, diff_ids, the complete blob set, and
+# rejects absolute/traversal paths, links, devices, and FIFOs.
+RUN python3 /usr/local/bin/verify-oci-layout /layout
+
+FROM --platform=$BUILDPLATFORM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS unpack
+RUN apk add --no-cache jq tar gzip
+COPY --from=verify /layout/blobs/sha256 /blobs
+COPY --from=verify /layout/index.json /index.json
+# Extracts the sole layer and symlinks /entrypoint to whatever path the
+# config actually declares - Dockerfile can't compute a static ENTRYPOINT
+# from build output, so this avoids hardcoding /app/service.
+RUN manifest=$(jq -er '.manifests | if length == 1 then .[0].digest else error("expected one manifest") end | select(startswith("sha256:")) | ltrimstr("sha256:")' /index.json) && \
+    test -f "/blobs/$manifest" && \
+    config=$(jq -er '.config.digest | select(startswith("sha256:")) | ltrimstr("sha256:")' "/blobs/$manifest") && \
+    test -f "/blobs/$config" && \
+    entrypoint=$(jq -er '.config.Entrypoint | if length == 1 then .[0] else error("expected one entrypoint") end' "/blobs/$config") && \
+    layer=$(jq -er '.layers | if length == 1 then .[0].digest else error("expected one layer") end | select(startswith("sha256:")) | ltrimstr("sha256:")' "/blobs/$manifest") && \
+    test -f "/blobs/$layer" && \
+    mkdir /rootfs && gzip -dc "/blobs/$layer" | tar -x --no-same-owner --no-same-permissions -C /rootfs && \
+    ln -s "$entrypoint" /rootfs/entrypoint
+
+FROM scratch
+COPY --from=unpack /rootfs/ /
+USER 65532:65532
+ENTRYPOINT ["/entrypoint"]

@@ -1,0 +1,9 @@
+{
+  "name": "network-full-rejected",
+  "stage": {
+    "id": "network-full-rejected",
+    "command": {"executable": "/bin/sh", "args": ["-c", "printf reached"]},
+    "network": "full"
+  },
+  "expect": {"exit_code": -1, "stdout": ""}
+}

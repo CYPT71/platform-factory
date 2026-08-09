@@ -1,0 +1,57 @@
+name: system-library-scan
+
+on:
+  push:
+  pull_request:
+  schedule: [{cron: '47 4 * * 2'}]
+
+permissions: {contents: read}
+
+jobs:
+  scan-native-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Assemble a provenance-aware dynamic root filesystem
+        run: |
+          set -euo pipefail
+          mkdir -p system-rootfs/var/lib/dpkg
+          for package in coreutils libc6; do
+            while IFS= read -r file; do
+              if test -f "$file" || test -L "$file"; then
+                cp --parents --no-dereference "$file" system-rootfs
+              fi
+            done < <(dpkg-query -L "$package")
+          done
+          dpkg-query -W -f='${binary:Package}\n' coreutils libc6 \
+            | sort -u > system-packages.txt
+          while IFS= read -r package; do
+            dpkg-query -W -f='Package: ${binary:Package}\nStatus: install ok installed\nArchitecture: ${Architecture}\nVersion: ${Version}\n\n' \
+              "$package"
+          done < system-packages.txt > system-rootfs/var/lib/dpkg/status
+          test -s system-rootfs/var/lib/dpkg/status
+          find system-rootfs -type f ! -path '*/var/lib/dpkg/status' -print0 \
+            | sort -z | xargs -0 sha256sum > system-library-checksums.sha256
+      - name: Scan native system libraries with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: rootfs
+          scan-ref: system-rootfs
+          scanners: vuln
+          format: json
+          output: system-library-vulnerabilities.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: system-library-scan-evidence
+          path: |
+            system-packages.txt
+            system-library-checksums.sha256
+            system-library-vulnerabilities.json
+            system-rootfs/var/lib/dpkg/status
+          if-no-files-found: warn
+          retention-days: 30

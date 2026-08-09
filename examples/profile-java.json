@@ -1,0 +1,11 @@
+{
+  "entrypoint": "/usr/bin/java",
+  "profile": "java",
+  "args": ["-jar", "/app/service.jar"],
+  "working_dir": "/app",
+  "env": {"JAVA_TOOL_OPTIONS": "-Djava.io.tmpdir=/tmp"},
+  "user": "65532:65532",
+  "home": "/home/nonroot",
+  "identity_files": true,
+  "writable_paths": ["/tmp"]
+}

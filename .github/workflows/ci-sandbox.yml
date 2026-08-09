@@ -1,0 +1,72 @@
+name: sandbox
+on:
+  push:
+  pull_request:
+  schedule: [{cron: '53 4 * * 1'}]
+permissions: {contents: read}
+jobs:
+  sandbox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Report the host sandbox capability
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 restricts unprivileged user namespaces via
+          # AppArmor, so the sandbox may be unavailable to the unprivileged
+          # runner; make the state explicit for the log. The sudo run below
+          # exercises the sandbox regardless of that restriction.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Exercise the namespace sandbox and cgroup limits as root
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          # Building as the normal user, then running the test binary under
+          # a delegated systemd scope as root, gives the sandbox tests the
+          # namespace, mount, pivot_root and cgroup-v2 delegation they need
+          # on a GitHub runner. The same code paths run whether the caller
+          # is root or an unprivileged user in an unrestricted namespace.
+          go test -c ./internal/executor -o /tmp/executor.test
+          sudo systemd-run --scope --property=Delegate=yes \
+            env "PATH=$PATH" GOTOOLCHAIN=local \
+            /tmp/executor.test \
+            -test.run 'TestSandbox|TestPlainExecutorRefuses|TestProbe' \
+            -test.count=1 -test.v
+      - name: Confirm the sandbox skips cleanly when unavailable
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          # As an unprivileged user under the default AppArmor restriction,
+          # the sandbox probe fails closed and the tests skip rather than
+          # fail. This asserts that go test ./... stays green on a
+          # restricted host.
+          go test ./internal/executor -run 'TestSandbox|TestPlainExecutorRefuses|TestProbe' -count=1
+      - name: Exercise the VMM host sandbox primitives as root
+        # internal/hypervisor/sandbox backs the VMM host process
+        # (internal/ociruntime/supervisor_linux.go's __serve child):
+        # PR_SET_NO_NEW_PRIVS, cgroup v2 delegation, and capability
+        # bounding-set drop. Same privileged-scope technique as the
+        # executor step above, for the same reason (real unshare/cgroup
+        # delegation/PR_CAPBSET_DROP needs CAP_SYS_ADMIN/CAP_SETPCAP or a
+        # delegated cgroup that a plain unprivileged runner does not have).
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test -c ./internal/hypervisor/sandbox -o /tmp/sandbox.test
+          sudo systemd-run --scope --property=Delegate=yes \
+            env "PATH=$PATH" GOTOOLCHAIN=local \
+            /tmp/sandbox.test -test.count=1 -test.v
+      - name: Confirm the VMM host sandbox skips cleanly when unavailable
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          # Mirrors the executor confirmation above: the real,
+          # privilege-gated tests in sandbox_linux_test.go must skip
+          # rather than fail here, so go test ./... stays green on a
+          # restricted host.
+          go test ./internal/hypervisor/sandbox -count=1

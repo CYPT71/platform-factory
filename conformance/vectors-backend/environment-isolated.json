@@ -1,0 +1,8 @@
+{
+  "name": "environment-isolated",
+  "stage": {
+    "id": "environment-isolated",
+    "command": {"executable": "/bin/sh", "args": ["-c", "printf \"[$HOME]\""]}
+  },
+  "expect": {"exit_code": 0, "stdout": "[]"}
+}

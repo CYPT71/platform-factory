@@ -1,0 +1,114 @@
+name: fuzz-validation
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule: [{cron: '41 4 * * 6'}]
+permissions: {contents: read}
+jobs:
+  bounded-fuzzing:
+    runs-on: ubuntu-24.04
+    # push/pull_request stay bounded to a quick 45s-per-target smoke
+    # check; the weekly schedule trigger runs the same 18 targets for
+    # 10m each (~3h total) for real long-duration coverage per target -
+    # closing the "fuzzing longue durée" roadmap item without slowing
+    # down every PR to match. FUZZTIME below is read by every step.
+    timeout-minutes: ${{ github.event_name == 'schedule' && 240 || 30 }}
+    env:
+      FUZZTIME: ${{ github.event_name == 'schedule' && '10m' || '45s' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Fuzz label parser boundaries
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/oci -fuzz=FuzzLabelsFromPairs -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz entrypoint validation boundaries
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/oci -fuzz=FuzzEntrypointValidation -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz the example application HTTP boundary
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./cmd/example-service \
+            -run='^$' \
+            -fuzz=FuzzHTTPHandler \
+            -fuzztime="$FUZZTIME" \
+            -timeout=15m
+      - name: Fuzz OCI layout index parsing
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/layout -fuzz=FuzzVerifyIndex -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz native publication policy evaluation
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/policy -fuzz=FuzzEvaluate -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz DSSE attestation envelope verification
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/attestation -fuzz=FuzzVerify -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz plugin manifest validation
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/plugin -fuzz=FuzzManifestValidate -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz OCI manifest and image config parsing
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/layout -fuzz=FuzzDecodeManifest -fuzztime="$FUZZTIME" -timeout=15m
+          go test ./internal/layout -fuzz=FuzzDecodeConfig -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz pipeline document parsing
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/pipeline -fuzz=FuzzDecode -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz SBOM document decoding
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/sbom -fuzz=FuzzDocumentDecode -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz project config loading
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/project -fuzz=FuzzLoad -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz registry response parsing
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/registry -fuzz=FuzzGetManifestResponse -fuzztime="$FUZZTIME" -timeout=15m
+          go test ./internal/registry -fuzz=FuzzGetBlobResponse -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz OCI layer gzip/tar parsing
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/layout -fuzz=FuzzVerifyLayer -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz plugin RPC wire framing
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./sdk/plugin -fuzz=FuzzReadMessage -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz microVM port-forward parsing
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./sdk/microvm -fuzz=FuzzParseForward -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz pipeline result journal decoding
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./internal/provenance -fuzz=FuzzFromJournal -fuzztime="$FUZZTIME" -timeout=15m
+      - name: Fuzz control-plane request decoding
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./cmd/platform-factory-control-plane -fuzz=FuzzDecodeRequest -fuzztime="$FUZZTIME" -timeout=15m

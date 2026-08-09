@@ -1,0 +1,10 @@
+{
+  "api_version": "secure-oci.dev/v1alpha1",
+  "name": "minimal",
+  "stages": [
+    {
+      "id": "build",
+      "command": {"executable": "/bin/true"}
+    }
+  ]
+}

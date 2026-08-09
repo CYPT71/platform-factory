@@ -1,0 +1,228 @@
+name: ci-quality
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '13 3 * * 1'
+
+permissions: {contents: read}
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Record hermetic toolchain identity
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go version
+          go env GOROOT GOVERSION GOOS GOARCH GOTOOLCHAIN
+          test "$(go env GOTOOLCHAIN)" = local
+      - name: Format, vet, and test
+        if: matrix.target == 'amd64'
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          test -z "$(find api cmd conformance examples internal sdk tests -type f -name '*.go' -print0 | xargs -0 gofmt -l)"
+          go vet ./...
+          go test ./...
+          # cmd/platform-factory-installer is its own Go module (go.work), so the
+          # root-module ./... above does not reach it - vet/test it
+          # explicitly, the same way plugins/containerd and plugins/kubevirt
+          # already need their own step elsewhere for the same reason.
+          (cd cmd/platform-factory-installer && GOWORK=off go vet ./... && GOWORK=off go test ./...)
+      - name: Execute a pipeline end to end through the shipped CLI
+        if: matrix.target == 'amd64'
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go build -o /tmp/platform-factory ./cmd/platform-factory
+          work=$(mktemp -d)
+          cat > /tmp/pipeline.json <<'JSON'
+          {
+            "api_version": "secure-oci.dev/v1alpha1",
+            "name": "ci-pipeline",
+            "required_capabilities": ["cache", "parallel-stages"],
+            "stages": [
+              {"id": "resolve", "command": {"executable": "/bin/true"}},
+              {"id": "compile", "depends_on": ["resolve"], "command": {"executable": "/bin/sh", "args": ["-c", "printf built > out.bin"]}, "outputs": [{"name": "bin", "path": "/out.bin"}]},
+              {"id": "test", "depends_on": ["resolve"], "command": {"executable": "/bin/true"}},
+              {"id": "package", "depends_on": ["compile", "test"], "command": {"executable": "/bin/true"}, "inputs": [{"stage": "compile", "name": "bin", "target": "/in/bin"}]}
+            ]
+          }
+          JSON
+          /tmp/platform-factory pipeline plan /tmp/pipeline.json
+          /tmp/platform-factory pipeline run --sandbox off --workdir "$work" /tmp/pipeline.json
+          python3 -c "import json; j=json.load(open('$work/journal.json')); assert j['api_version']=='platform-factory.dev/journal/v1', j; assert all(s['state']=='succeeded' for s in j['stages']), j"
+          /tmp/platform-factory pipeline run --sandbox off --workdir "$work" /tmp/pipeline.json
+          python3 -c "import json; j=json.load(open('$work/journal.json')); assert any(s.get('cache')=='hit' for s in j['stages']), j"
+      - name: Execute every portable user example from its public entrypoint
+        if: matrix.target == 'amd64'
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          examples/run-all.sh
+      - name: Run the public conformance suite from outside the source tree
+        if: matrix.target == 'amd64'
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go build -o /tmp/platform-factory-conformance ./cmd/platform-factory-conformance
+          go build -o /tmp/platform-factory-plugin-demo ./cmd/platform-factory-plugin-demo
+          (cd /tmp && ./platform-factory-conformance vectors)
+          (cd /tmp && ./platform-factory-conformance plugin /tmp/platform-factory-plugin-demo)
+          ./examples/sdk/plugin-python/plugin.py </dev/null
+          ./examples/sdk/plugin-javascript/plugin.js </dev/null
+          /tmp/platform-factory-conformance plugin ./examples/sdk/plugin-python/plugin.py
+          /tmp/platform-factory-conformance plugin ./examples/sdk/plugin-javascript/plugin.js
+          (cd examples/sdk/plugin-typescript && npm install --no-audit --no-fund && npm run build)
+          /tmp/platform-factory-conformance plugin ./examples/sdk/plugin-typescript/plugin.js
+          dotnet publish examples/sdk/plugin-csharp/SecureOciPlugin.csproj \
+            --configuration Release --output /tmp/secure-oci-plugin-csharp
+          /tmp/platform-factory-conformance plugin \
+            /tmp/secure-oci-plugin-csharp/SecureOciPlugin
+          (cd /tmp && ./platform-factory-conformance backend)
+      - name: Run explicit CLI, OCI, and mTLS regression tests
+        if: matrix.target == 'amd64'
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test ./cmd/oci-builder -run 'TestRunWithoutArgumentsShowsUsage|TestRunArgumentErrors|TestRunBuildsLayout'
+          go test ./internal/oci -run 'TestBuildWritesValidLayout|TestBuildRejectsUnsafeInputs|TestBuildErrors|TestNormalizeValidation|TestWriteLayoutErrors'
+          go test ./internal/mtls -count=1
+      - name: Build local Linux and Windows command environments
+        if: matrix.target == 'amd64'
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          bash -n scripts/local/bootstrap.sh
+          bootstrap_root=$(mktemp -d)
+          scripts/local/bootstrap.sh --target linux/amd64 --env "$bootstrap_root/linux"
+          scripts/local/bootstrap.sh --target windows/amd64 --env "$bootstrap_root/windows"
+          test -x "$bootstrap_root/linux/bin/platform-factory"
+          test -x "$bootstrap_root/linux/bin/oci-builder"
+          test -x "$bootstrap_root/linux/bin/example-service"
+          test -x "$bootstrap_root/linux/bin/microvm-init"
+          test -f "$bootstrap_root/windows/bin/platform-factory.exe"
+          test -f "$bootstrap_root/windows/bin/oci-builder.exe"
+          test -f "$bootstrap_root/windows/bin/example-service.exe"
+          test -f "$bootstrap_root/windows/bin/microvm-init.exe"
+          bash -c 'source "$1/activate"; command -v platform-factory; deactivate_platform_factory' \
+            bash "$bootstrap_root/linux"
+          pwsh -NoProfile -Command \
+            '$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile("scripts/local/bootstrap.ps1",[ref]$tokens,[ref]$errors) | Out-Null; if ($errors.Count) { exit 1 }'
+      - name: Smoke-test both interactive installers non-interactively
+        if: matrix.target == 'amd64'
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          bash -n scripts/local/install.sh
+          bash_prefix=$(mktemp -d)
+          scripts/local/install.sh --components builder --prefix "$bash_prefix" --yes
+          test -x "$bash_prefix/platform-factory"
+          test -x "$bash_prefix/oci-builder"
+          test ! -e "$bash_prefix/microvm-init"
+          "$bash_prefix/platform-factory" version
+
+          go_prefix=$(mktemp -d)
+          go run ./cmd/platform-factory-installer -components microvm -prefix "$go_prefix" -yes
+          test -x "$go_prefix/platform-factory"
+          test -x "$go_prefix/microvm-init"
+          test -x "$go_prefix/microvm-initramfs"
+          test ! -e "$go_prefix/oci-builder"
+          "$go_prefix/platform-factory" version
+
+          go run ./cmd/platform-factory-installer -list
+          ! scripts/local/install.sh --components does-not-exist --yes --prefix "$bash_prefix" 2>/dev/null
+      - name: Race and coverage gate
+        if: matrix.target == 'amd64'
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test -race ./...
+          (cd cmd/platform-factory-installer && GOWORK=off go test -race ./...)
+          # -coverpkg=./... attributes coverage across package boundaries:
+          # tests/conformance and tests/examples exercise conformance and
+          # policy code as external, black-box consumers (see Testing and
+          # CI/CD in README.md), and without it that execution is invisible
+          # to this gate - go test only self-attributes coverage to the
+          # package under test by default.
+          go test ./... -coverpkg=./... -coverprofile=coverage.out
+          # cmd/platform-factory-installer is its own Go module (go.work) since
+          # its extraction, so the root-module run above cannot attribute
+          # its coverage - generate its profile separately and append it
+          # (skipping the repeated `mode:` header) so components.go's tests
+          # keep counting toward the gate below, matching this file's own
+          # documented intent for this package (see the exclusion comment
+          # further down, which only ever meant to exclude main.go, not the
+          # whole package).
+          (cd cmd/platform-factory-installer && GOWORK=off go test ./... -coverpkg=./... -coverprofile=coverage-installer.out)
+          tail -n +2 cmd/platform-factory-installer/coverage-installer.out >> coverage.out
+          # The sandbox and cgroup re-exec helpers run in a child process
+          # that syscall.Exec's the stage target before Go can flush
+          # coverage counters, so `go test -cover` structurally cannot
+          # observe them. They are exercised by the ci-sandbox integration
+          # job instead. The raw KVM VM/vCPU primitive and the Linux boot
+          # runner built on it are likewise exercised against a real
+          # /dev/kvm and a project-built kernel by ci-microvm, because unit
+          # runners do not consistently expose the device (and never carry
+          # a bootable kernel image). The OCI runtime facade, persistent
+          # lifecycle and confined rootfs snapshot are exercised together by
+          # runtime-integration because their observable contract spans
+          # separate runc-style processes. Exclude these integration-only
+          # paths so the gate measures code unit coverage can actually see.
+          # Deprecated API forwarding shims and user-facing example binaries
+          # contain no independent product behavior; their compatibility and
+          # compilation are tested directly, so exclude their forwarding
+          # statements from the implementation coverage denominator.
+          # cmd/platform-factory-installer/main.go is the exec/TUI glue (shelling
+          # out to `go build`, driving the bubbletea view) that
+          # main_test.go structurally cannot exercise; its component
+          # catalog and selection logic live in components.go instead,
+          # covered directly, and the glue itself is exercised end to end
+          # by the installer smoke-test step above.
+          grep -v -E '(^|/)(api/(microvm|pipeline|plugin|vmm)|examples/sdk)/|internal/executor/(sandbox_linux|cgroup_linux|sandboxed)\.go:|internal/hypervisor/kvm/(kvm_vm_linux_amd64|kvm_run_linux_amd64|kvm_linux_boot_amd64)\.go:|internal/ociruntime/(runtime|rootfs_linux|supervisor_linux)\.go:|cmd/platform-factory-runtime/main\.go:|cmd/platform-factory-installer/main\.go:|internal/directboot/run_(linux_amd64|darwin|other)\.go:' coverage.out > coverage.filtered
+          go tool cover -func=coverage.filtered | tee coverage.txt
+          coverage=$(awk '/^total:/ {sub(/%/, "", $3); print $3}' coverage.txt)
+          awk -v coverage="$coverage" 'BEGIN {exit !(coverage >= 87)}'
+      - name: Cross-compile the selected supported target
+        env: {CGO_ENABLED: '0', GOOS: linux, GOARCH: '${{ matrix.target }}', GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          output="oci-builder-${{ matrix.target }}"
+          go build -trimpath -buildvcs=true -o "$output" ./cmd/oci-builder
+          scripts/ci/verify-elf.sh "$output" "${{ matrix.target }}"
+      - name: Build, execute, and validate the oci-builder binary against itself
+        if: matrix.target == 'amd64'
+        run: |
+          set -euo pipefail
+          ./oci-builder-amd64 -binary ./oci-builder-amd64 -output ./oci-image -arch amd64
+          python3 scripts/ci/verify-oci-layout.py oci-image
+      - name: Re-run OCI structural and hostile-layout regressions with a reproducible timestamp
+        if: matrix.target == 'amd64'
+        env: {CGO_ENABLED: '0', GOOS: linux, GOARCH: amd64, GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go build -trimpath -buildvcs=true -o oci-builder-repro ./cmd/oci-builder
+          ./oci-builder-repro -binary oci-builder-repro -output oci-image-repro -arch amd64 -created 1970-01-01T00:00:00Z
+          python3 scripts/ci/verify-oci-layout.py oci-image-repro
+          python3 scripts/ci/negative-oci-layout.py scripts/ci/verify-oci-layout.py oci-image-repro
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && matrix.target == 'amd64'
+        with:
+          name: regression-suite-evidence
+          path: |
+            coverage.out
+            coverage.txt
+          if-no-files-found: warn
+          retention-days: 14

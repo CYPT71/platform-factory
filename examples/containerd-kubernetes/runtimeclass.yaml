@@ -1,0 +1,22 @@
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: platform-factory
+handler: platform-factory
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: platform-factory-example
+spec:
+  runtimeClassName: platform-factory
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: ghcr.io/replace-me/platform-factory@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true

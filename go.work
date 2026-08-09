@@ -1,0 +1,15 @@
+go 1.25.12
+
+use (
+	.
+	./cmd/platform-factory-installer
+	./plugins/containerd
+	./plugins/kubevirt
+	./plugins/lang-dotnet
+	./plugins/lang-java
+	./plugins/lang-node
+	./plugins/lang-php
+	./plugins/lang-python
+	./plugins/lang-ruby
+	./plugins/lang-rust
+)

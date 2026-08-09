@@ -1,0 +1,9 @@
+{
+  "backend": "kubevirt",
+  "name": "example-service",
+  "namespace": "default",
+  "bootImage": "ghcr.io/example/secure-oci-boot@sha256:REPLACE_WITH_64_HEX_DIGEST",
+  "memoryMiB": 128,
+  "vcpus": 1,
+  "port": 8080
+}

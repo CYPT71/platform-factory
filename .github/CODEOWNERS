@@ -1,0 +1,14 @@
+# Changes to CI, OCI validation, and OCI implementation require platform review.
+/.github/workflows/ @CYPT71
+/.github/CODEOWNERS @CYPT71
+/.github/dependabot.yml @CYPT71
+/.github/license-policy.json @CYPT71
+/scripts/ci/ @CYPT71
+/scripts/local/ @CYPT71
+/internal/oci/ @CYPT71
+/internal/detect/ @CYPT71
+/cmd/oci-builder/ @CYPT71
+/cmd/secure-oci/ @CYPT71
+/Dockerfile @CYPT71
+/SECURITY.md @CYPT71
+/COMPLIANCE.md @CYPT71

@@ -1,0 +1,205 @@
+name: runtime-integration
+
+on: [push, pull_request]
+
+permissions: {contents: read}
+
+jobs:
+  docker-and-kubernetes-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version: '1.25.12', cache: true}
+      - name: Generate an HTTP API and build its OCI layout
+        env: {GOTOOLCHAIN: local, CGO_ENABLED: '0', GOOS: linux, GOARCH: amd64}
+        run: |
+          set -euo pipefail
+          workdir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/oci-runtime.XXXXXX")
+          trap 'rm -rf "$workdir"' EXIT
+          mkdir -p "$workdir/api"
+          cat > "$workdir/api/main.go" <<'EOF'
+          package main
+
+          import (
+              "context"
+              "fmt"
+              "net/http"
+              "os"
+              "os/signal"
+              "syscall"
+              "time"
+          )
+
+          func main() {
+              mux := http.NewServeMux()
+              mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+                  _, _ = w.Write([]byte("PONG\n"))
+              })
+              mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+                  _, _ = w.Write([]byte("HELLO WORLD\n"))
+              })
+              server := &http.Server{Addr: ":8080", Handler: mux}
+              stopped := make(chan os.Signal, 1)
+              signal.Notify(stopped, syscall.SIGTERM, syscall.SIGINT)
+              errors := make(chan error, 1)
+              go func() { errors <- server.ListenAndServe() }()
+              select {
+              case received := <-stopped:
+                  ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+                  defer cancel()
+                  if err := server.Shutdown(ctx); err != nil {
+                      panic(err)
+                  }
+                  fmt.Printf("GRACEFUL_SHUTDOWN_OK signal=%s\n", received)
+              case err := <-errors:
+                  if err != nil && err != http.ErrServerClosed {
+                      panic(err)
+                  }
+              }
+          }
+          EOF
+          go build -trimpath -buildvcs=true -o "$workdir/oci-builder" ./cmd/oci-builder
+          go build -trimpath -o "$workdir/service" "$workdir/api/main.go"
+          "$workdir/oci-builder" -binary "$workdir/service" -output oci-image -arch amd64 \
+            -created 1970-01-01T00:00:00Z
+          python3 scripts/ci/verify-oci-layout.py oci-image
+      - name: Run generated HTTP API through the Docker image
+        run: |
+          set -euo pipefail
+          context=$(mktemp -d "${RUNNER_TEMP:-/tmp}/oci-docker-context.XXXXXX")
+          container=''
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true; rm -rf "$context"' EXIT
+          cp Dockerfile "$context/Dockerfile"
+          mkdir -p "$context/scripts/ci"
+          cp scripts/ci/verify-oci-layout.py "$context/scripts/ci/verify-oci-layout.py"
+          cp -a oci-image "$context/oci-image"
+          docker build --pull=false --tag platform-factory:functional "$context"
+          container=$(docker run --detach --read-only --cap-drop=ALL --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m --publish 127.0.0.1::8080 \
+            platform-factory:functional)
+          port=$(docker port "$container" 8080/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')
+          test -n "$port"
+          ready=false
+          for attempt in $(seq 1 20); do
+            if test "$(curl --fail --silent --show-error "http://127.0.0.1:$port/healthz" 2>/dev/null || true)" = PONG; then
+              ready=true
+              break
+            fi
+            sleep 0.25
+          done
+          test "$ready" = true
+          response=$(curl --fail --silent --show-error "http://127.0.0.1:$port/")
+          test "$response" = 'HELLO WORLD'
+          printf 'HTTP_API_VALIDATION_OK port=%s response=%s\n' "$port" "$response"
+          docker kill --signal=TERM "$container"
+          status=$(docker wait "$container")
+          test "$status" -eq 0
+          docker logs "$container" 2>&1 | tee sigterm.log
+          grep -q 'GRACEFUL_SHUTDOWN_OK signal=terminated' sigterm.log
+          docker rm "$container"
+          container=''
+
+          container=$(docker run --detach --init --read-only --cap-drop=ALL \
+            --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --publish 127.0.0.1::8080 \
+            platform-factory:functional)
+          port=$(docker port "$container" 8080/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')
+          ready=false
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 0.25
+          done
+          test "$ready" = true
+          docker kill --signal=INT "$container"
+          status=$(docker wait "$container")
+          test "$status" -eq 0
+          docker logs "$container" 2>&1 | tee sigint.log
+          grep -q 'GRACEFUL_SHUTDOWN_OK signal=interrupt' sigint.log
+          docker rm "$container"
+          container=''
+          printf 'SIGNAL_VALIDATION_OK sigterm=0 sigint=0 init=docker\n'
+
+          container=$(docker run --detach --read-only --cap-drop=ALL \
+            --security-opt no-new-privileges --network=none \
+            --cpus=0.25 --memory=64m --pids-limit=64 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            platform-factory:functional)
+          sleep 1
+          test "$(docker inspect --format='{{.State.Running}}' "$container")" = true
+          docker inspect "$container" > runtime-limits.json
+          python3 -c 'import json; d=json.load(open("runtime-limits.json"))[0]; h=d["HostConfig"]; assert h["NetworkMode"] == "none"; assert h["NanoCpus"] == 250000000; assert h["Memory"] == 67108864; assert h["PidsLimit"] == 64; assert h["ReadonlyRootfs"] is True; assert h["CapDrop"] == ["ALL"]; assert "no-new-privileges" in h["SecurityOpt"]'
+          docker kill --signal=TERM "$container"
+          status=$(docker wait "$container")
+          test "$status" -eq 0
+          docker logs "$container" 2>&1 | tee constrained-runtime.log
+          grep -q 'GRACEFUL_SHUTDOWN_OK signal=terminated' constrained-runtime.log
+          docker rm "$container"
+          container=''
+          printf 'CONSTRAINED_RUNTIME_OK network=none cpus=0.25 memory=64m pids=64\n'
+      - name: Validate the Kubernetes restricted-runtime manifest contract
+        run: |
+          set -euo pipefail
+          command -v kubectl
+          cat > deployment.json <<'EOF'
+          {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": "platform-factory-functional", "labels": {"app": "platform-factory"}},
+            "spec": {
+              "replicas": 1,
+              "selector": {"matchLabels": {"app": "platform-factory"}},
+              "template": {"metadata": {"labels": {"app": "platform-factory"}}, "spec": {
+                "automountServiceAccountToken": false,
+                "securityContext": {"seccompProfile": {"type": "RuntimeDefault"}},
+                "containers": [{"name": "service", "image": "platform-factory:functional", "imagePullPolicy": "Never",
+                  "securityContext": {"runAsNonRoot": true, "runAsUser": 65532, "allowPrivilegeEscalation": false,
+                    "readOnlyRootFilesystem": true, "capabilities": {"drop": ["ALL"]}},
+                  "resources": {"requests": {"cpu": "10m", "memory": "32Mi"}, "limits": {"cpu": "250m", "memory": "128Mi"}}
+                }]
+              }}
+            }
+          }
+          EOF
+          # `kubectl create -f` still performs API discovery, even with
+          # --dry-run=client and --validate=false.  Hosted runners do not have
+          # a Kubernetes API server, so validate the portable manifest
+          # contract locally instead of making a localhost API request.
+          kubectl version --client --output=yaml > kubectl-client-version.yaml
+          python3 -c 'import json; d=json.load(open("deployment.json")); p=d["spec"]["template"]["spec"]; c=p["containers"][0]; assert d["apiVersion"] == "apps/v1" and d["kind"] == "Deployment"; assert p["automountServiceAccountToken"] is False; assert p["securityContext"]["seccompProfile"]["type"] == "RuntimeDefault"; assert c["imagePullPolicy"] == "Never"; s=c["securityContext"]; assert s["runAsNonRoot"] and s["runAsUser"] == 65532 and not s["allowPrivilegeEscalation"] and s["readOnlyRootFilesystem"] and s["capabilities"]["drop"] == ["ALL"]; assert c["resources"]["requests"] and c["resources"]["limits"]'
+      - name: Prove AppArmor enforcement inside a container
+        run: |
+          set -euo pipefail
+          cat /sys/module/apparmor/parameters/enabled | tee apparmor-enabled.txt
+          grep -qx Y apparmor-enabled.txt
+          container=$(docker run --detach \
+            alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc \
+            sleep 30)
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker inspect --format='{{.AppArmorProfile}}' "$container" \
+            | tee apparmor-profile.txt
+          grep -qx docker-default apparmor-profile.txt
+          docker exec "$container" cat /proc/self/attr/current \
+            | tee apparmor-enforcement.txt
+          grep -Fqx 'docker-default (enforce)' apparmor-enforcement.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: runtime-contract-evidence
+          path: |
+            sigterm.log
+            sigint.log
+            constrained-runtime.log
+            runtime-limits.json
+            apparmor-enabled.txt
+            apparmor-profile.txt
+            apparmor-enforcement.txt
+            deployment.json
+            kubectl-client-version.yaml
+          if-no-files-found: warn
+          retention-days: 14

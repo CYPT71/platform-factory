@@ -1,0 +1,93 @@
+{
+  "name": "parallel-diamond",
+  "pipeline": {
+    "api_version": "secure-oci.dev/v1alpha1",
+    "name": "diamond",
+    "required_capabilities": [
+      "parallel-stages",
+      "cache",
+      "artifacts"
+    ],
+    "stages": [
+      {
+        "id": "resolve",
+        "command": {
+          "executable": "/usr/bin/true"
+        }
+      },
+      {
+        "id": "compile",
+        "depends_on": [
+          "resolve"
+        ],
+        "command": {
+          "executable": "/usr/bin/cc",
+          "args": [
+            "-o",
+            "/out/bin"
+          ]
+        },
+        "outputs": [
+          {
+            "name": "bin",
+            "path": "/out/bin"
+          }
+        ]
+      },
+      {
+        "id": "test",
+        "depends_on": [
+          "resolve"
+        ],
+        "command": {
+          "executable": "/usr/bin/true"
+        }
+      },
+      {
+        "id": "package",
+        "depends_on": [
+          "compile",
+          "test"
+        ],
+        "command": {
+          "executable": "/usr/bin/tar"
+        },
+        "inputs": [
+          {
+            "stage": "compile",
+            "name": "bin"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "image",
+            "path": "/out/image"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "image",
+        "stage": "package",
+        "artifact": "image"
+      }
+    ]
+  },
+  "expect": {
+    "valid": true,
+    "fingerprint": "sha256:a4707252ae1decc5ee28f70c9f49518b941815164e314bde49c2ddb28152cb41",
+    "order": [
+      "resolve",
+      "compile",
+      "test",
+      "package"
+    ],
+    "stage_keys": {
+      "compile": "sha256:8897a36caf6e520663ea32d649a2cb17388d0e84e1485a7096bcbbe0e55e5740",
+      "package": "sha256:117b7530b442ac0b2e69214d7ecf98f07b5f28de5f99f43f07a86dac7f322918",
+      "resolve": "sha256:062e398dd6948e87e0f77a8fb5b4eacb9819657adaa017b3615ef46d7a0cdaa2",
+      "test": "sha256:062e398dd6948e87e0f77a8fb5b4eacb9819657adaa017b3615ef46d7a0cdaa2"
+    }
+  }
+}

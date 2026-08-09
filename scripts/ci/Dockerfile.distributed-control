@@ -1,0 +1,4 @@
+FROM scratch
+COPY platform-factory-control-plane /platform-factory-control-plane
+COPY platform-factory-worker /platform-factory-worker
+USER 65532:65532

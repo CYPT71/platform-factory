@@ -1,0 +1,33 @@
+{
+  "entrypoint": "/app/service",
+  "profile": "static",
+  "args": ["serve"],
+  "working_dir": "/app",
+  "env": {
+    "LOG_LEVEL": "info"
+  },
+  "user": "65532:65532",
+  "home": "/home/nonroot",
+  "identity_files": true,
+  "system_files": {
+    "ca_certificates": "",
+    "timezone": "",
+    "locale_archive": ""
+  },
+  "ports": [
+    "8080/tcp"
+  ],
+  "volumes": [],
+  "writable_paths": [
+    "/tmp"
+  ],
+  "healthcheck": {
+    "command": [
+      "/app/service",
+      "health"
+    ],
+    "interval": "30s",
+    "timeout": "2s",
+    "retries": 3
+  }
+}

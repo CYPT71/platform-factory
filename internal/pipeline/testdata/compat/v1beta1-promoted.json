@@ -1,0 +1,45 @@
+{
+  "api_version": "secure-oci.dev/v1beta1",
+  "name": "example",
+  "inputs": [
+    {
+      "id": "source",
+      "kind": "directory",
+      "source": ".",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "stages": [
+    {
+      "id": "package",
+      "depends_on": ["compile", "assets"],
+      "command": {"executable": "/bin/package", "working_dir": "/workspace"},
+      "inputs": [{"stage": "compile", "name": "binary"}],
+      "outputs": [{"name": "image", "path": "/out/image"}],
+      "network": "none",
+      "sandbox": {"read_only_root": true, "non_root": true}
+    },
+    {
+      "id": "assets",
+      "command": {"executable": "/bin/assets"},
+      "outputs": [{"name": "static", "path": "/out/static"}]
+    },
+    {
+      "id": "compile",
+      "command": {"executable": "/bin/compiler", "args": ["build"]},
+      "base": {
+        "reference": "registry.example/toolchain",
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "platform": "linux/amd64"
+      },
+      "env": {"LANG": "C"},
+      "mounts": [{"source": "source", "target": "/workspace", "read_only": true}],
+      "secrets": [{"id": "registry-token", "target": "/run/secrets/token"}],
+      "caches": [{"id": "compiler", "target": "/cache"}],
+      "outputs": [{"name": "binary", "path": "/out/service"}],
+      "network": "resolve",
+      "resources": {"cpu_milli": 1000, "memory_mib": 1024, "pids": 128}
+    }
+  ],
+  "outputs": [{"name": "image", "stage": "package", "artifact": "image"}]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "minimal-valid",
+  "pipeline": {
+    "api_version": "secure-oci.dev/v1alpha1",
+    "name": "minimal",
+    "stages": [
+      {
+        "id": "build",
+        "command": {
+          "executable": "/usr/bin/true"
+        }
+      }
+    ]
+  },
+  "expect": {
+    "valid": true,
+    "fingerprint": "sha256:90f89d72ebca718e042549730ee8942364968d185f7e95adaeba85180797ade4",
+    "order": [
+      "build"
+    ],
+    "stage_keys": {
+      "build": "sha256:062e398dd6948e87e0f77a8fb5b4eacb9819657adaa017b3615ef46d7a0cdaa2"
+    }
+  }
+}
