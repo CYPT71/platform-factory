@@ -26,9 +26,27 @@ func TestExternalConsumerCanDecodeStablePipeline(t *testing.T) {
 	}
 }
 
+// TestExternalConsumerCanDecodeLegacyStablePipeline proves the pre-rebrand
+// secure-oci.dev/v1 wire identifier still decodes during the documented
+// compatibility overlap window (docs/api-compatibility.md) - the decoded
+// field holds exactly what was on the wire, not the current constant, so
+// this compares against v1.LegacyAPIVersion rather than v1.APIVersion.
+func TestExternalConsumerCanDecodeLegacyStablePipeline(t *testing.T) {
+	definition, _, err := pipeline.Decode(strings.NewReader(`{
+		"api_version":"` + pipeline.LegacyAPIVersion + `","name":"sdk-example",
+		"stages":[{"id":"build","command":{"executable":"/bin/build"}}]
+	}`))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if definition.APIVersion != pipeline.LegacyAPIVersion {
+		t.Fatalf("unexpected definition: %#v", definition)
+	}
+}
+
 func TestExternalConsumerGetsTypedValidationErrors(t *testing.T) {
 	_, _, err := pipeline.Decode(strings.NewReader(`{
-		"api_version":"platform-factory.dev/v1","name":"sdk-example",
+		"api_version":"secure-oci.dev/v1","name":"sdk-example",
 		"stages":[{"id":"build","depends_on":["missing"],"command":{"executable":"/bin/build"}}
 		]
 	}`))

@@ -322,16 +322,8 @@ func enterSandbox(payload sandboxHelperPayload) error {
 			return fmt.Errorf("bind mount %s: %w", mount.Target, err)
 		}
 		if mount.ReadOnly {
-			// The bind source may itself sit on a filesystem mounted
-			// nosuid/nodev/noexec by a more privileged namespace (e.g. the
-			// host's own bind mount of this workspace into a dev
-			// container). The kernel locks those flags onto the bind
-			// mount and rejects a remount that doesn't re-assert every
-			// one of them - including MS_REC, since the bind above was
-			// recursive - with EPERM, so query the flags it actually
-			// carries rather than assuming none apply.
 			if err := syscall.Mount("", target, "",
-				syscall.MS_REMOUNT|syscall.MS_BIND|syscall.MS_REC|syscall.MS_RDONLY|lockedMountFlags(target), ""); err != nil {
+				syscall.MS_REMOUNT|syscall.MS_BIND|syscall.MS_RDONLY, ""); err != nil {
 				return fmt.Errorf("remount %s read-only: %w", mount.Target, err)
 			}
 		}
@@ -372,9 +364,8 @@ func enterSandbox(payload sandboxHelperPayload) error {
 	}
 	_ = os.Remove("/.platform-factory-oldroot")
 	if payload.ReadOnlyRoot {
-		// Same locked-flags requirement as the input-mount remount above.
 		if err := syscall.Mount("", "/", "",
-			syscall.MS_REMOUNT|syscall.MS_BIND|syscall.MS_REC|syscall.MS_RDONLY|lockedMountFlags("/"), ""); err != nil {
+			syscall.MS_REMOUNT|syscall.MS_BIND|syscall.MS_RDONLY, ""); err != nil {
 			return fmt.Errorf("remount the root read-only: %w", err)
 		}
 	}
@@ -405,24 +396,6 @@ func enterSandbox(payload sandboxHelperPayload) error {
 		}
 	}
 	return nil
-}
-
-// lockedMountFlags reports which of MS_NOSUID, MS_NODEV and MS_NOEXEC are
-// currently set on the mount at path. The kernel locks these flags onto a
-// mount inherited (directly or via a recursive bind) from a more privileged
-// namespace, and an unprivileged remount that omits any locked flag is
-// rejected with EPERM rather than treated as "leave it as is" - so callers
-// remounting such a mount (e.g. to add MS_RDONLY) must OR this in. Statfs's
-// ST_NOSUID/ST_NODEV/ST_NOEXEC bits share the same numeric values as the
-// corresponding MS_* mount flags, so the field can be masked directly. A
-// failed lookup yields no extra flags, leaving the remount's error, if any,
-// to surface on its own.
-func lockedMountFlags(path string) uintptr {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
-		return 0
-	}
-	return uintptr(st.Flags) & (syscall.MS_NOSUID | syscall.MS_NODEV | syscall.MS_NOEXEC)
 }
 
 func installSandboxResolver(root string) error {

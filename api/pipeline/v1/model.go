@@ -1,4 +1,4 @@
-// Package v1 defines the stable platform-factory pipeline API.
+// Package v1 defines the stable secure-oci pipeline API.
 //
 // Its wire contract is the compatibility-promoted v1beta1 contract. The type
 // aliases are intentional: existing Go integrations can migrate without data
@@ -7,7 +7,12 @@ package v1
 
 import beta "github.com/CYPT71/platform-factory/api/pipeline/v1beta1"
 
-const APIVersion = "platform-factory.dev/v1"
+const (
+	APIVersion = "platform-factory.dev/v1"
+	// LegacyAPIVersion is the pre-rebrand identifier - see
+	// v1alpha1.LegacyAPIVersion's doc comment.
+	LegacyAPIVersion = "secure-oci.dev/v1"
+)
 
 type Pipeline = beta.Pipeline
 type Input = beta.Input

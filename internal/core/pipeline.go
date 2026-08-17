@@ -88,10 +88,14 @@ type SandboxPolicy struct {
 }
 
 const (
-	PipelineAPIVersion      = "platform-factory.dev/v1"
-	PipelineBetaAPIVersion  = "platform-factory.dev/v1beta1"
-	PipelineAlphaAPIVersion = "platform-factory.dev/v1alpha1"
+	PipelineAPIVersion            = "platform-factory.dev/v1"
+	PipelineLegacyAPIVersion      = "secure-oci.dev/v1"
+	PipelineBetaAPIVersion        = "platform-factory.dev/v1beta1"
+	PipelineBetaLegacyAPIVersion  = "secure-oci.dev/v1beta1"
+	PipelineAlphaAPIVersion       = "platform-factory.dev/v1alpha1"
+	PipelineAlphaLegacyAPIVersion = "secure-oci.dev/v1alpha1"
 	// APIVersion aliases the oldest accepted wire identifier for internal tests
-	// and fixtures.
-	APIVersion = PipelineAlphaAPIVersion
+	// and fixtures. Domain validation accepts all compatibility versions.
+	APIVersion       = PipelineAlphaAPIVersion
+	LegacyAPIVersion = PipelineAlphaLegacyAPIVersion
 )

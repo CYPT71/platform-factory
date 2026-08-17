@@ -21,6 +21,11 @@ import (
 const (
 	// ManifestAPIVersion identifies the plugin manifest schema.
 	ManifestAPIVersion = "platform-factory.dev/plugin-manifest/v1"
+	// LegacyManifestAPIVersion is the pre-rebrand identifier, still
+	// accepted for the documented compatibility overlap window (see
+	// docs/api-compatibility.md) - a plugin.json a deployment already
+	// has on disk may not have been regenerated yet.
+	LegacyManifestAPIVersion = "secure-oci.dev/plugin-manifest/v1"
 	// ManifestFileName is the file a plugin directory must contain.
 	ManifestFileName = "plugin.json"
 
@@ -143,7 +148,7 @@ func LoadManifest(dir string) (Manifest, error) {
 
 // Validate checks every manifest field against the schema.
 func (m Manifest) Validate() error {
-	if m.APIVersion != ManifestAPIVersion {
+	if m.APIVersion != ManifestAPIVersion && m.APIVersion != LegacyManifestAPIVersion {
 		return fmt.Errorf("plugin manifest: unsupported api_version %q (want %q)", m.APIVersion, ManifestAPIVersion)
 	}
 	if !manifestNamePattern.MatchString(m.Name) {

@@ -11,11 +11,10 @@ import "syscall"
 // approach internal/hypervisor/kvm already uses for KVM ioctl request codes.
 //
 // A handful of syscalls this package's own real allow-list needs
-// (getrandom, copy_file_range, rseq, clone3, openat2, fchmodat2) were
-// added to the x86_64 ABI after go1.10's syscall.SYS_* table was
-// generated and have no stdlib constant; those six are the raw,
-// long-stable numbers from arch/x86/entry/syscalls/syscall_64.tbl,
-// called out individually below.
+// (getrandom, copy_file_range, rseq, clone3) were added to the x86_64 ABI
+// after go1.10's syscall.SYS_* table was generated and have no stdlib
+// constant; those four are the raw, long-stable numbers from
+// arch/x86/entry/syscalls/syscall_64.tbl, called out individually below.
 var syscallNumberX8664 = map[string]uint32{
 	// File I/O. renameat/mknodat/symlinkat/linkat/readlinkat/fchmodat/
 	// utimensat/getdents64 back internal/rootfs.Convert's whiteout,
@@ -32,7 +31,6 @@ var syscallNumberX8664 = map[string]uint32{
 	"close":      uint32(syscall.SYS_CLOSE),
 	"fcntl":      uint32(syscall.SYS_FCNTL),
 	"openat":     uint32(syscall.SYS_OPENAT),
-	"openat2":    437, // arch/x86/entry/syscalls/syscall_64.tbl; os.Root's confined-open path
 	"newfstatat": uint32(syscall.SYS_NEWFSTATAT),
 	"fstat":      uint32(syscall.SYS_FSTAT),
 	"access":     uint32(syscall.SYS_ACCESS),
@@ -49,7 +47,6 @@ var syscallNumberX8664 = map[string]uint32{
 	"chdir":      uint32(syscall.SYS_CHDIR),
 	"dup3":       uint32(syscall.SYS_DUP3),
 	"fchmod":     uint32(syscall.SYS_FCHMOD),
-	"fchmodat2":  452, // arch/x86/entry/syscalls/syscall_64.tbl; os.Root's confined, symlink-safe chmod
 	"fsync":      uint32(syscall.SYS_FSYNC),
 	"flock":      uint32(syscall.SYS_FLOCK),
 

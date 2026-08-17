@@ -14,6 +14,11 @@ import (
 const (
 	// ContentType identifies protocol version v1 on the wire.
 	ContentType = "application/vnd.platform-factory.rpc.v1+json"
+	// LegacyContentType is the pre-rebrand Content-Type: still accepted
+	// from a plugin process for the documented compatibility overlap
+	// window (see docs/api-compatibility.md), never written by
+	// WriteMessage.
+	LegacyContentType = "application/vnd.secure-oci.rpc.v1+json"
 	// ProtocolVersion is the version a plugin must report during the
 	// handshake for a Client to consider it compatible.
 	ProtocolVersion = "v1"
@@ -54,7 +59,7 @@ func (e *RPCError) Error() string { return e.Message }
 
 // WriteMessage frames v (a Request or Response) as
 //
-//	Content-Type: application/vnd.platform-factory.rpc.v1+json
+//	Content-Type: application/vnd.secure-oci.rpc.v1+json
 //	Content-Length: N
 //
 //	{...}
@@ -125,7 +130,7 @@ func ReadMessage(r *bufio.Reader) (json.RawMessage, error) {
 			}
 			contentLength = n
 		case "content-type":
-			if value != ContentType {
+			if value != ContentType && value != LegacyContentType {
 				return nil, fmt.Errorf("plugin: unsupported Content-Type %q, want %q", value, ContentType)
 			}
 			sawContentType = true

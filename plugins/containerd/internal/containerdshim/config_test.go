@@ -15,8 +15,8 @@ func TestContainerdConfigSelectsShimSandboxer(t *testing.T) {
 		`runtime_type = "io.containerd.platform-factory.v1"`,
 		`sandboxer = "shim"`,
 		`privileged_without_host_devices = false`,
-		`pod_annotations = ["platform-factory.dev/*"]`,
-		`container_annotations = ["platform-factory.dev/*"]`,
+		`pod_annotations = ["platform-factory.dev/*", "secure-oci.dev/*"]`,
+		`container_annotations = ["platform-factory.dev/*", "secure-oci.dev/*"]`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("config lacks %q:\n%s", want, got)
@@ -28,11 +28,11 @@ func TestContainerdConfigSelectsShimSandboxer(t *testing.T) {
 }
 
 func TestRuntimeClassMatchesHandler(t *testing.T) {
-	got, err := (Config{Handler: "platform-factory-prod"}).RuntimeClass()
+	got, err := (Config{Handler: "secure-oci-prod"}).RuntimeClass()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "name: platform-factory-prod\nhandler: platform-factory-prod") {
+	if !strings.Contains(got, "name: secure-oci-prod\nhandler: secure-oci-prod") {
 		t.Fatalf("unexpected RuntimeClass:\n%s", got)
 	}
 }

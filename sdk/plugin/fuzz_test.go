@@ -14,6 +14,9 @@ import (
 // bytes on a pipe and a decoded message.
 func FuzzReadMessage(f *testing.F) {
 	f.Add("Content-Type: application/vnd.platform-factory.rpc.v1+json\r\nContent-Length: 2\r\n\r\n{}")
+	// The pre-rebrand Content-Type: still accepted for the documented
+	// compatibility overlap window (see docs/api-compatibility.md).
+	f.Add("Content-Type: application/vnd.secure-oci.rpc.v1+json\r\nContent-Length: 2\r\n\r\n{}")
 	f.Add("Content-Length: 5\r\n\r\nhello")
 	f.Add("")
 	f.Add("Content-Length: 5")

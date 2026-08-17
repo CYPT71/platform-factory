@@ -24,12 +24,14 @@ const canonicalInterpreterName = "python3"
 // library when no RPATH/RUNPATH entry resolves it - the ld.so.cache /
 // default search path, which is location-independent (the destination
 // for a library found this way is its own real absolute path from the
-// source image, not relocated). Scoped to the one architecture this pass
-// targets (see the plan's explicit scope note); a future non-amd64 pass
-// would need its own triplet.
+// source image, not relocated). Covers both multiarch triplets platform-
+// factory ships base images for (amd64, arm64); a given --image-root only
+// ever contains one architecture's libraries, so the other triplet's
+// entries simply never match.
 var standardLibraryDirs = []string{
 	"lib", "lib64", "usr/lib", "usr/lib64",
 	"lib/x86_64-linux-gnu", "usr/lib/x86_64-linux-gnu",
+	"lib/aarch64-linux-gnu", "usr/lib/aarch64-linux-gnu",
 }
 
 type runtimeManifest struct {

@@ -161,12 +161,7 @@ func applyVMMSandbox() error {
 	return nil
 }
 
-var debugFD, _ = syscall.Open("/tmp/debug-trace.txt", syscall.O_CREAT|syscall.O_WRONLY|syscall.O_APPEND, 0o600)
-
-func dbg(s string) { _, _ = syscall.Write(debugFD, []byte(s+"\n")) }
-
 func ServeSupervisor(ctx context.Context, store *Store, id string, readyFD int) (err error) {
-	dbg("ENTER")
 	startAcknowledged := false
 	var command *net.UnixConn
 	var state State
@@ -251,39 +246,29 @@ func ServeSupervisor(ctx context.Context, store *Store, id string, readyFD int) 
 	if err := guestSandbox.ApplyStrictSeccomp(); err != nil {
 		return fmt.Errorf("oci runtime: apply strict VMM seccomp filter: %w", err)
 	}
-	dbg("ApplyStrictSeccomp OK")
 	sessionKey, err := generateGuestSessionKey(rand.Reader)
 	if err != nil {
 		return err
 	}
-	dbg("generateGuestSessionKey OK")
 	defer clear(sessionKey)
 	initrdPath, cleanup, err := buildGuestInitramfs(state.Bundle, config, sessionKey)
 	if err != nil {
-		dbg("buildGuestInitramfs err=" + err.Error())
 		return err
 	}
-	dbg("buildGuestInitramfs OK")
 	defer cleanup()
 	initrd, err := os.ReadFile(initrdPath)
 	if err != nil {
-		dbg("ReadFile initrd err=" + err.Error())
 		return err
 	}
-	dbg("ReadFile initrd OK")
 	defer clear(initrd)
 	kernel, memoryBytes, err := loadPinnedBoot(state.Annotations)
 	if err != nil {
-		dbg("loadPinnedBoot err=" + err.Error())
 		return err
 	}
-	dbg("loadPinnedBoot OK")
 	virtioOptions, cleanupBlockDevice, err := virtioDevicesForSupervisor(state.Annotations)
 	if err != nil {
-		dbg("virtioDevicesForSupervisor err=" + err.Error())
 		return err
 	}
-	dbg("virtioDevicesForSupervisor OK")
 	defer cleanupBlockDevice()
 	hostChannel, guestChannel := net.Pipe()
 	agent, err := guesttransport.NewAgent(hostChannel, sessionKey)

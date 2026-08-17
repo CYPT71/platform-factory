@@ -10,7 +10,7 @@ import (
 )
 
 func buildLayout(t *testing.T) string {
-	return buildNamedLayout(t, "platform-factory-base", "latest", "amd64", "payload")
+	return buildNamedLayout(t, "secure-oci-base", "latest", "amd64", "payload")
 }
 
 func buildNamedLayout(t *testing.T, image, tag, architecture, payload string) string {

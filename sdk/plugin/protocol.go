@@ -1,4 +1,4 @@
-// Package plugin is the public SDK for out-of-process platform-factory
+// Package plugin is the public SDK for out-of-process secure-oci
 // plugins. It defines the versioned, length-prefixed JSON-RPC protocol
 // plugins speak over stdin/stdout (an LSP/DAP-style header-framed
 // message on the wire), the plugin-side Server, the handshake shape and
@@ -7,7 +7,7 @@
 // crosses the plugin boundary.
 //
 // The host side (subprocess management, manifest verification,
-// discovery and trust policy) lives in the platform-factory binary and is not
+// discovery and trust policy) lives in the secure-oci binary and is not
 // part of the SDK surface.
 package plugin
 
@@ -24,6 +24,11 @@ import (
 const (
 	// ContentType identifies protocol version v1 on the wire.
 	ContentType = "application/vnd.platform-factory.rpc.v1+json"
+	// LegacyContentType is the pre-rebrand Content-Type: still accepted
+	// from a plugin process for the documented compatibility overlap
+	// window (see docs/api-compatibility.md), never written by
+	// WriteMessage.
+	LegacyContentType = "application/vnd.secure-oci.rpc.v1+json"
 	// ProtocolVersion is the version a plugin must report during the
 	// handshake for a Client to consider it compatible.
 	ProtocolVersion = "v1"
@@ -64,7 +69,7 @@ func (e *RPCError) Error() string { return e.Message }
 
 // WriteMessage frames v (a Request or Response) as
 //
-//	Content-Type: application/vnd.platform-factory.rpc.v1+json
+//	Content-Type: application/vnd.secure-oci.rpc.v1+json
 //	Content-Length: N
 //
 //	{...}
@@ -135,7 +140,7 @@ func ReadMessage(r *bufio.Reader) (json.RawMessage, error) {
 			}
 			contentLength = n
 		case "content-type":
-			if value != ContentType {
+			if value != ContentType && value != LegacyContentType {
 				return nil, fmt.Errorf("plugin: unsupported Content-Type %q, want %q", value, ContentType)
 			}
 			sawContentType = true

@@ -6,7 +6,12 @@ package v1beta1
 
 import alpha "github.com/CYPT71/platform-factory/api/pipeline/v1alpha1"
 
-const APIVersion = "platform-factory.dev/v1beta1"
+const (
+	APIVersion = "platform-factory.dev/v1beta1"
+	// LegacyAPIVersion is the pre-rebrand identifier - see
+	// v1alpha1.LegacyAPIVersion's doc comment.
+	LegacyAPIVersion = "secure-oci.dev/v1beta1"
+)
 
 type Pipeline = alpha.Pipeline
 type Input = alpha.Input

@@ -49,7 +49,7 @@ func runNativeKVM(ctx context.Context, layoutDir string, memoryMiB int, forwards
 		return err
 	}
 
-	work, err := os.MkdirTemp("", "platform-factory-base-microvm-native.*")
+	work, err := os.MkdirTemp("", "secure-oci-base-microvm-native.*")
 	if err != nil {
 		return fmt.Errorf("create workspace: %w", err)
 	}

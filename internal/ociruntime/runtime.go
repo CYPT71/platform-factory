@@ -221,6 +221,38 @@ func (s *Store) Create(ctx context.Context, id, bundle string) (State, error) {
 	return state, err
 }
 
+// legacyAnnotationKeys preserves the documented secure-oci.dev -> platform-factory.dev
+// rebrand compatibility window: a bundle still carrying pre-rebrand keys decodes
+// exactly as if it had been written with the current ones. Literals keep this
+// linux package independent of amd64-only constants.
+var legacyAnnotationKeys = map[string]string{
+	"secure-oci.dev/kernel-path":           "platform-factory.dev/kernel-path",
+	"secure-oci.dev/kernel-digest":         "platform-factory.dev/kernel-digest",
+	"secure-oci.dev/initramfs-path":        "platform-factory.dev/initramfs-path",
+	"secure-oci.dev/initramfs-digest":      "platform-factory.dev/initramfs-digest",
+	"secure-oci.dev/memory-mib":            "platform-factory.dev/memory-mib",
+	"secure-oci.dev/vcpus":                 "platform-factory.dev/vcpus",
+	"secure-oci.dev/sandbox-cgroups":       "platform-factory.dev/sandbox-cgroups",
+	"secure-oci.dev/sandbox-namespaces":    "platform-factory.dev/sandbox-namespaces",
+	"secure-oci.dev/block-device-path":     "platform-factory.dev/block-device-path",
+	"secure-oci.dev/block-device-readonly": "platform-factory.dev/block-device-readonly",
+	"secure-oci.dev/network-tap":           "platform-factory.dev/network-tap",
+	"secure-oci.dev/init-path":             "platform-factory.dev/init-path",
+	"secure-oci.dev/init-digest":           "platform-factory.dev/init-digest",
+}
+
+// normalizeLegacyAnnotations fills current keys without overriding them.
+func normalizeLegacyAnnotations(annotations map[string]string) {
+	for legacy, current := range legacyAnnotationKeys {
+		if _, ok := annotations[current]; ok {
+			continue
+		}
+		if value, ok := annotations[legacy]; ok {
+			annotations[current] = value
+		}
+	}
+}
+
 func LoadConfig(bundle string) (Config, error) {
 	info, err := os.Lstat(bundle)
 	if err != nil {
@@ -251,6 +283,7 @@ func LoadConfig(bundle string) (Config, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return Config{}, errors.New("oci runtime: config.json must contain exactly one document")
 	}
+	normalizeLegacyAnnotations(config.Annotations)
 	if config.OCIVersion == "" || config.Root.Path == "" || len(config.Process.Args) == 0 ||
 		!filepath.IsAbs(config.Process.Cwd) {
 		return Config{}, errors.New("oci runtime: config.json lacks ociVersion, root.path, process.args, or absolute process.cwd")

@@ -1,6 +1,13 @@
 package v1alpha1
 
-const APIVersion = "platform-factory.dev/v1alpha1"
+const (
+	APIVersion = "platform-factory.dev/v1alpha1"
+	// LegacyAPIVersion is the pre-rebrand identifier this package
+	// accepted before Platform Factory: still decodable during the
+	// documented two-minor-release compatibility overlap window (see
+	// docs/api-compatibility.md), never written by anything new.
+	LegacyAPIVersion = "secure-oci.dev/v1alpha1"
+)
 
 // Pipeline is a declarative directed acyclic graph of build stages.
 type Pipeline struct {

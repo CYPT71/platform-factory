@@ -60,7 +60,7 @@ func Decode(input io.Reader) (Pipeline, Graph, error) {
 }
 
 var idPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
-var acceptedVersions = map[string]bool{APIVersion: true, v1beta1.APIVersion: true, v1alpha1.APIVersion: true}
+var acceptedVersions = map[string]bool{APIVersion: true, LegacyAPIVersion: true, v1beta1.APIVersion: true, v1beta1.LegacyAPIVersion: true, v1alpha1.APIVersion: true, v1alpha1.LegacyAPIVersion: true}
 
 func Analyze(definition Pipeline) (Graph, error) {
 	var issues []Issue

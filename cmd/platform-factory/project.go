@@ -986,10 +986,14 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 	if profile == "" {
 		profile = projectProfile(loaded.Config.Language)
 	}
+	created := earliestProjectFileTime(loaded.Root)
+	if created.IsZero() {
+		created = time.Now()
+	}
 	digest, err := oci.Build(oci.Options{
 		Binary: binary, Output: loaded.Output(), Architecture: architecture, OS: osName,
 		Entrypoint: entrypoint, Profile: profile, ImageName: loaded.Config.Image,
-		Tag: loaded.Config.Tag, Created: time.Unix(0, 0), Args: loaded.Config.Args,
+		Tag: loaded.Config.Tag, Created: created.UTC(), Args: loaded.Config.Args,
 		Env: loaded.Config.Env, User: loaded.Config.User, ExtraFiles: extraFiles,
 		Compression: "fast", TraceID: observability.TraceIDFromContext(ctx),
 		SemanticLayers: loaded.Config.SemanticLayers, ExtraLayers: extraLayers,

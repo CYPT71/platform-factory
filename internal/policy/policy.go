@@ -9,7 +9,14 @@ import (
 	typederrors "github.com/CYPT71/platform-factory/internal/errors"
 )
 
-const APIVersion = "platform-factory.dev/policy/v1"
+const (
+	APIVersion = "platform-factory.dev/policy/v1"
+	// LegacyAPIVersion is the pre-rebrand identifier, still accepted for
+	// the documented compatibility overlap window (see
+	// docs/api-compatibility.md) - a policy.json a deployment already
+	// has on disk may not have been regenerated yet.
+	LegacyAPIVersion = "secure-oci.dev/policy/v1"
+)
 
 type Evidence struct {
 	SubjectDigest       string `json:"subject_digest"`
@@ -43,7 +50,7 @@ type Decision struct {
 }
 
 func Evaluate(rules Rules, evidence Evidence) (Decision, error) {
-	if rules.APIVersion != APIVersion {
+	if rules.APIVersion != APIVersion && rules.APIVersion != LegacyAPIVersion {
 		return Decision{}, typederrors.Newf(typederrors.CodePolicyEvaluation,
 			"policy: unsupported api_version %q (want %q)", rules.APIVersion, APIVersion)
 	}
