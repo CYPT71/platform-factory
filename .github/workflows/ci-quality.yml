@@ -164,6 +164,7 @@ jobs:
           set -euo pipefail
           go test -race ./...
           (cd cmd/platform-factory-installer && GOWORK=off go test -race ./...)
+          (cd cmd/tui && GOWORK=off go test -race ./...)
           # -coverpkg=./... attributes coverage across package boundaries:
           # tests/conformance and tests/examples exercise conformance and
           # policy code as external, black-box consumers (see Testing and
@@ -181,6 +182,17 @@ jobs:
           # whole package).
           (cd cmd/platform-factory-installer && GOWORK=off go test ./... -coverpkg=./... -coverprofile=coverage-installer.out)
           tail -n +2 cmd/platform-factory-installer/coverage-installer.out >> coverage.out
+          # cmd/tui is likewise its own Go module (go.work): cmd/platform-factory
+          # imports it, so the root-module run above still *instruments*
+          # tui.go/view.go/confirm.go (their blocks show up with zero hits,
+          # since coverage instrumentation follows the compiled binary's real
+          # dependency graph, not `go test`'s own per-module package
+          # selection) - but never *runs* this module's own substantial
+          # bubbletea Update/View tests, since `go test ./...` from root
+          # cannot select tests in a separate module. Generate and append its
+          # profile the same way as the installer above so those tests count.
+          (cd cmd/tui && GOWORK=off go test ./... -coverpkg=./... -coverprofile=coverage-tui.out)
+          tail -n +2 cmd/tui/coverage-tui.out >> coverage.out
           # The sandbox and cgroup re-exec helpers run in a child process
           # that syscall.Exec's the stage target before Go can flush
           # coverage counters, so `go test -cover` structurally cannot

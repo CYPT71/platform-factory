@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // Write replaces name using a same-directory temporary file. When durable is
@@ -40,6 +41,14 @@ func Write(dir, name string, data []byte, mode os.FileMode, durable bool) error 
 		return err
 	}
 	if !durable {
+		return nil
+	}
+	// Windows does not expose a directory handle that File.Sync can flush.
+	// Rename is still atomic there, but directory-entry durability across a
+	// sudden power loss is governed by the filesystem. Unix hosts can and
+	// must flush the containing directory explicitly. See the identical
+	// rationale on FileStateStore.syncDirectory (internal/runtime/state.go).
+	if runtime.GOOS == "windows" {
 		return nil
 	}
 	directory, err := os.Open(dir)

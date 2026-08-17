@@ -199,6 +199,128 @@ func TestMigrationWorkflowStorePersistsCompleteHostEvidence(t *testing.T) {
 	}
 }
 
+func validArtifactEvidence(operation core.OperationID) appmigration.ArtifactEvidence {
+	return appmigration.ArtifactEvidence{
+		TraceID: "trace-1", ResourceID: "resource-1", OperationID: operation,
+		Digest: migrationTestDigest, Size: 128, Format: "tar",
+		SourcePluginID: "plugin-a", SourcePluginDigest: migrationTestDigest,
+		TargetPluginID: "plugin-b", TargetPluginDigest: migrationTestDigest,
+		ArtifactVerified: true, Imported: true, ObservedAfterImport: true, Verified: true,
+	}
+}
+
+func TestMigrationExecutionStorePersistsAndReloadsArtifacts(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewMigrationExecutionStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := validArtifactEvidence("migration-artifact-op-1")
+	if err := store.RecordArtifact(context.Background(), evidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordArtifact(context.Background(), evidence); err != nil {
+		t.Fatalf("exact replay: %v", err)
+	}
+
+	reloaded, err := NewMigrationExecutionStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := reloaded.ArtifactRecords()
+	if len(records) != 1 {
+		t.Fatalf("records=%d", len(records))
+	}
+	record := records[0]
+	if record.FormatVersion != MigrationArtifactFormatVersion || record.Digest != migrationTestDigest ||
+		record.Size != 128 || record.Format != "tar" || !record.ArtifactVerified || !record.Imported ||
+		!record.ObservedAfterImport || !record.Verified {
+		t.Fatalf("record=%+v", record)
+	}
+
+	conflict := evidence
+	conflict.Size = 256
+	if err := reloaded.RecordArtifact(context.Background(), conflict); err == nil || !strings.Contains(err.Error(), "conflicting artifact evidence") {
+		t.Fatalf("conflicting replay err=%v", err)
+	}
+}
+
+func TestMigrationExecutionStoreRejectsInvalidArtifactEvidence(t *testing.T) {
+	store, err := NewMigrationExecutionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := validArtifactEvidence("migration-artifact-op-2")
+	cases := map[string]func(appmigration.ArtifactEvidence) appmigration.ArtifactEvidence{
+		"secret field value": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.TraceID = "secret-sentinel"
+			return e
+		},
+		"missing trace ID": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.TraceID = ""
+			return e
+		},
+		"invalid operation ID": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.OperationID = ""
+			return e
+		},
+		"negative size": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.Size = -1
+			return e
+		},
+		"size over limit": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.Size = appmigration.MaxPortableArtifactBytes + 1
+			return e
+		},
+		"invalid digest": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.Digest = "not-a-digest"
+			return e
+		},
+		"digest without format": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.Format = ""
+			return e
+		},
+		"invalid source plugin digest": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.SourcePluginDigest = "not-a-digest"
+			return e
+		},
+		"plugin ID without digest": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.TargetPluginDigest = ""
+			return e
+		},
+		"verified without digest identity": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.Digest, e.Format = "", ""
+			return e
+		},
+		"verified without plugin identities": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.SourcePluginID, e.SourcePluginDigest = "", ""
+			e.TargetPluginID, e.TargetPluginDigest = "", ""
+			return e
+		},
+		"observed without artifact verified": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.ArtifactVerified = false
+			e.Imported, e.Verified = false, false
+			return e
+		},
+		"imported without host verification": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.ObservedAfterImport = false
+			e.Verified = false
+			return e
+		},
+		"final verification without observed import": func(e appmigration.ArtifactEvidence) appmigration.ArtifactEvidence {
+			e.Imported = false
+			return e
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := store.RecordArtifact(context.Background(), mutate(base)); err == nil {
+				t.Fatalf("%s: expected an error", name)
+			}
+		})
+	}
+}
+
 func TestMigrationWorkflowStoreRejectsFalseOrSecretEvidence(t *testing.T) {
 	store, err := NewMigrationExecutionStore(t.TempDir())
 	if err != nil {

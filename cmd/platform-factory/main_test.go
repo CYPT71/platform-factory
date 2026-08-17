@@ -792,6 +792,22 @@ func TestRunHelpVersionAndAliases(t *testing.T) {
 	}
 }
 
+func TestRunHelpAllPrintsFullUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"help", "--all"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"Usage:", "Deprecated aliases", "platform-factory microvm <", "platform-factory plugin <"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("help --all output missing %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "Common commands:") {
+		t.Fatalf("help --all printed the short usage instead of the full one: %s", out)
+	}
+}
+
 func TestRunDetectUsesLoadedLanguagePlugins(t *testing.T) {
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "package-lock.json"), []byte("{}"), 0o644)

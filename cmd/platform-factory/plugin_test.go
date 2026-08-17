@@ -477,6 +477,313 @@ func TestPluginManagementFailsClosedOnInvalidRegistryState(t *testing.T) {
 	}
 }
 
+// loadFakeScaffoldPlugin registers name as a loaded language plugin
+// whose binary is a script recording the arguments it was invoked with
+// to argsFile and exiting with exitCode - enough to exercise
+// runPluginCreate's own "scaffold" argv construction and success/
+// failure handling without a real language plugin.
+func loadFakeScaffoldPlugin(t *testing.T, name, argsFile string, exitCode int) {
+	t.Helper()
+	t.Setenv("PLATFORM_FACTORY_LANG_PLUGIN_DIR", t.TempDir())
+	source := filepath.Join(t.TempDir(), "plugin-binary")
+	script := fmt.Sprintf("#!/bin/sh\necho \"$@\" > %q\nexit %d\n", argsFile, exitCode)
+	if err := os.WriteFile(source, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := langplugin.Load(name, source); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunPluginCreateUsageErrors(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runPluginCreate(nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("no args: code=%d", code)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPluginCreate([]string{"--language", "python"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("missing name: code=%d", code)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPluginCreate([]string{"myplugin"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("missing --language: code=%d", code)
+	}
+}
+
+func TestRunPluginCreateRequiresALoadedPlugin(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_LANG_PLUGIN_DIR", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	if code := runPluginCreate([]string{"--language", "python", "myplugin"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunPluginCreateSucceeds(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	loadFakeScaffoldPlugin(t, "python", argsFile, 0)
+	var stdout, stderr bytes.Buffer
+	code := runPluginCreate([]string{"--language", "python", "--dialect", "ts", "--output", "/out", "myplugin"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	recorded, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(string(recorded))
+	want := "scaffold --name myplugin --output /out --dialect ts"
+	if got != want {
+		t.Fatalf("recorded args = %q, want %q", got, want)
+	}
+}
+
+func TestRunPluginCreateSurfacesScaffoldFailure(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	loadFakeScaffoldPlugin(t, "python", argsFile, 1)
+	var stdout, stderr bytes.Buffer
+	code := runPluginCreate([]string{"--language", "python", "myplugin"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d", code)
+	}
+	if !strings.Contains(stderr.String(), "cannot scaffold this plugin") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestLocateBuiltinPluginBinaryRejectsUnknownLanguage(t *testing.T) {
+	if _, err := locateBuiltinPluginBinary("cobol"); err == nil {
+		t.Fatal("expected an error for a non-built-in language")
+	}
+}
+
+func TestLocateBuiltinPluginBinaryFindsItOnPATH(t *testing.T) {
+	dir := t.TempDir()
+	name := "platform-factory-lang-ruby"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	binary := filepath.Join(dir, name)
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	got, err := locateBuiltinPluginBinary("ruby")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resolved, evalErr := filepath.EvalSymlinks(got)
+	if evalErr != nil {
+		resolved = got
+	}
+	wantResolved, _ := filepath.EvalSymlinks(binary)
+	if resolved != wantResolved {
+		t.Fatalf("got=%q want=%q", got, binary)
+	}
+}
+
+func TestLocateBuiltinPluginBinaryNotFoundAnywhere(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	if _, err := locateBuiltinPluginBinary("php"); err == nil {
+		t.Fatal("expected an error when the binary is not next to the CLI or on PATH")
+	}
+}
+
+func TestPrepareTypeScriptPluginRequiresNodeOnPATH(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	_, cleanup, err := prepareTypeScriptPlugin(filepath.Join(t.TempDir(), "plugin.ts"))
+	defer cleanup()
+	if err == nil || !strings.Contains(err.Error(), "node was not found on PATH") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestBuildDotnetPluginRequiresDotnetOnPATH(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	_, cleanup, err := buildDotnetPlugin(filepath.Join(t.TempDir(), "Plugin.cs"))
+	defer cleanup()
+	if err == nil || !strings.Contains(err.Error(), "dotnet SDK was not found on PATH") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestPrepareScriptPluginRequiresTheInterpreterOnPATH(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("prepareScriptPlugin always errors on windows before checking PATH")
+	}
+	t.Setenv("PATH", t.TempDir())
+	_, cleanup, err := prepareScriptPlugin(filepath.Join(t.TempDir(), "plugin.py"), "python3", nil)
+	defer cleanup()
+	if err == nil || !strings.Contains(err.Error(), "was not found on PATH") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestPrepareScriptPluginSurfacesInterpreterProbeFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("prepareScriptPlugin always errors on windows before checking PATH")
+	}
+	dir := t.TempDir()
+	interpreter := filepath.Join(dir, "brokenpy")
+	if err := os.WriteFile(interpreter, []byte("#!/bin/sh\necho probe failed >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	source := filepath.Join(t.TempDir(), "plugin.py")
+	if err := os.WriteFile(source, []byte("print(1)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, cleanup, err := prepareScriptPlugin(source, "brokenpy", []string{"--strict"})
+	defer cleanup()
+	if err == nil || !strings.Contains(err.Error(), "cannot execute this plugin source") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestPrepareScriptPluginStripsShebangAndWrapsInterpreter(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("prepareScriptPlugin always errors on windows")
+	}
+	dir := t.TempDir()
+	interpreter := filepath.Join(dir, "fakepy")
+	if err := os.WriteFile(interpreter, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	source := filepath.Join(t.TempDir(), "plugin.py")
+	if err := os.WriteFile(source, []byte("#!/usr/bin/env python3\nprint(1)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prepared, cleanup, err := prepareScriptPlugin(source, "fakepy", nil)
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	content, readErr := os.ReadFile(prepared)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(content), "env python3") {
+		t.Fatalf("expected the original shebang to be stripped, got:\n%s", content)
+	}
+	if !strings.HasPrefix(string(content), "#!/usr/bin/env -S fakepy\n") {
+		t.Fatalf("expected the new interpreter shebang, got:\n%s", content)
+	}
+	if !strings.Contains(string(content), "print(1)") {
+		t.Fatalf("expected the original source body preserved, got:\n%s", content)
+	}
+	info, statErr := os.Stat(prepared)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("expected the prepared script to be executable, mode=%v", info.Mode())
+	}
+}
+
+func TestRunPluginInstallErrorPaths(t *testing.T) {
+	registry := t.TempDir()
+	var stdout, stderr bytes.Buffer
+
+	if code := runPluginInstall([]string{"--plugin-dir", registry}, &stdout, &stderr); code != 2 {
+		t.Fatalf("missing --from: code=%d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPluginInstall([]string{"extra", "--from", t.TempDir(), "--plugin-dir", registry}, &stdout, &stderr); code != 2 {
+		t.Fatalf("unexpected positional arg: code=%d", code)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPluginInstall([]string{"--from", filepath.Join(t.TempDir(), "missing"), "--plugin-dir", registry}, &stdout, &stderr); code != 1 {
+		t.Fatalf("missing source dir: code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "platform-factory plugin install:") {
+		t.Fatalf("missing source dir stderr=%q", stderr.String())
+	}
+
+	source := t.TempDir()
+	writeRPCPluginBundle(t, source, "acme-monitor")
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPluginInstall([]string{"--from", source, "--plugin-dir", registry, "--allow-unsigned"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("fresh install: code=%d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPluginInstall([]string{"--from", source, "--plugin-dir", registry, "--allow-unsigned"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("duplicate install: code=%d", code)
+	}
+	if !strings.Contains(stderr.String(), "already installed") {
+		t.Fatalf("duplicate install stderr=%q", stderr.String())
+	}
+}
+
+func TestRunPluginRemoveErrorPaths(t *testing.T) {
+	registry := t.TempDir()
+	var stdout, stderr bytes.Buffer
+
+	if code := runPluginRemove(nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("no args: code=%d", code)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPluginRemove([]string{"a", "b"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("too many args: code=%d", code)
+	}
+	for _, name := range []string{"../escape", "with/slash", "with\\backslash", ".", ".."} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := runPluginRemove([]string{"--plugin-dir", registry, name}, &stdout, &stderr); code != 2 {
+			t.Fatalf("invalid name %q: code=%d stderr=%s", name, code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "invalid plugin name") {
+			t.Fatalf("invalid name %q stderr=%q", name, stderr.String())
+		}
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPluginRemove([]string{"--plugin-dir", registry, "never-installed"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("unmanaged plugin: code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "refuse to remove") {
+		t.Fatalf("unmanaged plugin stderr=%q", stderr.String())
+	}
+}
+
+func TestGenericPluginDir(t *testing.T) {
+	explicit := t.TempDir()
+	got, err := genericPluginDir(explicit)
+	if err != nil {
+		t.Fatalf("explicit dir: %v", err)
+	}
+	want, _ := filepath.Abs(explicit)
+	if got != want {
+		t.Fatalf("explicit dir: got %q want %q", got, want)
+	}
+
+	envDir := t.TempDir()
+	t.Setenv("PLATFORM_FACTORY_PLUGIN_DIR", envDir)
+	got, err = genericPluginDir("")
+	if err != nil {
+		t.Fatalf("env dir: %v", err)
+	}
+	want, _ = filepath.Abs(envDir)
+	if got != want {
+		t.Fatalf("env dir: got %q want %q", got, want)
+	}
+
+	t.Setenv("PLATFORM_FACTORY_PLUGIN_DIR", "")
+	got, err = genericPluginDir("")
+	if err != nil {
+		t.Fatalf("default dir: %v", err)
+	}
+	if !strings.HasSuffix(got, filepath.Join("platform-factory", "plugins")) {
+		t.Fatalf("default dir: got %q", got)
+	}
+}
+
 func TestResolveLoadedPluginUsesManagedRegistryOnly(t *testing.T) {
 	withTestPluginDir(t)
 	if _, err := resolveLoadedPlugin("missing"); err == nil {

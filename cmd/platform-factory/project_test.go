@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1356,5 +1357,129 @@ func TestRunProjectRejectsInvalidActionsAndMissingConfig(t *testing.T) {
 		if code := runProject(args, &stdout, &stderr, execute, nil, nil); code == 0 {
 			t.Fatalf("args=%v unexpectedly succeeded", args)
 		}
+	}
+}
+
+func TestSourceNewerThanMissingPath(t *testing.T) {
+	remaining := 100
+	stale, err := sourceNewerThan(filepath.Join(t.TempDir(), "does-not-exist"), time.Now(), &remaining)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stale {
+		t.Fatal("a missing path should never be reported stale")
+	}
+}
+
+func TestSourceNewerThanRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "source.txt")
+	writeProjectTestFile(t, path, "content", 0o644)
+	builtAt := time.Now().Add(-time.Hour)
+
+	remaining := 100
+	stale, err := sourceNewerThan(path, builtAt, &remaining)
+	if err != nil {
+		t.Fatalf("newer file: unexpected error: %v", err)
+	}
+	if !stale {
+		t.Fatal("a file modified after builtAt should be reported stale")
+	}
+	if remaining != 99 {
+		t.Fatalf("remaining = %d, want 99", remaining)
+	}
+
+	remaining = 100
+	stale, err = sourceNewerThan(path, time.Now().Add(time.Hour), &remaining)
+	if err != nil {
+		t.Fatalf("older file: unexpected error: %v", err)
+	}
+	if stale {
+		t.Fatal("a file modified before builtAt should not be reported stale")
+	}
+}
+
+func TestSourceNewerThanDirectory(t *testing.T) {
+	freshDir := t.TempDir()
+	writeProjectTestFile(t, filepath.Join(freshDir, "unchanged.txt"), "content", 0o644)
+	remaining := 100
+	stale, err := sourceNewerThan(freshDir, time.Now().Add(time.Hour), &remaining)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stale {
+		t.Fatal("a directory with only old files should not be reported stale")
+	}
+
+	staleDir := t.TempDir()
+	writeProjectTestFile(t, filepath.Join(staleDir, "nested", "changed.txt"), "content", 0o644)
+	remaining = 100
+	stale, err = sourceNewerThan(staleDir, time.Now().Add(-time.Hour), &remaining)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !stale {
+		t.Fatal("a directory with a newly modified nested file should be reported stale")
+	}
+}
+
+func TestSourceNewerThanRespectsRemainingBudget(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectTestFile(t, filepath.Join(dir, "a.txt"), "content", 0o644)
+	writeProjectTestFile(t, filepath.Join(dir, "b.txt"), "content", 0o644)
+
+	remaining := 0
+	stale, err := sourceNewerThan(dir, time.Now().Add(-time.Hour), &remaining)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stale {
+		t.Fatal("a walk with zero remaining budget should stop before finding staleness")
+	}
+}
+
+func TestSuggestProjectConfig(t *testing.T) {
+	var stderr bytes.Buffer
+	code := suggestProjectConfig("run", filepath.Join(t.TempDir(), "missing"), &stderr)
+	if code != 1 {
+		t.Fatalf("missing path: code = %d", code)
+	}
+	if !strings.Contains(stderr.String(), "pf init") {
+		t.Fatalf("missing path stderr = %q", stderr.String())
+	}
+
+	stderr.Reset()
+	emptyDir := t.TempDir()
+	code = suggestProjectConfig("run", emptyDir, &stderr)
+	if code != 1 {
+		t.Fatalf("undetected directory: code = %d", code)
+	}
+	if !strings.Contains(stderr.String(), "pf init") {
+		t.Fatalf("undetected directory stderr = %q", stderr.String())
+	}
+
+	stderr.Reset()
+	scriptPath := filepath.Join(t.TempDir(), "script.sh")
+	writeProjectTestFile(t, scriptPath, "#!/bin/sh\necho hi\n", 0o755)
+	code = suggestProjectConfig("build", scriptPath, &stderr)
+	if code != 1 {
+		t.Fatalf("detected script: code = %d", code)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "detected a script project") || !strings.Contains(out, "pf build") {
+		t.Fatalf("detected script stderr = %q", out)
+	}
+}
+
+func TestWrapperCommand(t *testing.T) {
+	got := wrapperCommand("dotnet")
+	if runtime.GOOS == "windows" {
+		if got != "dotnet.bat" {
+			t.Fatalf("windows: wrapperCommand = %q", got)
+		}
+		return
+	}
+	if got != "dotnet" {
+		t.Fatalf("non-windows: wrapperCommand = %q", got)
 	}
 }

@@ -1202,3 +1202,290 @@ func TestDefaultUploadSessionDirHonorsExplicitConfiguration(t *testing.T) {
 		t.Fatalf("session directory=%q", got)
 	}
 }
+
+func TestDefaultWorkloadStateRootHonorsExplicitConfiguration(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_WORKLOAD_STATE_DIR", "  /tmp/platform-factory-workload-state  ")
+	if got := defaultWorkloadStateRoot(); got != "/tmp/platform-factory-workload-state" {
+		t.Fatalf("workload state root=%q", got)
+	}
+}
+
+func TestDefaultLifecycleRootFallsBackWithoutConfiguration(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_OPERATION_JOURNAL_DIR", "")
+	got := defaultOperationJournalRoot()
+	if !strings.HasSuffix(got, filepath.Join("platform-factory", "operation-journal")) {
+		t.Fatalf("operation journal root=%q", got)
+	}
+}
+
+// TestClaimOperationCoversEveryOutcome exercises every branch of
+// claimOperation directly against a real, file-backed journal: the first
+// caller for an ID proceeds; a second caller for the same ID observes
+// whatever terminal (or non-terminal) status the first caller left behind.
+func TestClaimOperationCoversEveryOutcome(t *testing.T) {
+	journal, err := idempotency.NewFileJournal(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proceed, done, err := claimOperation(journal, "op-first", "scope")
+	if !proceed || done || err != nil {
+		t.Fatalf("first claim: proceed=%v done=%v err=%v", proceed, done, err)
+	}
+
+	proceed, done, err = claimOperation(journal, "op-first", "scope")
+	if proceed || !done || !errors.Is(err, core.ErrOperationIndeterminate) {
+		t.Fatalf("re-claim of a started, unterminated operation: proceed=%v done=%v err=%v", proceed, done, err)
+	}
+
+	if err := journal.Complete("op-first"); err != nil {
+		t.Fatal(err)
+	}
+	proceed, done, err = claimOperation(journal, "op-first", "scope")
+	if proceed || !done || err != nil {
+		t.Fatalf("re-claim of a completed operation: proceed=%v done=%v err=%v", proceed, done, err)
+	}
+
+	if _, _, err := claimOperation(journal, "op-second", "scope"); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Fail("op-second"); err != nil {
+		t.Fatal(err)
+	}
+	proceed, done, err = claimOperation(journal, "op-second", "scope")
+	if proceed || !done || err == nil || !strings.Contains(err.Error(), "previously failed") {
+		t.Fatalf("re-claim of a failed operation: proceed=%v done=%v err=%v", proceed, done, err)
+	}
+}
+
+func TestClaimOperationSurfacesJournalStartError(t *testing.T) {
+	sentinel := errors.New("journal unavailable")
+	if _, _, err := claimOperation(failingJournal{startErr: sentinel}, "op", "scope"); !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// failingJournal is a minimal core.OperationJournal whose Start always
+// fails, for exercising claimOperation's own error-wrapping branch without
+// a real backing store.
+type failingJournal struct {
+	startErr error
+}
+
+func (failingJournal) Lookup(core.OperationID) (core.OperationRecord, bool) {
+	return core.OperationRecord{}, false
+}
+func (f failingJournal) Start(core.OperationID, string) (bool, error) { return false, f.startErr }
+func (failingJournal) Complete(core.OperationID) error                { return nil }
+func (failingJournal) Fail(core.OperationID) error                    { return nil }
+
+func TestManifestBuildersProduceValidDeterministicKubernetesResources(t *testing.T) {
+	deployment := deploymentManifest("api", "prod", "registry.example/api:v1", 3, 8080, "100m", "128Mi")
+	var decodedDeployment map[string]any
+	if err := json.Unmarshal(deployment, &decodedDeployment); err != nil {
+		t.Fatalf("deploymentManifest produced invalid JSON: %v", err)
+	}
+	if decodedDeployment["kind"] != "Deployment" {
+		t.Fatalf("kind=%v", decodedDeployment["kind"])
+	}
+	spec := decodedDeployment["spec"].(map[string]any)
+	if spec["replicas"] != float64(3) {
+		t.Fatalf("replicas=%v", spec["replicas"])
+	}
+	container := spec["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	if container["image"] != "registry.example/api:v1" {
+		t.Fatalf("image=%v", container["image"])
+	}
+	securityContext := container["securityContext"].(map[string]any)
+	if securityContext["allowPrivilegeEscalation"] != false || securityContext["readOnlyRootFilesystem"] != true {
+		t.Fatalf("container securityContext=%v", securityContext)
+	}
+	if deployment2 := deploymentManifest("api", "prod", "registry.example/api:v1", 3, 8080, "100m", "128Mi"); !bytes.Equal(deployment, deployment2) {
+		t.Fatal("deploymentManifest is not deterministic for identical inputs")
+	}
+
+	service := serviceManifest("api", "prod", 8080)
+	var decodedService map[string]any
+	if err := json.Unmarshal(service, &decodedService); err != nil {
+		t.Fatalf("serviceManifest produced invalid JSON: %v", err)
+	}
+	if decodedService["kind"] != "Service" {
+		t.Fatalf("kind=%v", decodedService["kind"])
+	}
+	port := decodedService["spec"].(map[string]any)["ports"].([]any)[0].(map[string]any)
+	if port["port"] != float64(8080) || port["targetPort"] != float64(8080) {
+		t.Fatalf("service port=%v", port)
+	}
+
+	job := jobManifest("migrate", "prod", "registry.example/migrate:v1", "200m", "256Mi")
+	var decodedJob map[string]any
+	if err := json.Unmarshal(job, &decodedJob); err != nil {
+		t.Fatalf("jobManifest produced invalid JSON: %v", err)
+	}
+	if decodedJob["kind"] != "Job" {
+		t.Fatalf("kind=%v", decodedJob["kind"])
+	}
+	jobSpec := decodedJob["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	if jobSpec["restartPolicy"] != "Never" {
+		t.Fatalf("job restartPolicy=%v", jobSpec["restartPolicy"])
+	}
+
+	single := combinedManifest(deployment)
+	if !bytes.Equal(single, deployment) {
+		t.Fatal("combinedManifest with a single document must return it unwrapped")
+	}
+	combined := combinedManifest(deployment, service)
+	var decodedList map[string]any
+	if err := json.Unmarshal(combined, &decodedList); err != nil {
+		t.Fatalf("combinedManifest produced invalid JSON: %v", err)
+	}
+	if decodedList["kind"] != "List" {
+		t.Fatalf("kind=%v", decodedList["kind"])
+	}
+	if items := decodedList["items"].([]any); len(items) != 2 {
+		t.Fatalf("combined items=%d, want 2", len(items))
+	}
+}
+
+// TestRunClaimedOperationsCoversEveryOutcome drives runClaimedOperations
+// directly (rather than through runDeploy/runRollback) to reach branches
+// those higher-level callers' own tests don't: an already-completed claim
+// short-circuiting as success, a previously-failed claim reported as an
+// error, and the journal's Fail path when the wrapped operation itself
+// fails.
+func TestRunClaimedOperationsCoversEveryOutcome(t *testing.T) {
+	succeed := func(string, []string, io.Reader, io.Writer, io.Writer) error { return nil }
+	fail := func(string, []string, io.Reader, io.Writer, io.Writer) error { return errors.New("boom") }
+	op := []externalOperation{{name: "kubectl", args: []string{"apply"}}}
+
+	t.Run("dry run bypasses the journal entirely", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runClaimedOperations("deploy", "deploy", []string{"ns", "name"}, op, true, &stdout, &stderr, succeed)
+		if code != 0 || !strings.Contains(stdout.String(), "kubectl apply") {
+			t.Fatalf("code=%d stdout=%s", code, stdout.String())
+		}
+	})
+
+	t.Run("first claim executes and completes", func(t *testing.T) {
+		journal := t.TempDir()
+		previous := operationJournalFor
+		operationJournalFor = func() (core.OperationJournal, error) { return idempotency.NewFileJournal(journal) }
+		t.Cleanup(func() { operationJournalFor = previous })
+
+		var stdout, stderr bytes.Buffer
+		code := runClaimedOperations("deploy", "deploy", []string{"ns", "name"}, op, false, &stdout, &stderr, succeed)
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		code = runClaimedOperations("deploy", "deploy", []string{"ns", "name"}, op, false, &stdout, &stderr, succeed)
+		if code != 0 || !strings.Contains(stderr.String(), "already applied") {
+			t.Fatalf("repeat claim: code=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	t.Run("failed operation is journaled as failed and reported on retry", func(t *testing.T) {
+		journal := t.TempDir()
+		previous := operationJournalFor
+		operationJournalFor = func() (core.OperationJournal, error) { return idempotency.NewFileJournal(journal) }
+		t.Cleanup(func() { operationJournalFor = previous })
+
+		var stdout, stderr bytes.Buffer
+		code := runClaimedOperations("deploy", "deploy", []string{"ns", "name"}, op, false, &stdout, &stderr, fail)
+		if code != 1 || !strings.Contains(stderr.String(), "boom") {
+			t.Fatalf("first (failing) claim: code=%d stderr=%s", code, stderr.String())
+		}
+
+		stdout.Reset()
+		stderr.Reset()
+		code = runClaimedOperations("deploy", "deploy", []string{"ns", "name"}, op, false, &stdout, &stderr, succeed)
+		if code != 1 || !strings.Contains(stderr.String(), "previously failed") {
+			t.Fatalf("retry after failure: code=%d stderr=%s", code, stderr.String())
+		}
+	})
+
+	t.Run("journal open failure is reported", func(t *testing.T) {
+		sentinel := errors.New("journal store unavailable")
+		previous := operationJournalFor
+		operationJournalFor = func() (core.OperationJournal, error) { return nil, sentinel }
+		t.Cleanup(func() { operationJournalFor = previous })
+
+		var stdout, stderr bytes.Buffer
+		code := runClaimedOperations("deploy", "deploy", []string{"ns", "name"}, op, false, &stdout, &stderr, succeed)
+		if code != 1 || !strings.Contains(stderr.String(), sentinel.Error()) {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+	})
+}
+
+// failingStore is a minimal workloadstate.Store whose Lookup and Save
+// return configurable errors, exercising transitionPublishWorkload's
+// error branches without a real filesystem-backed store.
+type failingStore struct {
+	lookupState core.RuntimeState
+	lookupFound bool
+	lookupErr   error
+	saveErr     error
+}
+
+func (f failingStore) Lookup(core.WorkloadID) (core.RuntimeState, bool, error) {
+	return f.lookupState, f.lookupFound, f.lookupErr
+}
+func (f failingStore) Save(core.WorkloadID, core.RuntimeState) error { return f.saveErr }
+
+func TestTransitionPublishWorkload(t *testing.T) {
+	if warning, ok := transitionPublishWorkload(nil, "w", core.PhasePublishing); !ok || warning != "" {
+		t.Fatalf("nil store: warning=%q ok=%t", warning, ok)
+	}
+
+	sentinel := errors.New("lookup boom")
+	if warning, ok := transitionPublishWorkload(failingStore{lookupErr: sentinel}, "w", core.PhasePublishing); ok || !strings.Contains(warning, "lookup boom") {
+		t.Fatalf("lookup error: warning=%q ok=%t", warning, ok)
+	}
+
+	// Not found defaults to PhaseBuilt, from which PhasePublishing is a
+	// valid transition per internal/core/statemachine.go's own table.
+	store := failingStore{lookupFound: false}
+	if warning, ok := transitionPublishWorkload(store, "w", core.PhasePublishing); !ok || warning != "" {
+		t.Fatalf("not found: warning=%q ok=%t", warning, ok)
+	}
+
+	// PhaseBuilt -> PhaseDeploying is not a valid direct transition.
+	invalidFrom := failingStore{lookupFound: true, lookupState: core.RuntimeState{Phase: core.PhaseBuilt}}
+	if warning, ok := transitionPublishWorkload(invalidFrom, "w", core.PhaseDeploying); ok || warning == "" {
+		t.Fatalf("invalid transition: warning=%q ok=%t", warning, ok)
+	}
+
+	saveSentinel := errors.New("save boom")
+	saveFails := failingStore{lookupFound: true, lookupState: core.RuntimeState{Phase: core.PhaseBuilt}, saveErr: saveSentinel}
+	if warning, ok := transitionPublishWorkload(saveFails, "w", core.PhasePublishing); ok || !strings.Contains(warning, "save boom") {
+		t.Fatalf("save error: warning=%q ok=%t", warning, ok)
+	}
+
+	real, err := workloadstate.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if warning, ok := transitionPublishWorkload(real, "w", core.PhasePublishing); !ok || warning != "" {
+		t.Fatalf("real store success: warning=%q ok=%t", warning, ok)
+	}
+}
+
+func TestTcpProbeAndResourceRequestsShapes(t *testing.T) {
+	probe := tcpProbe(8080, 5, 10)
+	if probe["initialDelaySeconds"] != 5 || probe["periodSeconds"] != 10 {
+		t.Fatalf("probe=%v", probe)
+	}
+	tcpSocket, ok := probe["tcpSocket"].(map[string]any)
+	if !ok || tcpSocket["port"] != 8080 {
+		t.Fatalf("probe tcpSocket=%v", probe["tcpSocket"])
+	}
+
+	resources := resourceRequests("250m", "512Mi")
+	requests, ok := resources["requests"].(map[string]string)
+	if !ok || requests["cpu"] != "250m" || requests["memory"] != "512Mi" {
+		t.Fatalf("resources=%v", resources)
+	}
+}

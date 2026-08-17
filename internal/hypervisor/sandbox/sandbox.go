@@ -167,15 +167,29 @@ const (
 // exercise (FIFOs, hardlinks, symlinks, atomic renames) - not guessed. See
 // syscallNumberX8664 in syscalls_linux.go for the syscall-number source and
 // per-entry notes, including why execve is deliberately absent.
+//
+// openat2 and fchmodat2 were added separately: buildGuestInitramfs's
+// Podman-rootfs confinement (rootfs_linux.go) opens the container's root
+// via os.Root/os.OpenRoot and copies its tree with os.Root.Mkdir/Chmod/
+// OpenFile/Symlink, all confined against escaping the root. Go's runtime
+// implements that confinement on Linux with openat2's RESOLVE_BENEATH for
+// opens, and os.Root.Chmod specifically needs fchmodat2 - plain fchmodat
+// has no AT_SYMLINK_NOFOLLOW support at all, so there is no old-syscall
+// fallback for a confined, symlink-safe chmod. That call path postdates
+// the strace verification above and both syscalls were missing here, so
+// this thread was SIGSYS-killed the instant Create/Start reached it
+// (silently: SeccompActionKill leaves no Go-level error or log output).
+// Verified end-to-end against a real kernel build and a real KVM boot
+// through the exact create -> start lifecycle Podman drives.
 func DefaultSeccompProfile() SeccompProfile {
 	return SeccompProfile{
 		AllowedSyscalls: []string{
 			// File I/O
 			"read", "write", "pread64", "pwrite64", "readv", "writev",
-			"lseek", "close", "fcntl", "openat", "newfstatat", "fstat",
+			"lseek", "close", "fcntl", "openat", "openat2", "newfstatat", "fstat",
 			"access", "getdents64", "mkdirat", "mknodat", "renameat",
 			"unlinkat", "symlinkat", "linkat", "readlinkat", "fchmodat",
-			"fchmod", "fsync", "flock",
+			"fchmod", "fchmodat2", "fsync", "flock",
 			"utimensat", "chdir", "dup3", "copy_file_range",
 			// Memory management
 			"brk", "mmap", "mprotect", "munmap", "madvise",
