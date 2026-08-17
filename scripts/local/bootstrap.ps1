@@ -39,7 +39,10 @@ New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 $Suffix = if ($TargetOS -eq "windows") { ".exe" } else { "" }
 $Version = (& git -C $RepoRoot describe --tags --always --dirty 2>$null)
 if (-not $Version) { $Version = "dev" }
-$Commands = @("platform-factory", "oci-builder", "example-service", "microvm-init", "platform-factory-control-plane", "platform-factory-worker")
+$Commands = @("platform-factory", "oci-builder", "example-service", "microvm-init", "microvm-initramfs", "platform-factory-control-plane", "platform-factory-worker")
+if ($TargetOS -eq "linux" -and $TargetArch -eq "amd64") { $Commands += "platform-factory-runtime" }
+else { Write-Host "platform-factory-runtime skipped: OCI runtime integration requires linux/amd64 (target is $TargetOS/$TargetArch)" }
+$Languages = @("go", "python", "node", "java", "dotnet", "rust", "ruby", "php")
 $NativeVMM = $TargetOS -eq "darwin" -and $HostOS -eq $TargetOS -and $HostArch -eq $TargetArch
 if ($TargetOS -eq "darwin") {
   if ($NativeVMM) {
@@ -65,6 +68,19 @@ try {
       -o (Join-Path $BinDir "$CommandName$Suffix") `
       (Join-Path $RepoRoot "cmd/$CommandName")
     if ($LASTEXITCODE -ne 0) { throw "Build failed for $CommandName." }
+  }
+  foreach ($Language in $Languages) {
+    $PluginName = "platform-factory-lang-$Language"
+    Write-Host "building $PluginName for $TargetOS/$TargetArch..." -ForegroundColor Cyan
+    $env:CGO_ENABLED = "0"
+    $env:GOOS = $TargetOS
+    $env:GOARCH = $TargetArch
+    Push-Location (Join-Path $RepoRoot "plugins/lang-$Language")
+    try {
+      & go build -trimpath "-ldflags=-s -w" -o (Join-Path $BinDir "$PluginName$Suffix") .
+      if ($LASTEXITCODE -ne 0) { throw "Build failed for $PluginName." }
+    }
+    finally { Pop-Location }
   }
 }
 finally {
@@ -130,7 +146,7 @@ deactivate_platform_factory() {
   target_arch = $TargetArch
   version = $Version
   native_vmm = $NativeVMM
-  commands = $Commands
+  commands = @($Commands + ($Languages | ForEach-Object { "platform-factory-lang-$_" }))
 } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $Environment "environment.json") -Encoding utf8
 
 if ($InstallPrefix) {
@@ -138,6 +154,9 @@ if ($InstallPrefix) {
   New-Item -ItemType Directory -Path $InstallBin -Force | Out-Null
   foreach ($CommandName in $Commands) {
     Copy-Item -LiteralPath (Join-Path $BinDir "$CommandName$Suffix") -Destination $InstallBin -Force
+  }
+  foreach ($Language in $Languages) {
+    Copy-Item -LiteralPath (Join-Path $BinDir "platform-factory-lang-$Language$Suffix") -Destination $InstallBin -Force
   }
   Write-Host "installed commands in $InstallBin" -ForegroundColor Green
 }

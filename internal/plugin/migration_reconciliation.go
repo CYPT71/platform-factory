@@ -8,8 +8,8 @@ import (
 	"errors"
 	"fmt"
 
-	appmigration "github.com/CYPT71/secure-oci-base/internal/app/migration"
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
+	appmigration "github.com/CYPT71/platform-factory/internal/app/migration"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
 )
 
 const migrationDifferenceDomain = "platform-factory/plugin-migration-difference/v1\x00"

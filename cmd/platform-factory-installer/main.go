@@ -1,7 +1,7 @@
 // Command platform-factory-installer is an interactive terminal installer that
 // builds and installs only the platform-factory binaries an end user selects,
 // instead of the full command set scripts/local/bootstrap.sh produces for
-// CI and cross-compilation. Run it from within the secure-oci-base repo:
+// CI and cross-compilation. Run it from within the platform-factory-base repo:
 //
 //	go run ./cmd/platform-factory-installer
 //
@@ -172,7 +172,7 @@ func findRepoRoot() (string, error) {
 	}
 	gomod := strings.TrimSpace(string(out))
 	if gomod == "" || filepath.Base(gomod) != "go.mod" {
-		return "", errors.New("run the installer from within the secure-oci-base repository (go.mod not found)")
+		return "", errors.New("run the installer from within the platform-factory-base repository (go.mod not found)")
 	}
 	return filepath.Dir(gomod), nil
 }

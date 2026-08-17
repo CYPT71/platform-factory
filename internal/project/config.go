@@ -12,73 +12,54 @@ import (
 	"strings"
 
 	"go.yaml.in/yaml/v3"
-
-	"github.com/CYPT71/secure-oci-base/internal/oci"
 )
 
-// ConfigNames is checked in order at each directory level (FindConfigFile),
-// so earlier entries win when more than one is present in the same
-// directory. platform-factory.yaml/.yml are appended, not prepended:
-// they're fully first-class config names for every command in this list,
-// but appending preserves ConfigNames[0]'s existing value (the legacy
-// suggestion text in suggestProjectConfig depends on it) rather than
-// silently changing already-tested user-facing behavior as a side effect
-// of adding a new name. cmd/platform-factory's `init` command is what actually
-// writes platform-factory.yaml and, on migration, removes the legacy
-// file it replaces - so the two names are not expected to coexist for a
-// project it initialized.
+// ConfigNames is ordered by discovery precedence.
 var ConfigNames = []string{
+	"pf.yaml", "pf.yml",
 	".config_image.yaml", ".config_image.yml",
 	".config_img.yaml", ".config_img.yml",
 	".config_image.json", ".config_img.json",
 	"platform-factory.yaml", "platform-factory.yml",
 }
 
+type DependencyManagement struct {
+	Mode string `yaml:"mode" json:"mode"`
+	File string `yaml:"file,omitempty" json:"file,omitempty"`
+}
+
 type Config struct {
-	Version        int               `yaml:"version" json:"version"`
-	Language       string            `yaml:"language" json:"language"`
-	Project        string            `yaml:"project,omitempty" json:"project,omitempty"`
-	Runtime        string            `yaml:"runtime,omitempty" json:"runtime,omitempty"`
-	Artifact       string            `yaml:"artifact" json:"artifact"`
-	Output         string            `yaml:"output,omitempty" json:"output,omitempty"`
-	Image          string            `yaml:"image,omitempty" json:"image,omitempty"`
-	Tag            string            `yaml:"tag,omitempty" json:"tag,omitempty"`
-	Platform       string            `yaml:"platform,omitempty" json:"platform,omitempty"`
-	Entrypoint     string            `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty"`
-	Profile        string            `yaml:"profile,omitempty" json:"profile,omitempty"`
-	Args           []string          `yaml:"args,omitempty" json:"args,omitempty"`
-	Env            map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	User           string            `yaml:"user,omitempty" json:"user,omitempty"`
-	Isolation      string            `yaml:"isolation,omitempty" json:"isolation,omitempty"`
-	RuntimeEngine  string            `yaml:"runtime_engine,omitempty" json:"runtime_engine,omitempty"`
-	Network        string            `yaml:"network,omitempty" json:"network,omitempty"`
-	Ports          []string          `yaml:"ports,omitempty" json:"ports,omitempty"`
-	IncludeProject *bool             `yaml:"include_project,omitempty" json:"include_project,omitempty"`
-	Include        []Dependency      `yaml:"include,omitempty" json:"include,omitempty"`
-	SharedDeps     []Dependency      `yaml:"shared_deps,omitempty" json:"shared_deps,omitempty"`
-	FreezeCommand  []string          `yaml:"freeze_command,omitempty" json:"freeze_command,omitempty"`
-	BuildCommand   []string          `yaml:"build_command,omitempty" json:"build_command,omitempty"`
-	SemanticLayers bool              `yaml:"semantic_layers,omitempty" json:"semantic_layers,omitempty"`
-	LegacyDisks    *LegacyDiskConfig `yaml:"legacy_disks,omitempty" json:"legacy_disks,omitempty"`
-	// LanguagePlugin opts this project into the separate-module language
-	// plugin pattern (plugins/lang-<language>, e.g. plugins/lang-python -
-	// see docs/language-plugin-layers.md) instead of the CLI's built-in
-	// freeze adapter: `pf project build` requires a
-	// platform-factory-lang-<language> binary on PATH and uses it for
-	// both freeze and the extra OCI layer it contributes. False (the
-	// default) leaves every existing project's behavior byte-for-byte
-	// unchanged - this is opt-in, never inferred from a binary merely
-	// existing on PATH.
+	Version              int                   `yaml:"version" json:"version"`
+	Language             string                `yaml:"language" json:"language"`
+	DependencyManagement *DependencyManagement `yaml:"dependency_management,omitempty" json:"dependency_management,omitempty"`
+	Project              string                `yaml:"project,omitempty" json:"project,omitempty"`
+	Runtime              string                `yaml:"runtime,omitempty" json:"runtime,omitempty"`
+	Artifact             string                `yaml:"artifact" json:"artifact"`
+	Output               string                `yaml:"output,omitempty" json:"output,omitempty"`
+	Image                string                `yaml:"image,omitempty" json:"image,omitempty"`
+	Tag                  string                `yaml:"tag,omitempty" json:"tag,omitempty"`
+	Platform             string                `yaml:"platform,omitempty" json:"platform,omitempty"`
+	Entrypoint           string                `yaml:"entrypoint,omitempty" json:"entrypoint,omitempty"`
+	Profile              string                `yaml:"profile,omitempty" json:"profile,omitempty"`
+	Args                 []string              `yaml:"args,omitempty" json:"args,omitempty"`
+	Env                  map[string]string     `yaml:"env,omitempty" json:"env,omitempty"`
+	User                 string                `yaml:"user,omitempty" json:"user,omitempty"`
+	Isolation            string                `yaml:"isolation,omitempty" json:"isolation,omitempty"`
+	RuntimeEngine        string                `yaml:"runtime_engine,omitempty" json:"runtime_engine,omitempty"`
+	Network              string                `yaml:"network,omitempty" json:"network,omitempty"`
+	Ports                []string              `yaml:"ports,omitempty" json:"ports,omitempty"`
+	IncludeProject       *bool                 `yaml:"include_project,omitempty" json:"include_project,omitempty"`
+	Include              []Dependency          `yaml:"include,omitempty" json:"include,omitempty"`
+	SharedDeps           []Dependency          `yaml:"shared_deps,omitempty" json:"shared_deps,omitempty"`
+	FreezeCommand        []string              `yaml:"freeze_command,omitempty" json:"freeze_command,omitempty"`
+	BuildCommand         []string              `yaml:"build_command,omitempty" json:"build_command,omitempty"`
+	SemanticLayers       bool                  `yaml:"semantic_layers,omitempty" json:"semantic_layers,omitempty"`
+	LegacyDisks          *LegacyDiskConfig     `yaml:"legacy_disks,omitempty" json:"legacy_disks,omitempty"`
+	// LanguagePlugin delegates freeze and dependency-layer creation.
 	LanguagePlugin bool `yaml:"language_plugin,omitempty" json:"language_plugin,omitempty"`
 }
 
-// LegacyDiskConfig records which legacy VM disk(s) `platform-factory
-// init` found in the project directory and which one was resolved (by
-// internal/vmdisk.SelectBootDisk, or an explicit --boot-disk/prompt
-// answer) as the boot disk. Paths are relative to the project root.
-// Purely descriptive today - see docs/legacy-vm-disk-boot.md for what
-// consumes it (currently nothing yet; `platform-factory microvm
-// run-legacy-disk` still takes its own --disk flags directly).
+// LegacyDiskConfig records relative legacy VM disk paths discovered by init.
 type LegacyDiskConfig struct {
 	Boot string   `yaml:"boot" json:"boot"`
 	Data []string `yaml:"data,omitempty" json:"data,omitempty"`
@@ -87,9 +68,7 @@ type LegacyDiskConfig struct {
 type Dependency struct {
 	Source      string `yaml:"source" json:"source"`
 	Destination string `yaml:"destination" json:"destination"`
-	// Category assigns the collected files to a semantic layer
-	// (toolchain, dependencies, application or metadata) when
-	// semantic_layers is enabled. Empty keeps the flow's default.
+	// Category selects a semantic OCI layer.
 	Category string `yaml:"category,omitempty" json:"category,omitempty"`
 }
 
@@ -100,14 +79,47 @@ type Loaded struct {
 }
 
 func Discover(start, explicit string) (Loaded, error) {
+	var loaded Loaded
+	var err error
 	if explicit != "" {
-		return Load(explicit)
+		loaded, err = Load(explicit)
+	} else {
+		var filename string
+		filename, err = FindConfigFile(start)
+		if err == nil {
+			loaded, err = Load(filename)
+		}
 	}
-	filename, err := FindConfigFile(start)
 	if err != nil {
 		return Loaded{}, err
 	}
-	return Load(filename)
+	lockName := "pf.lock"
+	base := filepath.Base(loaded.File)
+	if base == "platform-factory.yaml" || base == "platform-factory.yml" {
+		lockName = "platform-factory.lock"
+	}
+	lockPath := filepath.Join(filepath.Dir(loaded.File), lockName)
+	otherLockName := "platform-factory.lock"
+	if lockName == otherLockName {
+		otherLockName = "pf.lock"
+	}
+	otherLockPath := filepath.Join(filepath.Dir(loaded.File), otherLockName)
+	if _, otherErr := os.Lstat(otherLockPath); otherErr == nil {
+		return Loaded{}, fmt.Errorf("ambiguous project locks: both %s and %s exist; keep only the lock matching %s", lockName, otherLockName, base)
+	} else if !errors.Is(otherErr, os.ErrNotExist) {
+		return Loaded{}, fmt.Errorf("inspect alternate project lock: %w", otherErr)
+	}
+	if info, statErr := os.Lstat(lockPath); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return Loaded{}, fmt.Errorf("project lock %s must be a regular file, not a symlink", lockPath)
+		}
+		if _, err := LoadLock(lockPath); err != nil {
+			return Loaded{}, err
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return Loaded{}, fmt.Errorf("inspect project lock: %w", statErr)
+	}
+	return loaded, nil
 }
 
 // FindConfigFile walks from start upward to the filesystem root and
@@ -118,11 +130,18 @@ func FindConfigFile(start string) (string, error) {
 		return "", err
 	}
 	for {
+		var matches []string
 		for _, name := range ConfigNames {
 			candidate := filepath.Join(root, name)
 			if info, statErr := os.Stat(candidate); statErr == nil && info.Mode().IsRegular() {
-				return candidate, nil
+				matches = append(matches, candidate)
 			}
+		}
+		if len(matches) > 1 {
+			return "", fmt.Errorf("multiple project configurations found in %s; keep exactly one: %s", root, strings.Join(matches, ", "))
+		}
+		if len(matches) == 1 {
+			return matches[0], nil
 		}
 		parent := filepath.Dir(root)
 		if parent == root {
@@ -198,6 +217,19 @@ func (loaded *Loaded) defaults() {
 
 func (loaded Loaded) Validate() error {
 	config := loaded.Config
+	if dependency := config.DependencyManagement; dependency != nil {
+		switch dependency.Mode {
+		case "none", "manifest", "unresolved", "external", "unknown":
+		default:
+			return errors.New("dependency_management.mode must be none, manifest, unresolved, external, or unknown")
+		}
+		if dependency.Mode == "manifest" && strings.TrimSpace(dependency.File) == "" {
+			return errors.New("dependency_management.file is required in manifest mode")
+		}
+		if dependency.Mode != "manifest" && dependency.File != "" {
+			return errors.New("dependency_management.file is only valid in manifest mode")
+		}
+	}
 	if config.Version > CurrentConfigVersion {
 		return fmt.Errorf("config version %d is newer than this platform-factory supports (max %d); upgrade platform-factory",
 			config.Version, CurrentConfigVersion)
@@ -249,7 +281,7 @@ func (loaded Loaded) Validate() error {
 			return errors.New("include/shared_deps require a NUL-free source and clean absolute non-root destination")
 		}
 		switch dependency.Category {
-		case "", oci.CategoryToolchain, oci.CategoryDependencies, oci.CategoryApplication, oci.CategoryMetadata:
+		case "", CategoryToolchain, CategoryDependencies, CategoryApplication, CategoryMetadata:
 		default:
 			return fmt.Errorf("unknown dependency category %q (want toolchain, dependencies, application, metadata, or empty)", dependency.Category)
 		}

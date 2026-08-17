@@ -11,12 +11,14 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/mtls"
-	"github.com/CYPT71/secure-oci-base/internal/provenance"
+	"github.com/CYPT71/platform-factory/internal/cache"
+	"github.com/CYPT71/platform-factory/internal/mtls"
+	"github.com/CYPT71/platform-factory/internal/provenance"
 )
 
 func main() {
@@ -41,6 +43,9 @@ func run(args []string) error {
 	pollInterval := fs.Duration("poll-interval", 2*time.Second, "")
 	executionDuration := fs.Duration("simulated-execution-duration", 500*time.Millisecond,
 		"duration of the built-in demonstration executor")
+	executionRoot := fs.String("execution-root", "", "directory confining real pipeline lease workspaces")
+	cacheDir := fs.String("cache-dir", "", "local verified CAS directory; defaults under execution-root")
+	demoSimulate := fs.Bool("demo-simulate", false, "use the non-production demonstration executor")
 	signProvenance := fs.Bool("sign-provenance", false, "generate a workload identity at startup and sign every "+
 		"lease completion's provenance record with it; the control plane only verifies signatures for workers "+
 		"that registered a public key, so this is safe to enable per-worker independently")
@@ -77,13 +82,35 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("build TLS config: %w", err)
 	}
+	if (*executionRoot == "") == !*demoSimulate {
+		return fmt.Errorf("exactly one of -execution-root or -demo-simulate is required")
+	}
 
-	client := &Client{
-		HTTP:    &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}, Timeout: 30 * time.Second},
-		BaseURL: *controlPlaneURL,
-		Execute: func(ctx context.Context, lease Lease) (string, error) {
+	var execute func(context.Context, Lease) (string, error)
+	if *demoSimulate {
+		execute = func(ctx context.Context, lease Lease) (string, error) {
 			return simulateExecutionFor(ctx, lease, *executionDuration)
-		},
+		}
+	} else {
+		if *cacheDir == "" {
+			*cacheDir = filepath.Join(*executionRoot, ".cache")
+		}
+		store, openErr := cache.Open(*cacheDir)
+		if openErr != nil {
+			return fmt.Errorf("open worker CAS: %w", openErr)
+		}
+		execute, err = pipelineLeaseExecutor(*executionRoot, store, func(ctx context.Context, descriptor cache.Descriptor) error {
+			return cache.PullBlob(ctx, &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}, Timeout: 30 * time.Second},
+				strings.TrimRight(*controlPlaneURL, "/")+"/cas/blobs", store, descriptor, cache.DefaultRemoteBlobLimit)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	client := &Client{
+		HTTP:        &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConfig}, Timeout: 30 * time.Second},
+		BaseURL:     *controlPlaneURL,
+		Execute:     execute,
 		MaxParallel: *maxParallel,
 	}
 	if *signProvenance {

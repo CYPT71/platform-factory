@@ -12,22 +12,14 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor"
-	"github.com/CYPT71/secure-oci-base/internal/microvm"
-	"github.com/CYPT71/secure-oci-base/internal/networking"
+	"github.com/CYPT71/platform-factory/internal/hypervisor"
+	"github.com/CYPT71/platform-factory/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/networking"
 )
 
-// The native-KVM `microvm run/start` backend replaces run-microvm.sh's
-// QEMU boot with internal/hypervisor/kvm.RunLinuxWithOptions directly, once
-// virtio-blk/virtio-net made that viable (see the roadmap entry this
-// change closes). QEMU's SLIRP `hostfwd=` has no equivalent in this VMM's
-// TAP-based networking, so port publishing - the command's primary use
-// case, always active via at least one synthesized default forward, see
-// microvm.go's spec-building code - is reproduced with a fixed
-// point-to-point TAP link plus a host-side TCP relay
-// (internal/microvm/forward) rather than real NAT. See nativeKVMEligible
-// for the exact, narrower conditions under which this backend is used at
-// all; every other case still runs run-microvm.sh/QEMU unchanged.
+// Native KVM uses a point-to-point TAP link and host TCP relay because its
+// networking has no QEMU SLIRP hostfwd equivalent. Ineligible configurations
+// use the explicit QEMU fallback unless --require-native is set.
 const (
 	nativeGuestIP   = "169.254.100.2"
 	nativeHostCIDR  = "169.254.100.1/30"
@@ -35,13 +27,7 @@ const (
 	nativeGatewayIP = "169.254.100.1"
 )
 
-// nativeKVMEligible reports whether spec's run/start can use a native
-// backend (KVM on linux/amd64, HVF on darwin - see nativeBackendImplemented)
-// instead of run-microvm.sh/QEMU, and if not, why (logged, not silently
-// decided). Despite the name (kept for now to avoid a wide rename), this
-// has been capability-aware and cross-platform since the HVF backend
-// gained networking (5 août 2026, UNVERIFIED on real hardware - see
-// docs/legacy-vm-disk-boot.md) - it no longer hardcodes linux/amd64.
+// nativeKVMEligible reports whether the native backend supports spec.
 func nativeKVMEligible(ctx context.Context, spec microvm.Spec) (bool, string) {
 	if !nativeBackendImplemented() {
 		return false, fmt.Sprintf("no native backend is wired up for %s/%s yet, falling back to QEMU", runtime.GOOS, runtime.GOARCH)

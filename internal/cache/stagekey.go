@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	api "github.com/CYPT71/secure-oci-base/internal/core"
+	api "github.com/CYPT71/platform-factory/internal/core"
 )
 
 // StageKeyInputs are the components combined into a stage cache key.

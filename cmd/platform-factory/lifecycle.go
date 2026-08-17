@@ -13,21 +13,115 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/app/sbom"
-	"github.com/CYPT71/secure-oci-base/internal/attestation"
-	"github.com/CYPT71/secure-oci-base/internal/layout"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
-	"github.com/CYPT71/secure-oci-base/internal/policy"
-	provenancegen "github.com/CYPT71/secure-oci-base/internal/provenance"
-	"github.com/CYPT71/secure-oci-base/internal/registry"
-	"github.com/CYPT71/secure-oci-base/internal/signing"
+	"github.com/CYPT71/platform-factory/internal/app/sbom"
+	"github.com/CYPT71/platform-factory/internal/attestation"
+	"github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/idempotency"
+	"github.com/CYPT71/platform-factory/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/policy"
+	"github.com/CYPT71/platform-factory/internal/project"
+	provenancegen "github.com/CYPT71/platform-factory/internal/provenance"
+	"github.com/CYPT71/platform-factory/internal/publicationtarget"
+	"github.com/CYPT71/platform-factory/internal/registry"
+	"github.com/CYPT71/platform-factory/internal/signing"
+	"github.com/CYPT71/platform-factory/internal/strictjson"
+	"github.com/CYPT71/platform-factory/internal/workloadstate"
 )
+
+// operationJournalFor is replaceable by hermetic tests.
+var operationJournalFor = func() (core.OperationJournal, error) {
+	return idempotency.NewFileJournal(defaultOperationJournalRoot())
+}
+
+func defaultOperationJournalRoot() string {
+	return defaultLifecycleRoot("PLATFORM_FACTORY_OPERATION_JOURNAL_DIR", "operation-journal")
+}
+
+// workloadStateStoreFor is replaceable by hermetic tests.
+var workloadStateStoreFor = func() (workloadstate.Store, error) {
+	return workloadstate.NewFileStore(defaultWorkloadStateRoot())
+}
+
+func defaultWorkloadStateRoot() string {
+	return defaultLifecycleRoot("PLATFORM_FACTORY_WORKLOAD_STATE_DIR", "workload-state")
+}
+
+func defaultLifecycleRoot(environment, name string) string {
+	if configured := strings.TrimSpace(os.Getenv(environment)); configured != "" {
+		return configured
+	}
+	if cacheDir, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(cacheDir, "platform-factory", name)
+	}
+	return filepath.Join(".platform-factory", name)
+}
+
+// transitionPublishWorkload records publish progress without changing the
+// registry operation's outcome when state persistence fails.
+func transitionPublishWorkload(store workloadstate.Store, workloadID core.WorkloadID, to core.Phase) (warning string, ok bool) {
+	if store == nil {
+		return "", true
+	}
+	current, found, err := store.Lookup(workloadID)
+	if err != nil {
+		return fmt.Sprintf("workload state: lookup %s: %v", workloadID, err), false
+	}
+	if !found {
+		current = core.RuntimeState{Phase: core.PhaseBuilt}
+	}
+	next, err := current.TransitionTo(to)
+	if err != nil {
+		return fmt.Sprintf("workload state: %v", err), false
+	}
+	if err := store.Save(workloadID, next); err != nil {
+		return fmt.Sprintf("workload state: save %s: %v", workloadID, err), false
+	}
+	return "", true
+}
+
+// cliOperationID deterministically identifies one logical mutation.
+func cliOperationID(domain string, parts ...string) core.OperationID {
+	return core.OperationID(domain + "-" + core.DeriveID("platform-factory/"+domain+"/v1", parts...))
+}
+
+// cliWorkloadID deterministically identifies one workload with a safe filename.
+func cliWorkloadID(domain string, parts ...string) core.WorkloadID {
+	return core.WorkloadID(domain + "-" + core.DeriveID("platform-factory/workload/"+domain+"/v1", parts...))
+}
+
+// claimOperation prevents replay of completed, failed, or indeterminate work.
+func claimOperation(journal core.OperationJournal, id core.OperationID, scope string) (proceed, done bool, doneErr error) {
+	started, err := journal.Start(id, scope)
+	if err != nil {
+		return false, false, fmt.Errorf("claim operation: %w", err)
+	}
+	if started {
+		return true, false, nil
+	}
+	record, found := journal.Lookup(id)
+	if !found {
+		return false, false, fmt.Errorf("claim operation: %q was not started but is also not recorded", id)
+	}
+	switch record.Status {
+	case core.OperationCompleted:
+		return false, true, nil
+	case core.OperationFailed:
+		return false, true, fmt.Errorf("operation %q previously failed; investigate before retrying", id)
+	default:
+		return false, true, fmt.Errorf("operation %q: %w", id, core.ErrOperationIndeterminate)
+	}
+}
 
 var pushOCI = func(ctx context.Context, layoutName string, target registry.Reference, sourceReference, scheme, username, password, mountFrom, sessionDir string) (registry.Result, error) {
 	client := &registry.Client{
 		Scheme: scheme, Username: username, Password: password,
 		MountFrom: mountFrom, SessionDir: sessionDir,
+	}
+	if err := client.CleanupSessions(7 * 24 * time.Hour); err != nil {
+		return registry.Result{}, err
 	}
 	return client.PushLayoutByDigest(ctx, layoutName, target, sourceReference)
 }
@@ -43,27 +137,48 @@ var pushOCIArtifact = func(ctx context.Context, target registry.Reference, publi
 		artifactType, payloadType, payload)
 }
 
-// runPublishWithContext wraps runPublish with context support for trace_id propagation.
-// Sanetizer-todo item 18: End-to-end trace correlation - COMPLETE
-func runPublishWithContext(ctx context.Context, args []string, stdout, stderr io.Writer, execute containerExecutor) int {
-	// Extract trace_id from context for propagation
-	traceID := observability.TraceIDFromContext(ctx)
-	if traceID == "" {
-		traceID = observability.NewTraceID("cli", "publish").String()
+var verifyRemoteDigest = func(ctx context.Context, repository, digest, scheme, username, password string) error {
+	target, err := registry.ParseReference(repository + ":verification")
+	if err != nil {
+		return err
 	}
+	client := &registry.Client{Scheme: scheme, Username: username, Password: password}
+	_, _, err = client.GetManifest(ctx, target, digest)
+	return err
+}
 
-	// Create context with trace_id
-	ctx = observability.ContextWithTraceID(ctx, traceID)
+func printPublishUsage(output io.Writer, flags *flag.FlagSet) {
+	fmt.Fprintln(output, `platform-factory publish — push a verified OCI layout to a registry, with SBOM/provenance/signature artifacts and a policy gate before any tag moves
 
-	// Pass context to runPublish
-	return runPublish(ctx, args, stdout, stderr, execute)
+Usage:
+  platform-factory publish [OPTIONS] [LAYOUT] IMAGE
+  platform-factory publish --deploy-only [OPTIONS]
+
+Inside a pf.yaml project, "platform-factory publish" with no LAYOUT
+discovers the project's own release bundle (SBOM, provenance, policy
+evidence) instead of requiring you to pass every artifact by hand.
+--push-only is the default and explicit; --deploy-only hands off to
+"platform-factory deploy" using the digest this project already published.
+
+Examples:
+  platform-factory publish oci-image registry.example.com/app:v1
+  platform-factory publish --sign --sbom oci-image registry.example.com/app:v1
+  platform-factory publish --dry-run oci-image registry.example.com/app:v1
+  platform-factory publish --deploy-only
+
+Options:`)
+	flags.SetOutput(output)
+	flags.PrintDefaults()
 }
 
 func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, execute containerExecutor) int {
+	startedAt := time.Now()
 	flags := flag.NewFlagSet("publish", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	dryRun := flags.Bool("dry-run", false, "print operations without executing them")
 	yes := flags.Bool("yes", false, "confirm registry publication")
+	pushOnly := flags.Bool("push-only", false, "publish artifacts without deploying (the default; explicit for automation)")
+	deployOnly := flags.Bool("deploy-only", false, "deploy the project's previously published digest without pushing")
 	sign := flags.Bool("sign", false, "sign the published digest with the native Ed25519 engine")
 	includeSBOM := flags.Bool("sbom", false, "generate and publish a native SBOM artifact")
 	provenance := flags.String("provenance", "", "provenance predicate to publish as a linked artifact")
@@ -80,19 +195,69 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 	mountFrom := flags.String("mount-from", "", "source repository for cross-repository blob mounting")
 	uploadSessionDir := flags.String("upload-session-dir", defaultUploadSessionDir(), "persistent registry upload session directory")
 	outputFormat := flags.String("format", "json", "result format: json or reference")
+	reportsDir := flags.String("reports", "", "write versioned publication metrics to DIR/metrics.json")
+	if containsHelpFlag(args) {
+		printPublishUsage(stdout, flags)
+		return 0
+	}
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
 	}
-	if flags.NArg() != 2 {
-		fmt.Fprintln(stderr, "usage: platform-factory publish [OPTIONS] LAYOUT IMAGE")
+	if *pushOnly && *deployOnly {
+		fmt.Fprintln(stderr, "platform-factory publish: --push-only and --deploy-only are mutually exclusive")
+		return 2
+	}
+	if *deployOnly {
+		if flags.NArg() != 0 {
+			fmt.Fprintln(stderr, "platform-factory publish: --deploy-only consumes the persisted project digest and takes no IMAGE")
+			return 2
+		}
+		deployArgs := []string{}
+		if *dryRun {
+			deployArgs = append(deployArgs, "--dry-run")
+		}
+		if *yes {
+			deployArgs = append(deployArgs, "--yes")
+		}
+		return runDeploy(ctx, deployArgs, stdout, stderr, execute)
+	}
+	if flags.NArg() < 1 || flags.NArg() > 2 {
+		fmt.Fprintln(stderr, "usage: platform-factory publish [OPTIONS] [LAYOUT] IMAGE")
 		return 2
 	}
 	if *provenance != "" && *journal != "" {
 		fmt.Fprintln(stderr, "platform-factory publish: --provenance and --journal are mutually exclusive")
 		return 2
+	}
+	var discoveredProject *project.Loaded
+	if flags.NArg() == 1 {
+		loaded, discoverErr := project.Discover(".", "")
+		if discoverErr != nil {
+			fmt.Fprintf(stderr, "platform-factory publish: discover project build: %v\n", discoverErr)
+			return 2
+		}
+		discoveredProject = &loaded
+		releaseDir := filepath.Join(loaded.Root, ".platform-factory", "release")
+		reportsDir := filepath.Join(releaseDir, "reports")
+		if !*allowIncomplete && *provenance == "" && *journal == "" && *policyFile == "" && *evidenceFile == "" && !*includeSBOM && !*sign {
+			for _, required := range []string{
+				filepath.Join(releaseDir, "sbom.json"), filepath.Join(releaseDir, "provenance.json"),
+				filepath.Join(reportsDir, "policy-rules.json"), filepath.Join(reportsDir, "evidence.json"),
+			} {
+				if info, statErr := os.Lstat(required); statErr != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+					fmt.Fprintf(stderr, "platform-factory publish: release bundle is incomplete or unsafe at %s (run `pf build` again)\n", required)
+					return 1
+				}
+			}
+			*includeSBOM = true
+			*sign = true
+			*provenance = filepath.Join(releaseDir, "provenance.json")
+			*policyFile = filepath.Join(reportsDir, "policy-rules.json")
+			*evidenceFile = filepath.Join(reportsDir, "evidence.json")
+		}
 	}
 	if !*allowIncomplete && (!*includeSBOM || !*sign ||
 		(*provenance == "" && *journal == "") || *policyFile == "" || *evidenceFile == "") {
@@ -107,10 +272,15 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 		fmt.Fprintln(stderr, "platform-factory publish: publication changes a registry; pass --yes or preview with --dry-run")
 		return 2
 	}
-	layoutName, image := flags.Arg(0), strings.TrimPrefix(flags.Arg(1), "docker://")
+	var layoutName, image string
+	if flags.NArg() == 1 {
+		layoutName, image = discoveredProject.Output(), strings.TrimPrefix(flags.Arg(0), "docker://")
+	} else {
+		layoutName, image = flags.Arg(0), strings.TrimPrefix(flags.Arg(1), "docker://")
+	}
 	report, err := layout.Verify(layoutName)
 	if err != nil {
-		fmt.Fprintf(stderr, "platform-factory publish: verify layout: %v\n", err)
+		fmt.Fprintf(stderr, "platform-factory publish: verify project layout %s: %v (run `pf build` first)\n", layoutName, err)
 		return 1
 	}
 	references := map[string]bool{}
@@ -141,6 +311,22 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 	if *insecureRegistry {
 		scheme = "http"
 	}
+	if *policyFile != "" {
+		localDigest := report.Platforms[0].Digest
+		decision, policyErr := evaluatePublicationPolicy(*policyFile, *evidenceFile,
+			registry.Result{Digest: localDigest}, *includeSBOM, *provenance != "" || *journal != "", *sign)
+		if policyErr != nil {
+			fmt.Fprintf(stderr, "platform-factory publish: policy preflight: %v\n", policyErr)
+			return 1
+		}
+		if !decision.Allowed {
+			fmt.Fprintf(stderr, "platform-factory publish: policy denied publication before upload: %s\n", strings.Join(decision.Reasons, "; "))
+			return 1
+		}
+		if *dryRun {
+			fmt.Fprintln(stdout, "policy preflight allowed the digest-bound release bundle")
+		}
+	}
 	if *dryRun {
 		fmt.Fprintf(stdout, "native OCI Distribution push %s -> %s/%s:%s (manifest digest first, tag last)\n",
 			layoutName, target.Registry, target.Repository, target.Tag)
@@ -156,8 +342,56 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 		if *journal != "" {
 			fmt.Fprintln(stdout, "generate SLSA provenance from the pipeline journal and publish it as an OCI subject artifact")
 		}
+		fmt.Fprintf(stdout, "move tag %s only after every evidence artifact and policy check succeeds\n", target.Tag)
 		return 0
 	}
+
+	opJournal, err := operationJournalFor()
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory publish: open operation journal: %v\n", err)
+		return 1
+	}
+	publishScope := target.Registry + "/" + target.Repository + ":" + target.Tag
+	opID := cliOperationID("publish", target.Registry, target.Repository, target.Tag, *sourceReference)
+	proceed, done, doneErr := claimOperation(opJournal, opID, "publish:"+publishScope)
+	if done {
+		if doneErr != nil {
+			fmt.Fprintf(stderr, "platform-factory publish: %v\n", doneErr)
+			return 1
+		}
+		fmt.Fprintf(stderr, "platform-factory publish: %s -> %s already published (operation %s); not repeating the push\n",
+			layoutName, publishScope, opID)
+		return 0
+	}
+	if !proceed {
+		fmt.Fprintf(stderr, "platform-factory publish: %v\n", doneErr)
+		return 1
+	}
+	workloadID := cliWorkloadID("publish", target.Registry, target.Repository, target.Tag)
+	stateStore, err := workloadStateStoreFor()
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory publish: open workload state store: %v\n", err)
+		return 1
+	}
+	if warning, ok := transitionPublishWorkload(stateStore, workloadID, core.PhasePublishing); !ok {
+		fmt.Fprintf(stderr, "platform-factory publish: %s\n", warning)
+	}
+
+	succeeded := false
+	defer func() {
+		if succeeded {
+			_ = opJournal.Complete(opID)
+			if warning, ok := transitionPublishWorkload(stateStore, workloadID, core.PhasePublished); !ok {
+				fmt.Fprintf(stderr, "platform-factory publish: %s\n", warning)
+			}
+		} else {
+			_ = opJournal.Fail(opID)
+			if warning, ok := transitionPublishWorkload(stateStore, workloadID, core.PhaseFailed); !ok {
+				fmt.Fprintf(stderr, "platform-factory publish: %s\n", warning)
+			}
+		}
+	}()
+
 	published, err := pushOCI(ctx, layoutName, target, *sourceReference, scheme, *username, password, *mountFrom, *uploadSessionDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory publish: native registry push: %v\n", err)
@@ -165,6 +399,10 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 	}
 	digest := published.Digest
 	immutable := published.Reference
+	if discoveredProject != nil && len(report.Platforms) == 1 && digest != report.Platforms[0].Digest {
+		fmt.Fprintf(stderr, "platform-factory publish: registry digest %s does not match verified build digest %s\n", digest, report.Platforms[0].Digest)
+		return 1
+	}
 	if !validDigestReference(immutable) {
 		fmt.Fprintf(stderr, "platform-factory publish: registry returned invalid digest %q\n", digest)
 		return 1
@@ -199,11 +437,55 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 		fmt.Fprintf(stderr, "platform-factory publish: move registry tag after evidence: %v\n", err)
 		return 1
 	}
+	if discoveredProject != nil {
+		publicationDir := filepath.Join(discoveredProject.Root, ".platform-factory", "publication")
+		if *reportsDir == "" {
+			*reportsDir = publicationDir
+		}
+		publicationRules := policy.Rules{
+			APIVersion: policy.APIVersion, RequireHardening: true, RequireSBOM: true,
+			RequireProvenance: true, RequireSignature: true, RequireReproducible: true,
+		}
+		publicationEvidence := policy.Evidence{
+			SubjectDigest: digest, NonRoot: true, ReadOnlyRootFS: true,
+			CapabilitiesDropped: true, SecretsAbsent: true, SBOM: true,
+			Provenance: true, Signature: true, Reproducible: true,
+		}
+		if err := writeLaunchJSON(filepath.Join(publicationDir, "policy.json"), publicationRules); err != nil {
+			fmt.Fprintf(stderr, "platform-factory publish: persist publication policy: %v\n", err)
+			return 1
+		}
+		if err := writeLaunchJSON(filepath.Join(publicationDir, "evidence.json"), publicationEvidence); err != nil {
+			fmt.Fprintf(stderr, "platform-factory publish: persist publication evidence: %v\n", err)
+			return 1
+		}
+		if err := writeLaunchJSON(filepath.Join(discoveredProject.Root, ".platform-factory", "published.json"), map[string]any{
+			"api_version": "platform-factory.dev/publication/v1", "digest": digest,
+			"reference": immutable, "repository": target.Registry + "/" + target.Repository, "scheme": scheme,
+		}); err != nil {
+			fmt.Fprintf(stderr, "platform-factory publish: persist immutable published reference: %v\n", err)
+			return 1
+		}
+	}
+	// The registry tag and all required project evidence are durable at this
+	// point. Telemetry failure must not relabel that real external success as a
+	// failed/indeterminate publication in the write-once operation journal.
+	succeeded = true
+	if *reportsDir != "" {
+		if err := writeReportJSON(*reportsDir, "metrics.json", map[string]any{
+			"api_version": "platform-factory.dev/metrics/v1", "operation": "publish",
+			"trace_id": observability.TraceIDFromContext(ctx), "duration_ms": time.Since(startedAt).Milliseconds(),
+			"digest": digest, "reference": immutable, "artifacts": len(artifacts), "tag_moved": true, "success": true,
+		}); err != nil {
+			fmt.Fprintf(stderr, "platform-factory publish: warning: publication succeeded but metrics could not be written: %v\n", err)
+		}
+	}
 	if *outputFormat == "reference" {
 		fmt.Fprintln(stdout, immutable)
 	} else {
 		result, _ := json.MarshalIndent(map[string]any{
-			"digest": digest, "image": image, "reference": immutable, "valid": true,
+			"api_version": cliOutputAPIVersion,
+			"digest":      digest, "image": image, "reference": immutable, "valid": true,
 		}, "", "  ")
 		fmt.Fprintln(stdout, string(result))
 	}
@@ -211,48 +493,57 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 }
 
 func defaultUploadSessionDir() string {
-	if configured := strings.TrimSpace(os.Getenv("PLATFORM_FACTORY_UPLOAD_SESSION_DIR")); configured != "" {
-		return configured
-	}
-	cacheDir, err := os.UserCacheDir()
+	return defaultLifecycleRoot("PLATFORM_FACTORY_UPLOAD_SESSION_DIR", "registry-uploads")
+}
+
+// decodeStrictJSON applies the canonical fail-closed decoder to at most 1 MiB.
+func decodeStrictJSON(path string, target any) error {
+	file, err := os.Open(path)
 	if err != nil {
-		return filepath.Join(".platform-factory", "registry-uploads")
+		return err
 	}
-	return filepath.Join(cacheDir, "platform-factory", "registry-uploads")
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, 1<<20))
+	if err != nil {
+		return err
+	}
+	return strictjson.Decode(data, target)
+}
+
+func decodePolicyRulesAndEvidence(policyPath, evidencePath string) (policy.Rules, policy.Evidence, error) {
+	if evidencePath == "" {
+		return policy.Rules{}, policy.Evidence{}, errors.New("--evidence is required with --policy")
+	}
+	var rules policy.Rules
+	if err := decodeStrictJSON(policyPath, &rules); err != nil {
+		return policy.Rules{}, policy.Evidence{}, fmt.Errorf("decode rules: %w", err)
+	}
+	var evidence policy.Evidence
+	if err := decodeStrictJSON(evidencePath, &evidence); err != nil {
+		return policy.Rules{}, policy.Evidence{}, fmt.Errorf("decode evidence: %w", err)
+	}
+	return rules, evidence, nil
 }
 
 func evaluatePublicationPolicy(policyPath, evidencePath string, published registry.Result, hasSBOM, hasProvenance, hasSignature bool) (policy.Decision, error) {
-	if evidencePath == "" {
-		return policy.Decision{}, errors.New("--evidence is required with --policy")
-	}
-	decode := func(path string, target any) error {
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		decoder := json.NewDecoder(io.LimitReader(file, 1<<20))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(target); err != nil {
-			return err
-		}
-		if decoder.Decode(&struct{}{}) != io.EOF {
-			return errors.New("file must contain exactly one JSON object")
-		}
-		return nil
-	}
-	var rules policy.Rules
-	if err := decode(policyPath, &rules); err != nil {
-		return policy.Decision{}, fmt.Errorf("decode rules: %w", err)
-	}
-	var evidence policy.Evidence
-	if err := decode(evidencePath, &evidence); err != nil {
-		return policy.Decision{}, fmt.Errorf("decode evidence: %w", err)
+	rules, evidence, err := decodePolicyRulesAndEvidence(policyPath, evidencePath)
+	if err != nil {
+		return policy.Decision{}, err
 	}
 	evidence.SubjectDigest = published.Digest
 	evidence.SBOM = hasSBOM
 	evidence.Provenance = hasProvenance
 	evidence.Signature = hasSignature
+	return policy.Evaluate(rules, evidence)
+}
+
+// evaluateDeploymentPolicy binds existing evidence to the deployed digest.
+func evaluateDeploymentPolicy(policyPath, evidencePath, digest string) (policy.Decision, error) {
+	rules, evidence, err := decodePolicyRulesAndEvidence(policyPath, evidencePath)
+	if err != nil {
+		return policy.Decision{}, err
+	}
+	evidence.SubjectDigest = digest
 	return policy.Evaluate(rules, evidence)
 }
 
@@ -365,53 +656,150 @@ func nativePublicationArtifacts(layoutName string, published registry.Result, in
 	return artifacts, nil
 }
 
-// runDeployWithContext wraps runDeploy with context support for trace_id propagation.
-// Sanetizer-todo item 18: End-to-end trace correlation - COMPLETE
-func runDeployWithContext(ctx context.Context, args []string, stdout, stderr io.Writer, execute containerExecutor) int {
-	// Extract trace_id from context for propagation
-	traceID := observability.TraceIDFromContext(ctx)
-	if traceID == "" {
-		traceID = observability.NewTraceID("cli", "deploy").String()
-	}
+func printDeployUsage(output io.Writer, flags *flag.FlagSet) {
+	fmt.Fprintln(output, `platform-factory deploy — apply a digest-pinned image to Kubernetes, gated by the same policy engine as publish
 
-	// Create context with trace_id
-	ctx = observability.ContextWithTraceID(ctx, traceID)
+Usage:
+  platform-factory deploy [OPTIONS] IMAGE@sha256:DIGEST
+  platform-factory deploy [OPTIONS]
 
-	// Pass context to runDeploy
-	return runDeploy(ctx, args, stdout, stderr, execute)
+With no IMAGE, deploy consumes the digest this project's own
+"platform-factory publish" already recorded, so there is no chance of
+deploying a different digest than the one that was actually published.
+IMAGE must always be pinned by sha256 digest - a mutable tag is refused.
+
+Examples:
+  platform-factory deploy registry.example.com/app@sha256:...
+  platform-factory deploy --dry-run registry.example.com/app@sha256:...
+  platform-factory deploy --namespace staging --replicas 3
+
+Options:`)
+	flags.SetOutput(output)
+	flags.PrintDefaults()
 }
 
 func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, execute containerExecutor) int {
+	startedAt := time.Now()
 	flags := flag.NewFlagSet("deploy", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	name := flags.String("name", "platform-factory", "Kubernetes Deployment name")
 	namespace := flags.String("namespace", "default", "Kubernetes namespace")
 	replicas := flags.Int("replicas", 1, "positive replica count")
 	port := flags.Int("port", 8080, "container port")
+	workload := flags.String("workload", "auto", "workload type: auto, service, job, statefulset, daemonset, or cronjob")
+	schedule := flags.String("schedule", "", "five-field schedule required by --workload cronjob")
+	cpuRequest := flags.String("cpu-request", "100m", "requested CPU (Kubernetes quantity)")
+	memoryRequest := flags.String("memory-request", "128Mi", "requested memory (Kubernetes quantity)")
+	runtimeClass := flags.String("runtime-class", "", "optional Kubernetes RuntimeClass and matching compatible-node scheduling contract")
+	ingressHost := flags.String("ingress-host", "", "optional DNS host for an Ingress")
+	ingressPath := flags.String("ingress-path", "/", "Ingress path prefix")
+	var configValues, secretEnvValues, volumeValues repeatedFlag
+	flags.Var(&configValues, "config", "non-secret ConfigMap entry KEY=VALUE (repeatable)")
+	flags.Var(&secretEnvValues, "secret-env", "Secret reference ENV=SECRET/KEY; values are never read (repeatable)")
+	flags.Var(&volumeValues, "volume", "persistent volume MOUNT_PATH=SIZE (repeatable)")
 	timeout := flags.String("timeout", "2m", "rollout timeout")
+	reportsDir := flags.String("reports", "", "write versioned deployment metrics to DIR/metrics.json")
+	policyFile := flags.String("policy", "", "policy JSON to evaluate before deploying (see pf publish --policy)")
+	evidenceFile := flags.String("evidence", "", "evidence JSON evaluated by --policy - e.g. one pf publish already wrote for this digest")
 	dryRun := flags.Bool("dry-run", false, "print the manifest without applying it")
 	yes := flags.Bool("yes", false, "confirm cluster deployment")
+	if containsHelpFlag(args) {
+		printDeployUsage(stdout, flags)
+		return 0
+	}
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
 	}
-	if flags.NArg() != 1 || !validKubernetesName(*name) || !validKubernetesName(*namespace) ||
+	if flags.NArg() > 1 || !validKubernetesName(*name) || !validKubernetesName(*namespace) ||
 		*replicas < 1 || *port < 1 || *port > 65535 {
-		fmt.Fprintln(stderr, "usage: platform-factory deploy [--name NAME] [--namespace NS] [--dry-run] [--yes] IMAGE")
+		fmt.Fprintln(stderr, "usage: platform-factory deploy [--workload auto|service|job] [--name NAME] [--namespace NS] [--policy FILE --evidence FILE] [--dry-run] [--yes] [IMAGE]")
+		return 2
+	}
+	if *workload != "auto" && *workload != "service" && *workload != "job" && *workload != "statefulset" && *workload != "daemonset" && *workload != "cronjob" {
+		fmt.Fprintln(stderr, "platform-factory deploy: --workload must be auto, service, job, statefulset, daemonset, or cronjob")
+		return 2
+	}
+	if *runtimeClass != "" && !validKubernetesName(*runtimeClass) {
+		fmt.Fprintln(stderr, "platform-factory deploy: --runtime-class must be a valid Kubernetes name")
+		return 2
+	}
+	configEntries, secretReferences, persistentVolumes, extensionErr := parseKubernetesExtensions(configValues, secretEnvValues, volumeValues)
+	if extensionErr != nil {
+		fmt.Fprintf(stderr, "platform-factory deploy: %v\n", extensionErr)
+		return 2
+	}
+	if !validResourceQuantity(*cpuRequest) || !validResourceQuantity(*memoryRequest) {
+		fmt.Fprintln(stderr, "platform-factory deploy: --cpu-request and --memory-request must be non-empty Kubernetes quantities")
 		return 2
 	}
 	if !*dryRun && !*yes {
 		fmt.Fprintln(stderr, "platform-factory deploy: deployment changes the live cluster; pass --yes or preview with --dry-run")
 		return 2
 	}
-	image := flags.Arg(0)
+	image := ""
+	var deploymentProject *project.Loaded
+	if flags.NArg() == 1 {
+		image = flags.Arg(0)
+		if loaded, discoverErr := project.Discover(".", ""); discoverErr == nil {
+			deploymentProject = &loaded
+		}
+	} else {
+		loaded, discoverErr := project.Discover(".", "")
+		if discoverErr != nil {
+			fmt.Fprintf(stderr, "platform-factory deploy: discover project publication: %v\n", discoverErr)
+			return 2
+		}
+		deploymentProject = &loaded
+		var published struct {
+			APIVersion string `json:"api_version"`
+			Digest     string `json:"digest"`
+			Reference  string `json:"reference"`
+			Repository string `json:"repository"`
+			Scheme     string `json:"scheme"`
+		}
+		publishedPath := filepath.Join(loaded.Root, ".platform-factory", "published.json")
+		if err := decodeStrictJSON(publishedPath, &published); err != nil {
+			fmt.Fprintf(stderr, "platform-factory deploy: no verified published release (run `pf publish` first): %v\n", err)
+			return 1
+		}
+		if published.APIVersion != "platform-factory.dev/publication/v1" ||
+			(published.Scheme != "https" && published.Scheme != "http") ||
+			published.Reference != published.Repository+"@"+published.Digest {
+			fmt.Fprintln(stderr, "platform-factory deploy: persisted publication is inconsistent; run `pf publish` again")
+			return 1
+		}
+		image = published.Reference
+		username := strings.TrimSpace(os.Getenv("PLATFORM_FACTORY_REGISTRY_USERNAME"))
+		password := os.Getenv("PLATFORM_FACTORY_REGISTRY_PASSWORD")
+		if err := verifyRemoteDigest(ctx, published.Repository, published.Digest, published.Scheme, username, password); err != nil {
+			fmt.Fprintf(stderr, "platform-factory deploy: published digest is not verifiable in the registry: %v\n", err)
+			return 1
+		}
+		if *policyFile == "" && *evidenceFile == "" {
+			publicationDir := filepath.Join(loaded.Root, ".platform-factory", "publication")
+			*policyFile = filepath.Join(publicationDir, "policy.json")
+			*evidenceFile = filepath.Join(publicationDir, "evidence.json")
+		}
+	}
 	if !validDigestReference(image) {
 		fmt.Fprintln(stderr, "platform-factory deploy: IMAGE must be pinned by sha256 digest")
 		return 2
 	}
-	// Sanetizer-todo item 18: Log deploy operation with trace_id for end-to-end correlation
+	if *policyFile != "" {
+		_, digest, _ := strings.Cut(image, "@")
+		decision, err := evaluateDeploymentPolicy(*policyFile, *evidenceFile, digest)
+		if err != nil {
+			fmt.Fprintf(stderr, "platform-factory deploy: policy: %v\n", err)
+			return 1
+		}
+		if !decision.Allowed {
+			fmt.Fprintf(stderr, "platform-factory deploy: policy denied deployment: %s\n", strings.Join(decision.Reasons, "; "))
+			return 1
+		}
+	}
 	traceID := observability.TraceIDFromContext(ctx)
 	if traceID != "" {
 		observability.Info("deploy starting", observability.Fields{
@@ -424,19 +812,95 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 		})
 	}
 
-	manifest := deploymentManifest(*name, *namespace, image, *replicas, *port)
+	selectedWorkload := *workload
+	if selectedWorkload == "auto" {
+		selectedWorkload = "service"
+		if loaded, discoverErr := project.Discover(".", ""); discoverErr == nil && len(loaded.Config.Ports) == 0 {
+			selectedWorkload = "job"
+		}
+	}
+	manifest, manifestErr := publicationtarget.KubernetesManifest(publicationtarget.KubernetesSpec{
+		Workload: selectedWorkload, Name: *name, Namespace: *namespace, Image: image,
+		Replicas: *replicas, Port: *port, CPURequest: *cpuRequest, MemoryRequest: *memoryRequest,
+		RuntimeClass: *runtimeClass,
+		Schedule:     *schedule,
+		IngressHost:  *ingressHost, IngressPath: map[bool]string{true: *ingressPath}[*ingressHost != ""],
+		Config: configEntries, SecretEnv: secretReferences, Volumes: persistentVolumes,
+	})
+	if manifestErr != nil {
+		fmt.Fprintf(stderr, "platform-factory deploy: generate Kubernetes manifest: %v\n", manifestErr)
+		return 2
+	}
 	if *dryRun {
+		fmt.Fprintf(stderr, "platform-factory deploy: selected Kubernetes %s (%s)\n", selectedWorkload, map[string]string{"job": "the project declares no listening ports", "service": "a service workload was requested or ports are declared"}[selectedWorkload])
 		_, _ = stdout.Write(manifest)
 		return 0
 	}
-	operations := []externalOperation{
-		{name: "kubectl", args: []string{"apply", "-f", "-"}, stdin: bytes.NewReader(manifest)},
-		{name: "kubectl", args: []string{
-			"rollout", "status", "deployment/" + *name,
-			"--namespace", *namespace, "--timeout", *timeout,
-		}},
+	operations := []externalOperation{{name: "kubectl", args: []string{"apply", "-f", "-"}, stdin: bytes.NewReader(manifest)}}
+	if selectedWorkload == "job" {
+		operations = append(operations, externalOperation{name: "kubectl", args: []string{"wait", "--for=condition=complete", "job/" + *name, "--namespace", *namespace, "--timeout", *timeout}})
+	} else if selectedWorkload == "cronjob" {
+		operations = append(operations, externalOperation{name: "kubectl", args: []string{"get", "cronjob/" + *name, "--namespace", *namespace}})
+	} else {
+		resource := map[string]string{"service": "deployment", "statefulset": "statefulset", "daemonset": "daemonset"}[selectedWorkload]
+		operations = append(operations, externalOperation{name: "kubectl", args: []string{"rollout", "status", resource + "/" + *name, "--namespace", *namespace, "--timeout", *timeout}})
 	}
-	return executeOperations("deploy", operations, false, stdout, stderr, execute)
+	code := runClaimedOperations("deploy", "deploy", []string{*namespace, *name, image},
+		operations, false, stdout, stderr, execute)
+	if code == 0 && deploymentProject != nil {
+		if *reportsDir == "" {
+			*reportsDir = filepath.Join(deploymentProject.Root, ".platform-factory", "deployment")
+		}
+		if err := writeLaunchJSON(filepath.Join(deploymentProject.Root, ".platform-factory", "deployed.json"), map[string]any{
+			"api_version": "platform-factory.dev/deployment/v1", "image": image,
+			"name": *name, "namespace": *namespace, "workload": selectedWorkload,
+			"runtime_class": *runtimeClass,
+		}); err != nil {
+			fmt.Fprintf(stderr, "platform-factory deploy: persist deployment identity: %v\n", err)
+			return 1
+		}
+	}
+	if code == 0 && *reportsDir != "" {
+		_, digest, _ := strings.Cut(image, "@")
+		if err := writeReportJSON(*reportsDir, "metrics.json", map[string]any{
+			"api_version": "platform-factory.dev/metrics/v1", "operation": "deploy",
+			"trace_id": traceID, "duration_ms": time.Since(startedAt).Milliseconds(),
+			"digest": digest, "namespace": *namespace, "name": *name,
+			"workload": selectedWorkload, "operations": len(operations), "success": true,
+		}); err != nil {
+			fmt.Fprintf(stderr, "platform-factory deploy: warning: deployment succeeded but metrics could not be written: %v\n", err)
+		}
+	}
+	return code
+}
+
+func parseKubernetesExtensions(configValues, secretValues, volumeValues []string) ([]publicationtarget.KeyValue, []publicationtarget.SecretEnvReference, []publicationtarget.PersistentVolume, error) {
+	configs := make([]publicationtarget.KeyValue, 0, len(configValues))
+	for _, value := range configValues {
+		key, content, ok := strings.Cut(value, "=")
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("--config must use KEY=VALUE")
+		}
+		configs = append(configs, publicationtarget.KeyValue{Key: key, Value: content})
+	}
+	secrets := make([]publicationtarget.SecretEnvReference, 0, len(secretValues))
+	for _, value := range secretValues {
+		env, reference, ok := strings.Cut(value, "=")
+		secret, key, slash := strings.Cut(reference, "/")
+		if !ok || !slash || strings.Contains(key, "/") {
+			return nil, nil, nil, fmt.Errorf("--secret-env must use ENV=SECRET/KEY")
+		}
+		secrets = append(secrets, publicationtarget.SecretEnvReference{Env: env, Secret: secret, Key: key})
+	}
+	volumes := make([]publicationtarget.PersistentVolume, 0, len(volumeValues))
+	for _, value := range volumeValues {
+		mount, size, ok := strings.Cut(value, "=")
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("--volume must use MOUNT_PATH=SIZE")
+		}
+		volumes = append(volumes, publicationtarget.PersistentVolume{MountPath: mount, Size: size})
+	}
+	return configs, secrets, volumes, nil
 }
 
 func runRollback(args []string, stdout, stderr io.Writer, execute containerExecutor) int {
@@ -453,16 +917,35 @@ func runRollback(args []string, stdout, stderr io.Writer, execute containerExecu
 		}
 		return 2
 	}
-	if flags.NArg() != 1 || !validKubernetesName(*namespace) ||
-		!validKubernetesName(flags.Arg(0)) || *revision < 0 {
-		fmt.Fprintln(stderr, "usage: platform-factory rollback [OPTIONS] DEPLOYMENT")
+	if flags.NArg() > 1 || !validKubernetesName(*namespace) || *revision < 0 {
+		fmt.Fprintln(stderr, "usage: platform-factory rollback [OPTIONS] [DEPLOYMENT]")
+		return 2
+	}
+	deploymentName := ""
+	if flags.NArg() == 1 {
+		deploymentName = flags.Arg(0)
+	} else {
+		state, err := loadDeployedProject()
+		if err != nil {
+			fmt.Fprintf(stderr, "platform-factory rollback: no deployed project (run `pf deploy` first): %v\n", err)
+			return 1
+		}
+		if state.Workload != "service" {
+			fmt.Fprintln(stderr, "platform-factory rollback: Kubernetes Jobs have no rollout history; rebuild and publish a new immutable digest")
+			return 1
+		}
+		deploymentName = state.Name
+		*namespace = state.Namespace
+	}
+	if !validKubernetesName(deploymentName) {
+		fmt.Fprintln(stderr, "platform-factory rollback: deployment name must be a valid Kubernetes name")
 		return 2
 	}
 	if !*dryRun && !*yes {
 		fmt.Fprintln(stderr, "platform-factory rollback: rollback changes the live deployment; pass --yes or preview with --dry-run")
 		return 2
 	}
-	target := "deployment/" + flags.Arg(0)
+	target := "deployment/" + deploymentName
 	undo := []string{"rollout", "undo", target, "--namespace", *namespace}
 	if *revision > 0 {
 		undo = append(undo, "--to-revision="+strconv.Itoa(*revision))
@@ -471,33 +954,49 @@ func runRollback(args []string, stdout, stderr io.Writer, execute containerExecu
 		{name: "kubectl", args: undo},
 		{name: "kubectl", args: []string{"rollout", "status", target, "--namespace", *namespace, "--timeout", *timeout}},
 	}
-	return executeOperations("rollback", operations, *dryRun, stdout, stderr, execute)
+	return runClaimedOperations("rollback", "rollback", []string{*namespace, deploymentName, strconv.Itoa(*revision)},
+		operations, *dryRun, stdout, stderr, execute)
+}
+
+// runClaimedOperations journals mutations; dry runs claim nothing.
+func runClaimedOperations(operation, domain string, scopeParts []string, operations []externalOperation, dryRun bool, stdout, stderr io.Writer, execute containerExecutor) int {
+	if dryRun {
+		return executeOperations(operation, operations, true, stdout, stderr, execute)
+	}
+	opJournal, err := operationJournalFor()
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory %s: open operation journal: %v\n", operation, err)
+		return 1
+	}
+	opID := cliOperationID(domain, scopeParts...)
+	proceed, done, doneErr := claimOperation(opJournal, opID, domain+":"+strings.Join(scopeParts, "/"))
+	if done {
+		if doneErr != nil {
+			fmt.Fprintf(stderr, "platform-factory %s: %v\n", operation, doneErr)
+			return 1
+		}
+		fmt.Fprintf(stderr, "platform-factory %s: already applied (operation %s); not repeating it\n", operation, opID)
+		return 0
+	}
+	if !proceed {
+		fmt.Fprintf(stderr, "platform-factory %s: %v\n", operation, doneErr)
+		return 1
+	}
+	code := executeOperations(operation, operations, false, stdout, stderr, execute)
+	if code == 0 {
+		_ = opJournal.Complete(opID)
+	} else {
+		_ = opJournal.Fail(opID)
+	}
+	return code
 }
 
 func validDigestReference(value string) bool {
-	_, digest, found := strings.Cut(value, "@sha256:")
-	if !found || len(digest) != 64 {
-		return false
-	}
-	for _, character := range digest {
-		if !strings.ContainsRune("0123456789abcdef", character) {
-			return false
-		}
-	}
-	return true
+	return publicationtarget.ValidDigestReference(value)
 }
 
 func validKubernetesName(value string) bool {
-	if value == "" || len(value) > 63 || value[0] == '-' || value[len(value)-1] == '-' {
-		return false
-	}
-	for _, character := range value {
-		if (character < 'a' || character > 'z') &&
-			(character < '0' || character > '9') && character != '-' {
-			return false
-		}
-	}
-	return true
+	return publicationtarget.ValidKubernetesName(value)
 }
 
 type externalOperation struct {
@@ -534,7 +1033,7 @@ func formatCommand(name string, args []string) string {
 	return strings.Join(values, " ")
 }
 
-func deploymentManifest(name, namespace, image string, replicas, port int) []byte {
+func deploymentManifest(name, namespace, image string, replicas, port int, cpuRequest, memoryRequest string) []byte {
 	document := map[string]any{
 		"apiVersion": "apps/v1", "kind": "Deployment",
 		"metadata": map[string]any{"name": name, "namespace": namespace},
@@ -552,6 +1051,76 @@ func deploymentManifest(name, namespace, image string, replicas, port int) []byt
 							"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
 							"capabilities": map[string]any{"drop": []string{"ALL"}},
 						},
+						"readinessProbe": tcpProbe(port, 1, 5),
+						"livenessProbe":  tcpProbe(port, 5, 10),
+						"resources":      resourceRequests(cpuRequest, memoryRequest),
+					}},
+				},
+			},
+		},
+	}
+	data, _ := json.MarshalIndent(document, "", "  ")
+	return append(data, '\n')
+}
+
+func resourceRequests(cpu, memory string) map[string]any {
+	return map[string]any{"requests": map[string]string{"cpu": cpu, "memory": memory}}
+}
+
+func validResourceQuantity(value string) bool {
+	return publicationtarget.ValidResourceQuantity(value)
+}
+
+func tcpProbe(port, initialDelaySeconds, periodSeconds int) map[string]any {
+	return map[string]any{
+		"tcpSocket":           map[string]any{"port": port},
+		"initialDelaySeconds": initialDelaySeconds,
+		"periodSeconds":       periodSeconds,
+	}
+}
+
+func serviceManifest(name, namespace string, port int) []byte {
+	document := map[string]any{
+		"apiVersion": "v1", "kind": "Service",
+		"metadata": map[string]any{"name": name, "namespace": namespace},
+		"spec": map[string]any{
+			"selector": map[string]string{"app.kubernetes.io/name": name},
+			"ports":    []any{map[string]any{"port": port, "targetPort": port}},
+		},
+	}
+	data, _ := json.MarshalIndent(document, "", "  ")
+	return append(data, '\n')
+}
+
+// combinedManifest wraps multiple resources in a Kubernetes List.
+func combinedManifest(documents ...[]byte) []byte {
+	if len(documents) == 1 {
+		return documents[0]
+	}
+	items := make([]json.RawMessage, len(documents))
+	for i, document := range documents {
+		items[i] = json.RawMessage(document)
+	}
+	list := map[string]any{"apiVersion": "v1", "kind": "List", "items": items}
+	data, _ := json.MarshalIndent(list, "", "  ")
+	return append(data, '\n')
+}
+
+func jobManifest(name, namespace, image, cpuRequest, memoryRequest string) []byte {
+	document := map[string]any{
+		"apiVersion": "batch/v1", "kind": "Job",
+		"metadata": map[string]any{"name": name, "namespace": namespace},
+		"spec": map[string]any{
+			"backoffLimit": 3,
+			"template": map[string]any{
+				"metadata": map[string]any{"labels": map[string]string{"app.kubernetes.io/name": name}},
+				"spec": map[string]any{
+					"restartPolicy":   "Never",
+					"securityContext": map[string]any{"runAsNonRoot": true, "seccompProfile": map[string]string{"type": "RuntimeDefault"}},
+					"containers": []any{map[string]any{
+						"name": name, "image": image,
+						"securityContext": map[string]any{"allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true, "capabilities": map[string]any{"drop": []string{"ALL"}}},
+						"resources":       resourceRequests(cpuRequest, memoryRequest),
 					}},
 				},
 			},
@@ -577,18 +1146,18 @@ func runCompletion(args []string, stdout, stderr io.Writer) int {
 
 var completionScripts = map[string]string{
 	"bash": `_platform_factory() {
-  local commands="build compose diff sbom evidence pipeline inspect verify publish detect run deploy rollback launch project plan freeze microvm completion version"
+  local commands="build compose diff sbom evidence pipeline status explain logs events inspect verify publish detect run deploy rollback launch project plan freeze microvm completion version"
   COMPREPLY=($(compgen -W "$commands" -- "${COMP_WORDS[COMP_CWORD]}"))
 }
 complete -F _platform_factory platform-factory
 `,
 	"zsh": `#compdef platform-factory
-_arguments '1:command:(build compose diff sbom evidence pipeline inspect verify publish detect run deploy rollback launch project plan freeze microvm completion version)'
+_arguments '1:command:(build compose diff sbom evidence pipeline status explain logs events inspect verify publish detect run deploy rollback launch project plan freeze microvm completion version)'
 `,
-	"fish": `complete -c platform-factory -f -n '__fish_use_subcommand' -a 'build compose diff sbom evidence pipeline inspect verify publish detect run deploy rollback launch project plan freeze microvm completion version'
+	"fish": `complete -c platform-factory -f -n '__fish_use_subcommand' -a 'build compose diff sbom evidence pipeline status explain logs events inspect verify publish detect run deploy rollback launch project plan freeze microvm completion version'
 `,
 	"powershell": `Register-ArgumentCompleter -Native -CommandName platform-factory -ScriptBlock {
-  param($wordToComplete) 'build','compose','diff','sbom','evidence','pipeline','inspect','verify','publish','detect','run','deploy','rollback','launch','project','plan','freeze','microvm','completion','version' |
+  param($wordToComplete) 'build','compose','diff','sbom','evidence','pipeline','status','explain','logs','events','inspect','verify','publish','detect','run','deploy','rollback','launch','project','plan','freeze','microvm','completion','version' |
     Where-Object { $_ -like "$wordToComplete*" }
 }
 `,

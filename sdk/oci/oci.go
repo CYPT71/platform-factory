@@ -1,14 +1,7 @@
-// Package oci provides the public API for OCI image building.
-//
-// This package is the stable public interface for creating OCI image layouts.
-// It delegates to the internal implementation while maintaining API stability.
-//
-// See Sanetizer-todo.md phase 4, items 9-10: SDK packages must not import
-// internal packages directly.
 package oci
 
 import (
-	api "github.com/CYPT71/secure-oci-base/api/oci"
+	api "github.com/CYPT71/platform-factory/api/oci/v1"
 )
 
 // Options describes the image to create. See api.oci.BuildOptions for the
@@ -37,7 +30,7 @@ const (
 // Build writes an OCI Image Layout to Options.Output and returns the digest
 // of its manifest. The result is a complete, standard OCI Image Layout: it
 // runs as an ordinary container under any OCI-compatible engine with no
-// further secure-oci involvement. Targeting the MicroVM runtime for the
+// further platform-factory involvement. Targeting the MicroVM runtime for the
 // same layout instead is opt-in and happens later, via sdk/microvm - Build
 // itself never depends on it and never requires it.
 func Build(opts Options) (digest string, err error) {

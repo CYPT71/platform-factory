@@ -9,11 +9,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/attestation"
-	"github.com/CYPT71/secure-oci-base/internal/layout"
-	"github.com/CYPT71/secure-oci-base/internal/policy"
-	"github.com/CYPT71/secure-oci-base/internal/sbom"
-	"github.com/CYPT71/secure-oci-base/internal/signing"
+	"github.com/CYPT71/platform-factory/internal/attestation"
+	"github.com/CYPT71/platform-factory/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/policy"
+	"github.com/CYPT71/platform-factory/internal/sbom"
+	"github.com/CYPT71/platform-factory/internal/signing"
 )
 
 func fakeService(report layout.Report, reportErr error) Service {
@@ -192,7 +192,7 @@ func TestVerifySignatureRealRoundTrip(t *testing.T) {
 	}
 	keyID := "ed25519:" + base64.RawURLEncoding.EncodeToString(publicKey)
 	envelope, err := attestation.Sign(store, "release", keyID,
-		"application/vnd.secure-oci.subject.v1+json",
+		"application/vnd.platform-factory.subject.v1+json",
 		map[string]string{"digest": "sha256:abc", "reference": "app:v1"})
 	if err != nil {
 		t.Fatal(err)

@@ -3,7 +3,7 @@ package migration
 import (
 	"testing"
 
-	apimigration "github.com/CYPT71/secure-oci-base/api/migration"
+	apimigration "github.com/CYPT71/platform-factory/api/migration/v1"
 )
 
 func TestNewPlanSealVerify(t *testing.T) {

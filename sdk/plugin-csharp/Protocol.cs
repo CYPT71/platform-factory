@@ -1,16 +1,25 @@
-// SDK for out-of-process secure-oci language plugins. Defines the
+// SDK for out-of-process platform-factory language plugins. Defines the
 // versioned, length-prefixed JSON-RPC protocol plugins speak over
 // stdin/stdout (an LSP/DAP-style header-framed message on the wire) and
 // the plugin-side Server. Mirrors Go's sdk/plugin package: the same wire
 // protocol, the same v1.hello handshake, the same capability dispatch
 // (method "v1."+capability). A plugin written against either SDK passes
-// the exact same conformance suite (secure-oci-conformance plugin).
+// the exact same conformance suite (platform-factory-conformance plugin).
 //
 // No third-party dependencies - System.Text.Json only.
 using System.Text;
 using System.Text.Json;
 
 namespace SecureOci.Plugin;
+
+public readonly record struct RequestContext(string TraceId, string OperationId);
+
+public static class Capabilities
+{
+    public const string RuntimeStatus = "runtime.status", RuntimeLogs = "runtime.logs", RuntimeCreate = "runtime.create", RuntimeStart = "runtime.start", RuntimeStop = "runtime.stop", RuntimeRestart = "runtime.restart", RuntimeDelete = "runtime.delete", RuntimeExec = "runtime.exec";
+    public const string DeploymentPlan = "deployment.plan", DeploymentApply = "deployment.apply", DeploymentObserve = "deployment.observe", DeploymentRollback = "deployment.rollback", DeploymentDelete = "deployment.delete";
+    public const string BuilderBuild = "builder.build", AnalyzerScan = "analyzer.scan", RegistryPush = "registry.push", MigrationDiscover = "migration.discover", MigrationApply = "migration.apply";
+}
 
 /// <summary>A protocol-level error a handler can throw to control the
 /// exact code/message sent back to the host, instead of the generic 500
@@ -42,7 +51,7 @@ public sealed class Server
     /// <summary>LegacyContentType is the pre-rebrand Content-Type: still
     /// accepted from a peer for the documented compatibility overlap
     /// window (see docs/api-compatibility.md), never written.</summary>
-    public const string LegacyContentType = "application/vnd.secure-oci.rpc.v1+json";
+    public const string LegacyContentType = "application/vnd.platform-factory.rpc.v1+json";
     public const string ProtocolVersion = "v1";
     private const int MaxMessageBytes = 1 << 20;
 
@@ -50,6 +59,7 @@ public sealed class Server
     private readonly string _version;
     private readonly List<string> _capabilities = new();
     private readonly Dictionary<string, Func<JsonElement, object>> _handlers = new();
+    private readonly Dictionary<string, Func<JsonElement, RequestContext, object>> _contextHandlers = new();
 
     public Server(string name, string version)
     {
@@ -68,6 +78,13 @@ public sealed class Server
     {
         _capabilities.Add(capability);
         _handlers["v1." + capability] = handler;
+        return this;
+    }
+
+    public Server Handle(string capability, Func<JsonElement, RequestContext, object> handler)
+    {
+        _capabilities.Add(capability);
+        _contextHandlers["v1." + capability] = handler;
         return this;
     }
 
@@ -93,6 +110,8 @@ public sealed class Server
         var id = request.TryGetProperty("id", out var idElement) ? idElement.GetString() ?? "" : "";
         var method = request.TryGetProperty("method", out var methodElement) ? methodElement.GetString() : null;
         var hasParams = request.TryGetProperty("params", out var paramsElement);
+		var traceId = request.TryGetProperty("trace_id", out var requestTrace) ? requestTrace.GetString() ?? "" : "";
+		var operationId = request.TryGetProperty("operation_id", out var requestOperation) ? requestOperation.GetString() ?? "" : "";
 
         if (method == "v1.hello")
         {
@@ -105,26 +124,32 @@ public sealed class Server
                     name = _name,
                     version = _version,
                     capabilities = _capabilities,
-                },
+				}, trace_id = traceId, operation_id = operationId,
             };
         }
 
-        if (method is null || !_handlers.TryGetValue(method, out var handler))
+		Func<JsonElement, object>? handler = null;
+		Func<JsonElement, RequestContext, object>? contextHandler = null;
+		var hasHandler = method is not null && _handlers.TryGetValue(method, out handler);
+		var hasContextHandler = method is not null && _contextHandlers.TryGetValue(method, out contextHandler);
+        if (!hasHandler && !hasContextHandler)
         {
-            return new { id, error = new { code = 404, message = $"unknown method \"{method}\"" } };
+            return new { id, error = new { code = 404, message = $"unknown method \"{method}\"" }, trace_id = traceId, operation_id = operationId };
         }
         try
         {
-            var result = handler(hasParams ? paramsElement : default);
-            return new { id, result };
+			var context = new RequestContext(traceId, operationId);
+            var parameters = hasParams ? paramsElement : default;
+            var result = hasContextHandler ? contextHandler!(parameters, context) : handler!(parameters);
+            return new { id, result, trace_id = context.TraceId, operation_id = context.OperationId };
         }
         catch (RpcException exception)
         {
-            return new { id, error = new { code = exception.Code, message = exception.Message } };
+            return new { id, error = new { code = exception.Code, message = exception.Message }, trace_id = traceId, operation_id = operationId };
         }
         catch (Exception exception)
         {
-            return new { id, error = new { code = 500, message = exception.Message } };
+            return new { id, error = new { code = 500, message = exception.Message }, trace_id = traceId, operation_id = operationId };
         }
     }
 

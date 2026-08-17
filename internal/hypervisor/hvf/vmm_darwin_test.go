@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"testing"
 
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
-	vmruntime "github.com/CYPT71/secure-oci-base/internal/runtime"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
+	vmruntime "github.com/CYPT71/platform-factory/internal/runtime"
 )
 
 func TestDarwinMachineAgentUsesInjectedAuthenticatedConnector(t *testing.T) {

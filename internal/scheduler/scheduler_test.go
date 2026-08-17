@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	api "github.com/CYPT71/secure-oci-base/internal/core"
-	typederrors "github.com/CYPT71/secure-oci-base/internal/errors"
+	api "github.com/CYPT71/platform-factory/internal/core"
+	typederrors "github.com/CYPT71/platform-factory/internal/errors"
 )
 
 func TestSchedulerBasic(t *testing.T) {
@@ -21,7 +21,7 @@ func TestSchedulerBasic(t *testing.T) {
 	}
 
 	definition := api.Pipeline{
-		APIVersion: "secure-oci.dev/v1alpha1",
+		APIVersion: "platform-factory.dev/v1alpha1",
 		Name:       "test-pipeline",
 		Stages: []api.Stage{
 			{ID: "stage-1", Command: api.Command{Executable: "/bin/true"}},
@@ -49,7 +49,7 @@ func TestSchedulerWithDependencies(t *testing.T) {
 	}
 
 	definition := api.Pipeline{
-		APIVersion: "secure-oci.dev/v1alpha1",
+		APIVersion: "platform-factory.dev/v1alpha1",
 		Name:       "test-pipeline",
 		Stages: []api.Stage{
 			{ID: "stage-1", Command: api.Command{Executable: "/bin/true"}},
@@ -84,7 +84,7 @@ func TestSchedulerBlockedStage(t *testing.T) {
 	}
 
 	definition := api.Pipeline{
-		APIVersion: "secure-oci.dev/v1alpha1",
+		APIVersion: "platform-factory.dev/v1alpha1",
 		Name:       "test-pipeline",
 		Stages: []api.Stage{
 			{ID: "stage-1", Command: api.Command{Executable: "/bin/true"}},
@@ -139,7 +139,7 @@ func TestSchedulerRejectsInvalidConfigurationBeforeCallingRunner(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := scheduler.Run(context.Background(), api.Pipeline{
-				APIVersion: "secure-oci.dev/v1alpha1",
+				APIVersion: "platform-factory.dev/v1alpha1",
 				Name:       "test-pipeline",
 				Stages:     []api.Stage{{ID: "stage", Command: api.Command{Executable: "/bin/true"}}},
 			})
@@ -170,7 +170,7 @@ func TestSchedulerRejectsInvalidConfigurationBeforeCallingRunner(t *testing.T) {
 
 func TestAnalyze(t *testing.T) {
 	definition := api.Pipeline{
-		APIVersion: "secure-oci.dev/v1alpha1",
+		APIVersion: "platform-factory.dev/v1alpha1",
 		Name:       "test-pipeline",
 		Stages: []api.Stage{
 			{ID: "stage-1", Command: api.Command{Executable: "/bin/true"}},
@@ -196,7 +196,7 @@ func TestAnalyze(t *testing.T) {
 func TestAnalyzeInvalid(t *testing.T) {
 	// Test with invalid pipeline (no stages)
 	definition := api.Pipeline{
-		APIVersion: "secure-oci.dev/v1alpha1",
+		APIVersion: "platform-factory.dev/v1alpha1",
 		Name:       "test-pipeline",
 		Stages:     []api.Stage{},
 	}

@@ -2,7 +2,7 @@
 set -euo pipefail
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH= cd -- "$here/../.." && pwd)
-work=$(mktemp -d "${TMPDIR:-/tmp}/secure-oci-example-containerd.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-example-containerd.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 cd "$repo"
 (cd plugins/containerd && GOWORK=off go run ./cmd/platform-factory-containerd config) >"$work/config.toml"

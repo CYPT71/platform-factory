@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -191,6 +192,33 @@ func TestLoggerHooks(t *testing.T) {
 	}
 	if capturedFields["test"] != "value" {
 		t.Errorf("expected captured fields to contain test=value, got %v", capturedFields)
+	}
+}
+
+func TestLoggerRedactsSensitiveFieldsBeforeHooksAndJSON(t *testing.T) {
+	var output bytes.Buffer
+	logger := newDefaultLogger()
+	logger.SetOutput(&output)
+	logger.SetLevel(LevelDebug)
+	var hooked Fields
+	logger.AddHook(func(_ Level, _ string, fields Fields) { hooked = fields })
+	original := map[string]any{"nested": map[string]any{"access_token": "sentinel-token"}}
+	logger.Info("safe", Fields{
+		"password": "sentinel-password", "details": original,
+		"endpoint": "https://user:sentinel-url@example.test/path?token=sentinel-query&ok=yes",
+	})
+	logger.WithFields(Fields{"client_secret": "sentinel-persistent"}).Info("also safe")
+	serialized := output.String()
+	for _, secret := range []string{"sentinel-password", "sentinel-token", "sentinel-url", "sentinel-query", "sentinel-persistent"} {
+		if strings.Contains(serialized, secret) || strings.Contains(fmt.Sprint(hooked), secret) {
+			t.Fatalf("secret %q reached output or hook: output=%s hook=%v", secret, serialized, hooked)
+		}
+	}
+	if original["nested"].(map[string]any)["access_token"] != "sentinel-token" {
+		t.Fatal("redaction mutated caller-owned fields")
+	}
+	if !strings.Contains(serialized, "[redacted]") {
+		t.Fatalf("redaction marker absent: %s", serialized)
 	}
 }
 

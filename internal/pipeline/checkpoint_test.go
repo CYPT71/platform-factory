@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	api "github.com/CYPT71/secure-oci-base/internal/core"
+	api "github.com/CYPT71/platform-factory/internal/core"
 )
 
 func TestCheckpointIDGeneration(t *testing.T) {
@@ -574,7 +574,7 @@ func TestPipelineCheckpointAdapterRun(t *testing.T) {
 
 	// Test normal run without checkpoints
 	definition := api.Pipeline{
-		APIVersion: "secure-oci.dev/v1alpha1",
+		APIVersion: "platform-factory.dev/v1alpha1",
 		Name:       "test-pipeline",
 		Stages: []api.Stage{
 			{
@@ -636,7 +636,7 @@ func TestPipelineCheckpointAdapterResumeFromCheckpoint(t *testing.T) {
 	adapter := WithCheckpoints(scheduler, manager)
 
 	definition := api.Pipeline{
-		APIVersion: "secure-oci.dev/v1alpha1",
+		APIVersion: "platform-factory.dev/v1alpha1",
 		Name:       "test-pipeline",
 		Stages: []api.Stage{
 			{ID: "stage-1", Command: api.Command{Executable: "/bin/true"}},
@@ -902,19 +902,6 @@ func TestOpenCheckpointStore(t *testing.T) {
 	if got.ID != cp.ID {
 		t.Errorf("expected ID %s, got %s", cp.ID, got.ID)
 	}
-}
-
-func TestOpenCheckpointStoreDefault(t *testing.T) {
-	// We can't actually test OpenCheckpointStore() as it uses DefaultCheckpointPath
-	// which is /var/lib/platform-factory/checkpoints, but we can at least verify
-	// that the function exists and returns an error for permission issues
-	// or that it works if we have permissions
-	// For now, just verify it doesn't panic
-	_, err := OpenCheckpointStore()
-	// We expect an error since /var/lib/platform-factory/checkpoints likely doesn't exist
-	// or we don't have write permissions
-	// This is acceptable - the function exists and behaves correctly
-	_ = err // Ignore the error, we're just testing the function exists
 }
 
 func TestCheckpointStoreImportExportDirect(t *testing.T) {

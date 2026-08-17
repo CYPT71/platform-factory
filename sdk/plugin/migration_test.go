@@ -28,7 +28,13 @@ func TestMigrationHandlerRejectsMissingAndMalformedParameters(t *testing.T) {
 	handler := migrationHandler(func(context.Context, MigrationDiscoverParams) (MigrationDiscoverResult, error) {
 		return MigrationDiscoverResult{}, nil
 	})
-	for _, raw := range []json.RawMessage{nil, json.RawMessage(`{`)} {
+	for _, raw := range []json.RawMessage{
+		nil,
+		json.RawMessage(`{`),
+		json.RawMessage(`{"cursor":"next","provider_secret":"leak"}`),
+		json.RawMessage(`{"cursor":"next"}{"cursor":"again"}`),
+		json.RawMessage(`{"cursor":42}`),
+	} {
 		if _, err := handler(context.Background(), raw); err == nil {
 			t.Fatalf("raw=%q accepted", raw)
 		}

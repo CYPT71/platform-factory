@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/CYPT71/secure-oci-base/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/layout"
 )
 
 func localLayoutPath(value string) bool {
@@ -20,12 +20,20 @@ func localLayoutPath(value string) bool {
 	return err == nil && info.IsDir()
 }
 
+// prepareContainerImage backs `platform-factory import` and `platform-
+// factory run`'s local-layout path - both load a layout into the local
+// container runtime and never push it anywhere, so this uses
+// layout.VerifyForLocalImport rather than layout.Verify: the same
+// structural/digest checks, without the embedded-secret-marker scan
+// that legitimately gates pf publish's pre-push path but otherwise
+// false-positives on any layer containing platform-factory's own
+// compiled binary (see VerifyForLocalImport's doc comment).
 func prepareContainerImage(runtimeName, image, layoutName string, stderr io.Writer, execute containerExecutor) (string, error) {
 	if layoutName == "" {
 		layoutName = image
 		image = ""
 	}
-	report, err := layout.Verify(layoutName)
+	report, err := layout.VerifyForLocalImport(layoutName)
 	if err != nil {
 		return "", fmt.Errorf("verify local layout: %w", err)
 	}
@@ -46,17 +54,24 @@ func prepareContainerImage(runtimeName, image, layoutName string, stderr io.Writ
 		return "", fmt.Errorf("layout does not contain image reference %q", image)
 	}
 
+	// Always (re)load rather than skipping when a tag with this name
+	// already exists locally: docker/podman's own `image
+	// exists`/`image inspect` only check the tag name, never content, so
+	// after a rebuild that changed the layout (the entire point of pf
+	// run's rebuild-on-change and --watch), an existing tag would
+	// otherwise keep the runtime silently serving the STALE image
+	// forever. docker/podman load naturally overwrites an existing tag
+	// with the freshly loaded content, so always loading is correct -
+	// it costs an unpack on every run, not just the first, but that's
+	// the right tradeoff for a local dev tool over silently stale output.
+	if err := streamLayoutToRuntime(runtimeName, layoutName, image, stderr, execute); err != nil {
+		return "", fmt.Errorf("import %s into %s: %w", layoutName, runtimeName, err)
+	}
 	var inspectArgs []string
 	if runtimeName == "podman" {
 		inspectArgs = []string{"image", "exists", image}
 	} else {
 		inspectArgs = []string{"image", "inspect", image}
-	}
-	if err := execute(runtimeName, inspectArgs, nil, io.Discard, io.Discard); err == nil {
-		return image, nil
-	}
-	if err := streamLayoutToRuntime(runtimeName, layoutName, image, stderr, execute); err != nil {
-		return "", fmt.Errorf("import %s into %s: %w", layoutName, runtimeName, err)
 	}
 	if err := execute(runtimeName, inspectArgs, nil, io.Discard, io.Discard); err != nil {
 		return "", fmt.Errorf("image %q is still unavailable after import", image)

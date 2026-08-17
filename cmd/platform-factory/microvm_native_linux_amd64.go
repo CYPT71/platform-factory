@@ -30,10 +30,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor/kvm"
-	"github.com/CYPT71/secure-oci-base/internal/microvm/forward"
-	"github.com/CYPT71/secure-oci-base/internal/networking"
-	"github.com/CYPT71/secure-oci-base/internal/rootfs"
+	"github.com/CYPT71/platform-factory/internal/hypervisor/kvm"
+	"github.com/CYPT71/platform-factory/internal/microvm/forward"
+	"github.com/CYPT71/platform-factory/internal/networking"
+	"github.com/CYPT71/platform-factory/internal/rootfs"
 )
 
 // runNativeKVM builds the guest initramfs from layout, resolves a kernel,
@@ -49,7 +49,7 @@ func runNativeKVM(ctx context.Context, layoutDir string, memoryMiB int, forwards
 		return err
 	}
 
-	work, err := os.MkdirTemp("", "secure-oci-base-microvm-native.*")
+	work, err := os.MkdirTemp("", "platform-factory-base-microvm-native.*")
 	if err != nil {
 		return fmt.Errorf("create workspace: %w", err)
 	}

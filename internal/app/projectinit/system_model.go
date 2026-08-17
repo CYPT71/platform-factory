@@ -78,6 +78,7 @@ func WithSystemProposal(plan Plan, proposal SystemProposal) (Plan, error) {
 	}
 	plan.Actions = cloneActions(plan.Actions)
 	plan.Unknowns = slices.Clone(plan.Unknowns)
+	plan.Findings = slices.Clone(plan.Findings)
 	plan.System = &canonical
 	return plan, nil
 }

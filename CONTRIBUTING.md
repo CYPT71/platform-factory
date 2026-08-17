@@ -1,6 +1,6 @@
-# Contributing to secure-oci
+# Contributing to platform-factory
 
-Thank you for your interest in contributing to secure-oci! This document provides
+Thank you for your interest in contributing to platform-factory! This document provides
 guidelines for contributing to the project.
 
 ## Getting Started
@@ -17,8 +17,8 @@ guidelines for contributing to the project.
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/CYPT71/secure-oci-base.git
-   cd secure-oci-base
+   git clone https://github.com/CYPT71/platform-factory.git
+   cd platform-factory-base
    ```
 
 2. **Install dependencies**:
@@ -382,7 +382,7 @@ The project uses semantic versioning (SemVer):
 
 **Do not report security issues in public GitHub issues.**
 
-Instead, email the security team at `security@secure-oci.dev` with:
+Instead, email the security team at `security@platform-factory.dev` with:
 - A description of the vulnerability
 - Steps to reproduce
 - Potential impact
@@ -402,13 +402,13 @@ Instead, email the security team at `security@secure-oci.dev` with:
 
 - **GitHub Discussions**: For general questions and discussions
 - **GitHub Issues**: For bug reports and feature requests
-- **Email**: For private matters (info@secure-oci.dev)
-- **Security**: For security vulnerabilities (security@secure-oci.dev)
+- **Email**: For private matters (info@platform-factory.dev)
+- **Security**: For security vulnerabilities (security@platform-factory.dev)
 
 ### Code of Conduct
 
 All contributors are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
-Report violations to conduct@secure-oci.dev.
+Report violations to conduct@platform-factory.dev.
 
 ### Becoming a Maintainer
 

@@ -2,12 +2,90 @@ package langplugin
 
 import (
 	"archive/tar"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 )
+
+var ErrUsage = errors.New("language plugin: usage")
+
+type Handler func([]string) error
+
+// Dispatch invokes one named language-plugin command without owning process
+// exit or presentation policy.
+func Dispatch(args []string, handlers map[string]Handler) error {
+	if len(args) == 0 {
+		return ErrUsage
+	}
+	handler := handlers[args[0]]
+	if handler == nil {
+		return ErrUsage
+	}
+	return handler(args[1:])
+}
+
+// ParseRootFlag implements the common --root contract shared by language
+// plugin inspect and freeze commands.
+func ParseRootFlag(subcommand string, args []string) (string, error) {
+	flags := flag.NewFlagSet(subcommand, flag.ContinueOnError)
+	root := flags.String("root", "", "project root directory")
+	if err := flags.Parse(args); err != nil {
+		return "", err
+	}
+	if *root == "" {
+		return "", errors.New("--root is required")
+	}
+	return *root, nil
+}
+
+func FileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+func RunIn(directory, name string, args ...string) error {
+	command := exec.Command(name, args...)
+	command.Dir, command.Stdout, command.Stderr = directory, os.Stderr, os.Stderr
+	return command.Run()
+}
+
+// ParseBuildLayerFlags implements the common build-layer CLI contract.
+func ParseBuildLayerFlags(args []string) (root, output, dest string, err error) {
+	flags := flag.NewFlagSet("build-layer", flag.ContinueOnError)
+	flags.StringVar(&root, "root", "", "project root directory")
+	flags.StringVar(&output, "output", "", "path to write the uncompressed tar layer to")
+	flags.StringVar(&dest, "dest", "", "container path prefix every entry in the layer is rooted at")
+	if err = flags.Parse(args); err != nil {
+		return
+	}
+	if root == "" || output == "" || dest == "" {
+		err = errors.New("--root, --output, and --dest are all required")
+	}
+	return
+}
+
+// BuildLayer validates the dependency directory and packages it using the
+// deterministic layer format shared by every language plugin.
+func BuildLayer(args []string, dependenciesPath, pluginName string) error {
+	root, output, dest, err := ParseBuildLayerFlags(args)
+	if err != nil {
+		return err
+	}
+	source := filepath.Join(root, dependenciesPath)
+	info, err := os.Stat(source)
+	if err != nil {
+		return fmt.Errorf("%s does not exist - run `%s freeze` first: %w", dependenciesPath, pluginName, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", dependenciesPath)
+	}
+	return WriteDeterministicTar(source, dest, output)
+}
 
 // WriteDeterministicTar tars every regular file and directory under
 // source into output, with entry names rewritten from source-relative

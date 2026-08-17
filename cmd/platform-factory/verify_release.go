@@ -8,7 +8,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/CYPT71/secure-oci-base/internal/app/verify"
+	"github.com/CYPT71/platform-factory/internal/app/verify"
 )
 
 // releaseVerification is kept as an alias so existing tests and any
@@ -18,7 +18,6 @@ import (
 type releaseVerification = verify.VerificationResult
 
 // runVerifyRelease is the CLI facade over internal/app/verify.Service -
-// per Sanetizer-todo.md item 8, it only parses arguments, calls the
 // service, formats the result, and picks an exit code. Every actual
 // verification step - layout, signature, provenance, SBOM, policy -
 // lives in the service, where it's tested without going through the CLI
@@ -89,7 +88,10 @@ func runVerifyRelease(args []string, stdout, stderr io.Writer) int {
 	if *outputFormat == "text" {
 		printReleaseVerificationText(stdout, result)
 	} else {
-		encoded, _ := json.MarshalIndent(result, "", "  ")
+		encoded, _ := json.MarshalIndent(struct {
+			APIVersion string `json:"api_version"`
+			verify.VerificationResult
+		}{APIVersion: cliOutputAPIVersion, VerificationResult: result}, "", "  ")
 		fmt.Fprintln(stdout, string(encoded))
 	}
 	if !result.Valid {

@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	appmigration "github.com/CYPT71/secure-oci-base/internal/app/migration"
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
+	appmigration "github.com/CYPT71/platform-factory/internal/app/migration"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
+	"github.com/CYPT71/platform-factory/internal/observability"
 )
 
 type migrationEvidenceSink struct {

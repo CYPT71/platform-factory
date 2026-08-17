@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/CYPT71/secure-oci-base/sdk/plugin"
+	"github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 type language struct{}

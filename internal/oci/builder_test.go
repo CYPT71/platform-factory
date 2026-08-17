@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/budget"
-	"github.com/CYPT71/secure-oci-base/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/budget"
+	"github.com/CYPT71/platform-factory/internal/layout"
 )
 
 func TestCopyStreamFileCyclesCallerBuffer(t *testing.T) {

@@ -1,25 +1,3 @@
-// platform-factory-lang-python is the Python reference implementation of
-// the language-plugin pattern described in docs/language-plugin-layers.md:
-// a separate Go module and binary (matching plugins/containerd and
-// plugins/kubevirt's own out-of-module pattern), not the sdk/plugin
-// subprocess-RPC protocol examples/sdk/plugin-python demonstrates. It
-// never runs unless a project's platform-factory.yaml explicitly sets
-// language_plugin: true - see cmd/platform-factory/language_plugin.go
-// for the host-side dispatch this binary is invoked from.
-//
-// Two subcommands:
-//
-//	platform-factory-lang-python freeze --root DIR
-//	platform-factory-lang-python build-layer --root DIR --output TAR --dest PREFIX
-//
-// freeze mirrors the host's own built-in Python freeze step exactly
-// (pip install --target, then pip freeze > requirements.lock) so a
-// project can opt into this plugin without its freeze behavior changing
-// at all. build-layer is the new capability: it packages whatever
-// freeze already installed as a standalone, uncompressed tar - the host
-// (internal/oci.Build via Options.ExtraLayers) independently validates
-// and re-hashes every byte of it before trusting any of it; nothing
-// this binary prints or its own exit code is taken on faith.
 package main
 
 import (
@@ -29,22 +7,18 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
-	"github.com/CYPT71/secure-oci-base/sdk/langplugin"
+	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-	var err error
-	switch os.Args[1] {
-	case "freeze":
-		err = runFreeze(os.Args[2:])
-	case "build-layer":
-		err = runBuildLayer(os.Args[2:])
-	default:
+	err := langplugin.Dispatch(os.Args[1:], map[string]langplugin.Handler{
+		"inspect": runInspect, "scaffold": runScaffold,
+		"freeze": runFreeze, "build-layer": runBuildLayer,
+		"runtime": runRuntime,
+	})
+	if err == langplugin.ErrUsage {
 		usage()
 		os.Exit(2)
 	}
@@ -55,9 +29,86 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: platform-factory-lang-python <freeze|build-layer> [OPTIONS]")
+	fmt.Fprintln(os.Stderr, "usage: platform-factory-lang-python <inspect|scaffold|freeze|build-layer|runtime> [OPTIONS]")
+	fmt.Fprintln(os.Stderr, "  inspect --root DIR")
 	fmt.Fprintln(os.Stderr, "  freeze --root DIR")
 	fmt.Fprintln(os.Stderr, "  build-layer --root DIR --output TAR --dest PREFIX")
+	fmt.Fprintln(os.Stderr, "  runtime --root DIR --image-root DIR [--interpreter PATH]")
+}
+
+func runScaffold(args []string) error {
+	flags := flag.NewFlagSet("scaffold", flag.ContinueOnError)
+	name := flags.String("name", "", "new plugin name")
+	output := flags.String("output", "", "output directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" || *output == "" {
+		return errors.New("--name and --output are required")
+	}
+	if err := os.MkdirAll(*output, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(*output)
+	if err != nil {
+		return err
+	}
+	if len(entries) != 0 {
+		return errors.New("output directory must be empty")
+	}
+	source := fmt.Sprintf(`#!/usr/bin/env python3
+import json
+import sys
+
+def inspect(root):
+    return {"match": False, "language": %q, "profile": "unknown",
+            "evidence": [], "dependencies": {"mode": "unknown", "reason": "customize me"}}
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2 or sys.argv[1] != "inspect":
+        raise SystemExit("usage: plugin.py inspect --root DIR")
+    print(json.dumps(inspect(sys.argv[-1])))
+`, *name)
+	path := filepath.Join(*output, "plugin.py")
+	if err := os.WriteFile(path, []byte(source), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(*output, "README.md"), []byte("# "+*name+"\n\nEdit `inspect`, then run `pf plugin load --from ./plugin.py "+*name+"`.\n"), 0o644); err != nil {
+		return err
+	}
+	fmt.Println(path)
+	return nil
+}
+
+func runInspect(args []string) error {
+	root, err := langplugin.ParseRootFlag("inspect", args)
+	if err != nil {
+		return err
+	}
+	result, err := langplugin.Inspect(root, langplugin.Definition{Language: "python", Profile: "python", Markers: []string{"pyproject.toml", "requirements.txt", "Pipfile"}, SourceExtensions: []string{".py"}, Entrypoints: []string{"app.py", "main.py", "__main__.py"}, Manifests: []string{"pyproject.toml", "requirements.txt", "Pipfile"}, Imports: pythonImports})
+	if err != nil {
+		return err
+	}
+	return langplugin.WriteInspection(result)
+}
+
+func pythonImports(source string) ([]string, bool) {
+	standard := map[string]bool{"collections": true, "contextlib": true, "datetime": true, "functools": true, "http": true, "io": true, "json": true, "logging": true, "math": true, "os": true, "pathlib": true, "re": true, "subprocess": true, "sys": true, "time": true, "typing": true, "unittest": true}
+	var imports []string
+	dynamic := strings.Contains(source, "importlib.import_module") || strings.Contains(source, "__import__(")
+	for _, line := range strings.Split(source, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "import ") || strings.HasPrefix(line, "from ") {
+			fields := strings.Fields(line)
+			if len(fields) > 1 {
+				module := strings.Split(fields[1], ".")[0]
+				if !standard[module] {
+					imports = append(imports, module)
+				}
+			}
+		}
+	}
+	return imports, dynamic
 }
 
 // depsRelPath is where freeze installs packages and build-layer reads
@@ -68,19 +119,19 @@ func usage() {
 const depsRelPath = ".platform-factory/deps/python"
 
 func runFreeze(args []string) error {
-	root, err := parseRootFlag("freeze", args)
+	root, err := langplugin.ParseRootFlag("freeze", args)
 	if err != nil {
 		return err
 	}
 	requirements := "requirements.lock"
-	if !fileExists(filepath.Join(root, requirements)) {
+	if !langplugin.FileExists(filepath.Join(root, requirements)) {
 		requirements = "requirements.txt"
 	}
-	if !fileExists(filepath.Join(root, requirements)) {
+	if !langplugin.FileExists(filepath.Join(root, requirements)) {
 		return fmt.Errorf("no requirements.lock or requirements.txt found in %s", root)
 	}
 	target := filepath.Join(root, depsRelPath)
-	if err := runIn(root, "python", "-m", "pip", "install", "--requirement", requirements, "--target", depsRelPath); err != nil {
+	if err := langplugin.RunIn(root, "python", "-m", "pip", "install", "--requirement", requirements, "--target", depsRelPath); err != nil {
 		return fmt.Errorf("pip install: %w", err)
 	}
 	lockFile, err := os.Create(filepath.Join(root, "requirements.lock"))
@@ -99,56 +150,5 @@ func runFreeze(args []string) error {
 }
 
 func runBuildLayer(args []string) error {
-	root, output, dest, err := parseBuildLayerFlags(args)
-	if err != nil {
-		return err
-	}
-	source := filepath.Join(root, depsRelPath)
-	info, err := os.Stat(source)
-	if err != nil {
-		return fmt.Errorf("%s does not exist - run `platform-factory-lang-python freeze` first: %w", depsRelPath, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", depsRelPath)
-	}
-	return langplugin.WriteDeterministicTar(source, dest, output)
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
-}
-
-func runIn(dir, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func parseRootFlag(subcommand string, args []string) (root string, err error) {
-	flags := flag.NewFlagSet(subcommand, flag.ContinueOnError)
-	rootFlag := flags.String("root", "", "project root directory")
-	if err := flags.Parse(args); err != nil {
-		return "", err
-	}
-	if *rootFlag == "" {
-		return "", errors.New("--root is required")
-	}
-	return *rootFlag, nil
-}
-
-func parseBuildLayerFlags(args []string) (root, output, dest string, err error) {
-	flags := flag.NewFlagSet("build-layer", flag.ContinueOnError)
-	rootFlag := flags.String("root", "", "project root directory")
-	outputFlag := flags.String("output", "", "path to write the uncompressed tar layer to")
-	destFlag := flags.String("dest", "", "container path prefix every entry in the layer is rooted at")
-	if err := flags.Parse(args); err != nil {
-		return "", "", "", err
-	}
-	if *rootFlag == "" || *outputFlag == "" || *destFlag == "" {
-		return "", "", "", errors.New("--root, --output, and --dest are all required")
-	}
-	return *rootFlag, *outputFlag, *destFlag, nil
+	return langplugin.BuildLayer(args, depsRelPath, "platform-factory-lang-python")
 }

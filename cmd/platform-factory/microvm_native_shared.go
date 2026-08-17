@@ -33,7 +33,7 @@ func findRepoRoot() (string, error) {
 	}
 	gomod := strings.TrimSpace(string(out))
 	if gomod == "" || filepath.Base(gomod) != "go.mod" {
-		return "", errors.New("run platform-factory from within the secure-oci-base repository (go.mod not found)")
+		return "", errors.New("run platform-factory from within the platform-factory-base repository (go.mod not found)")
 	}
 	return filepath.Dir(gomod), nil
 }

@@ -17,9 +17,9 @@ import (
 	"io"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/assemble"
-	api "github.com/CYPT71/secure-oci-base/internal/core"
-	"github.com/CYPT71/secure-oci-base/internal/pipeline"
+	"github.com/CYPT71/platform-factory/internal/assemble"
+	api "github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/pipeline"
 )
 
 // Options carries the build metadata a caller supplies; none of it is

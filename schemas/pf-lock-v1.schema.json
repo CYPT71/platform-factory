@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform-factory.dev/schemas/pf-lock-v1.schema.json",
+  "title": "Platform Factory project lock v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "version": {"const": 1},
+    "git_commit": {"type": "string", "maxLength": 128, "pattern": "^[^\\s\\u0000]*$"}
+  }
+}

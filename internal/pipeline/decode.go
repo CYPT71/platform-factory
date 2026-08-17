@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	api "github.com/CYPT71/secure-oci-base/internal/core"
+	api "github.com/CYPT71/platform-factory/internal/core"
 )
 
 const maxDefinitionBytes = 1 << 20

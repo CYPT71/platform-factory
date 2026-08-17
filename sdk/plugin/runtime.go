@@ -44,6 +44,20 @@ func typedHandler[Params, Result any](handler func(context.Context, Params) (Res
 	}
 }
 
+// RegisterTyped exposes strict native Go handlers for any capability family.
+// Plugin authors keep ordinary structs and context.Context while the SDK owns
+// JSON decoding, unknown-field rejection and protocol dispatch.
+func RegisterTyped[Params, Result any](server *Server, capability string, handler func(context.Context, Params) (Result, error)) error {
+	if server == nil || handler == nil {
+		return fmt.Errorf("plugin: typed handler requires server and function")
+	}
+	if err := ValidateCapability(capability); err != nil {
+		return err
+	}
+	server.Handle(capability, typedHandler(handler))
+	return nil
+}
+
 // Serve runs the reference protocol over the supplied streams.
 func (r *Runtime) Serve(ctx context.Context, input io.Reader, output io.Writer) error {
 	return r.server.Serve(ctx, input, output)

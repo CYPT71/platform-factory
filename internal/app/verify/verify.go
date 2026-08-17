@@ -1,5 +1,4 @@
 // Package verify is the application-layer service behind
-// `pf verify-release` - Sanetizer-todo.md item 8, the same extraction
 // internal/app/doctor and internal/app/sbom already did for `pf doctor`
 // and `pf sbom`. cmd/platform-factory/verify_release.go now only parses
 // flags, calls Service.Verify, formats the result, and maps the outcome
@@ -17,11 +16,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/CYPT71/secure-oci-base/internal/attestation"
-	"github.com/CYPT71/secure-oci-base/internal/layout"
-	"github.com/CYPT71/secure-oci-base/internal/policy"
-	"github.com/CYPT71/secure-oci-base/internal/sbom"
-	"github.com/CYPT71/secure-oci-base/internal/signing"
+	"github.com/CYPT71/platform-factory/internal/attestation"
+	"github.com/CYPT71/platform-factory/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/policy"
+	"github.com/CYPT71/platform-factory/internal/sbom"
+	"github.com/CYPT71/platform-factory/internal/signing"
 )
 
 // ErrInvalidArguments distinguishes a caller mistake (ambiguous or

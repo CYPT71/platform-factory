@@ -1,7 +1,4 @@
-// Package observability provides a unified interface for structured logging,
-// metrics, and distributed tracing across the secure-oci project.
-// It enables end-to-end visibility into pipeline execution, VMM operations,
-// and all other components.
+// Package observability provides structured logging, metrics, and tracing.
 package observability
 
 import (
@@ -9,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -20,7 +19,6 @@ import (
 // Level represents the severity level of a log entry.
 type Level int
 
-// Log levels from lowest to highest severity.
 const (
 	LevelDebug Level = iota
 	LevelInfo
@@ -33,42 +31,23 @@ const (
 
 // String returns the string representation of the log level.
 func (l Level) String() string {
-	switch l {
-	case LevelDebug:
-		return "DEBUG"
-	case LevelInfo:
-		return "INFO"
-	case LevelWarn:
-		return "WARN"
-	case LevelError:
-		return "ERROR"
-	case LevelDPanic:
-		return "DPANIC"
-	case LevelPanic:
-		return "PANIC"
-	default:
-		return ""
+	if l >= LevelDebug && l <= LevelPanic {
+		return [...]string{"DEBUG", "INFO", "WARN", "ERROR", "DPANIC", "PANIC"}[l]
 	}
+	return ""
 }
 
 // ParseLevel parses a string into a Level.
 func ParseLevel(s string) Level {
-	switch s {
-	case "DEBUG", "debug":
-		return LevelDebug
-	case "INFO", "info":
-		return LevelInfo
-	case "WARN", "warn", "WARNING", "warning":
-		return LevelWarn
-	case "ERROR", "error":
-		return LevelError
-	case "DPANIC", "dpanic":
-		return LevelDPanic
-	case "PANIC", "panic":
-		return LevelPanic
-	default:
-		return LevelInfo
+	if strings.EqualFold(s, "WARNING") {
+		s = "WARN"
 	}
+	for level := LevelDebug; level <= LevelPanic; level++ {
+		if strings.EqualFold(s, level.String()) {
+			return level
+		}
+	}
+	return LevelInfo
 }
 
 // Fields represents a collection of key-value pairs for structured logging.
@@ -79,7 +58,6 @@ type Logger interface {
 	// Log writes a log entry with the given level and fields.
 	Log(level Level, msg string, fields ...Fields)
 
-	// Convenience methods for each level
 	Debug(msg string, fields ...Fields)
 	Info(msg string, fields ...Fields)
 	Warn(msg string, fields ...Fields)
@@ -103,18 +81,15 @@ type Logger interface {
 	SetOutput(w io.Writer)
 }
 
-// defaultLogger is the concrete implementation of Logger.
 type defaultLogger struct {
 	mu     sync.Mutex
 	level  Level
 	output io.Writer
 	fields Fields
 
-	// hooks for testing
 	hooks []func(level Level, msg string, fields Fields)
 }
 
-// newDefaultLogger creates a new default logger.
 func newDefaultLogger() *defaultLogger {
 	return &defaultLogger{
 		level:  LevelInfo,
@@ -123,44 +98,121 @@ func newDefaultLogger() *defaultLogger {
 	}
 }
 
-// Log implements Logger.
 func (l *defaultLogger) Log(level Level, msg string, fields ...Fields) {
 	if level < l.level {
 		return
 	}
 
-	// Merge all fields
 	allFields := make(Fields)
 	for k, v := range l.fields {
-		allFields[k] = v
+		allFields[k] = redactField(k, v)
 	}
 	for _, f := range fields {
 		for k, v := range f {
-			allFields[k] = v
+			allFields[k] = redactField(k, v)
 		}
 	}
 
-	// Add standard fields
 	allFields["level"] = level.String()
 	allFields["timestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
 	allFields["msg"] = msg
 
-	// Execute hooks for testing
 	l.mu.Lock()
 	for _, hook := range l.hooks {
 		hook(level, msg, allFields)
 	}
 	l.mu.Unlock()
 
-	// Write to output
 	l.write(allFields)
 }
 
-// write writes the fields to the output.
+const redactedValue = "[redacted]"
+
+func redactField(key string, value any) any {
+	if sensitiveFieldKey(key) {
+		return redactedValue
+	}
+	return redactValue(value)
+}
+
+func sensitiveFieldKey(key string) bool {
+	normalized := strings.ToLower(strings.NewReplacer("-", "_", ".", "_").Replace(key))
+	for _, marker := range []string{"password", "passwd", "secret", "token", "authorization", "credential", "private_key", "client_key", "cookie"} {
+		if normalized == marker || strings.HasSuffix(normalized, "_"+marker) || strings.HasPrefix(normalized, marker+"_") {
+			return true
+		}
+	}
+	return false
+}
+
+func redactValue(value any) any {
+	switch typed := value.(type) {
+	case Fields:
+		return redactMap(map[string]any(typed))
+	case map[string]any:
+		return redactMap(typed)
+	case map[string]string:
+		result := make(map[string]any, len(typed))
+		for key, item := range typed {
+			result[key] = redactField(key, item)
+		}
+		return result
+	case []any:
+		result := make([]any, len(typed))
+		for index, item := range typed {
+			result[index] = redactValue(item)
+		}
+		return result
+	case string:
+		return redactURLCredentials(typed)
+	case error:
+		return redactURLCredentials(typed.Error())
+	}
+	reflection := reflect.ValueOf(value)
+	if reflection.IsValid() && (reflection.Kind() == reflect.Slice || reflection.Kind() == reflect.Array) {
+		result := make([]any, reflection.Len())
+		for index := range result {
+			result[index] = redactValue(reflection.Index(index).Interface())
+		}
+		return result
+	}
+	return value
+}
+
+func redactMap(value map[string]any) map[string]any {
+	result := make(map[string]any, len(value))
+	for key, item := range value {
+		result[key] = redactField(key, item)
+	}
+	return result
+}
+
+func redactURLCredentials(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return value
+	}
+	if parsed.User != nil {
+		parsed.User = url.User(redactedValue)
+	}
+	query := parsed.Query()
+	changed := parsed.User != nil
+	for key := range query {
+		if sensitiveFieldKey(key) {
+			query.Set(key, redactedValue)
+			changed = true
+		}
+	}
+	if !changed {
+		return value
+	}
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
 func (l *defaultLogger) write(fields Fields) {
 	data, err := json.Marshal(fields)
 	if err != nil {
-		// Fallback to simple format if marshaling fails
 		fmt.Fprintf(l.output, "%s %s %v\n",
 			fields["timestamp"], fields["level"], fields["msg"])
 		return
@@ -171,38 +223,31 @@ func (l *defaultLogger) write(fields Fields) {
 	l.output.Write([]byte("\n"))
 }
 
-// Debug implements Logger.
 func (l *defaultLogger) Debug(msg string, fields ...Fields) {
 	l.Log(LevelDebug, msg, fields...)
 }
 
-// Info implements Logger.
 func (l *defaultLogger) Info(msg string, fields ...Fields) {
 	l.Log(LevelInfo, msg, fields...)
 }
 
-// Warn implements Logger.
 func (l *defaultLogger) Warn(msg string, fields ...Fields) {
 	l.Log(LevelWarn, msg, fields...)
 }
 
-// Error implements Logger.
 func (l *defaultLogger) Error(msg string, fields ...Fields) {
 	l.Log(LevelError, msg, fields...)
 }
 
-// DPanic implements Logger.
 func (l *defaultLogger) DPanic(msg string, fields ...Fields) {
 	l.Log(LevelDPanic, msg, fields...)
 }
 
-// Panic implements Logger.
 func (l *defaultLogger) Panic(msg string, fields ...Fields) {
 	l.Log(LevelPanic, msg, fields...)
 	panic(msg)
 }
 
-// WithFields implements Logger.
 func (l *defaultLogger) WithFields(fields Fields) Logger {
 	newFields := make(Fields)
 	for k, v := range l.fields {
@@ -218,26 +263,21 @@ func (l *defaultLogger) WithFields(fields Fields) Logger {
 	}
 }
 
-// WithContext implements Logger.
 func (l *defaultLogger) WithContext(ctx context.Context) Logger {
-	// Extract trace ID from context if present
 	if traceID := TraceIDFromContext(ctx); traceID != "" {
 		return l.WithFields(Fields{"trace_id": traceID})
 	}
 	return l
 }
 
-// SetLevel implements Logger.
 func (l *defaultLogger) SetLevel(level Level) {
 	l.level = level
 }
 
-// GetLevel implements Logger.
 func (l *defaultLogger) GetLevel() Level {
 	return l.level
 }
 
-// SetOutput implements Logger.
 func (l *defaultLogger) SetOutput(w io.Writer) {
 	l.output = w
 }
@@ -249,7 +289,6 @@ func (l *defaultLogger) AddHook(hook func(level Level, msg string, fields Fields
 	l.hooks = append(l.hooks, hook)
 }
 
-// Global logger instance
 var globalLogger = newDefaultLogger()
 
 // Default returns the global logger.
@@ -271,8 +310,6 @@ func SetGlobalLevel(level Level) {
 func SetGlobalOutput(w io.Writer) {
 	globalLogger.SetOutput(w)
 }
-
-// Package-level convenience functions
 
 // Debug logs a debug message.
 func Debug(msg string, fields ...Fields) {
@@ -318,46 +355,32 @@ type contextKey struct {
 
 // TraceIDFromContext extracts the trace ID from the context.
 func TraceIDFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	if traceID, ok := ctx.Value(contextKeyTraceID).(string); ok {
-		return traceID
-	}
-	return ""
+	return contextValue[string](ctx, contextKeyTraceID)
 }
 
 // SpanIDFromContext extracts the span ID from the context.
 func SpanIDFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	if spanID, ok := ctx.Value(contextKeySpanID).(string); ok {
-		return spanID
-	}
-	return ""
+	return contextValue[string](ctx, contextKeySpanID)
 }
 
 // ParentIDFromContext extracts the parent span ID from the context.
 func ParentIDFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
-	if parentID, ok := ctx.Value(contextKeyParentID).(string); ok {
-		return parentID
-	}
-	return ""
+	return contextValue[string](ctx, contextKeyParentID)
 }
 
 // BaggageFromContext extracts the baggage from the context.
 func BaggageFromContext(ctx context.Context) map[string]string {
+	return contextValue[map[string]string](ctx, contextKeyBaggage)
+}
+
+func contextValue[T any](ctx context.Context, key *contextKey) (zero T) {
 	if ctx == nil {
-		return nil
+		return zero
 	}
-	if baggage, ok := ctx.Value(contextKeyBaggage).(map[string]string); ok {
-		return baggage
+	if value, ok := ctx.Value(key).(T); ok {
+		return value
 	}
-	return nil
+	return zero
 }
 
 // ContextWithTraceID returns a new context with the given trace ID.
@@ -388,10 +411,8 @@ func NewContext(ctx context.Context, traceID, spanID, parentID string) context.C
 	return ctx
 }
 
-// GenerateID generates a unique identifier for traces and spans.
-// In production, this would use a more sophisticated ID generator.
+// GenerateID returns a process-unique, time-sortable identifier.
 func GenerateID() string {
-	// Simple implementation for now - could be enhanced with UUID or other
 	return fmt.Sprintf("%s%06d",
 		time.Now().UTC().Format("20060102-150405.000000"),
 		nextID(),
@@ -428,7 +449,6 @@ type Span struct {
 	Events    []SpanEvent    `json:"events,omitempty"`
 	Error     error          `json:"error,omitempty"`
 
-	// For managing child spans
 	children []*Span
 	mu       sync.Mutex
 }
@@ -497,7 +517,6 @@ type Tracer interface {
 	Inject(ctx context.Context, carrier map[string]string)
 }
 
-// defaultTracer is the concrete implementation of Tracer.
 type defaultTracer struct {
 	mu     sync.Mutex
 	spans  []*Span
@@ -505,7 +524,6 @@ type defaultTracer struct {
 	logger Logger
 }
 
-// newDefaultTracer creates a new default tracer.
 func newDefaultTracer(logger Logger) *defaultTracer {
 	return &defaultTracer{
 		spans:  make([]*Span, 0),
@@ -514,15 +532,12 @@ func newDefaultTracer(logger Logger) *defaultTracer {
 	}
 }
 
-// StartSpan implements Tracer.
 func (t *defaultTracer) StartSpan(name string, opts ...SpanOption) *Span {
 	span, _ := t.StartSpanWithContext(context.Background(), name, opts...)
 	return span
 }
 
-// StartSpanWithContext implements Tracer.
 func (t *defaultTracer) StartSpanWithContext(ctx context.Context, name string, opts ...SpanOption) (*Span, context.Context) {
-	// Extract parent context if available
 	var traceID, parentID string
 	var baggage map[string]string
 
@@ -532,13 +547,11 @@ func (t *defaultTracer) StartSpanWithContext(ctx context.Context, name string, o
 		baggage = BaggageFromContext(ctx)
 	}
 
-	// Generate new IDs if needed
 	if traceID == "" {
 		traceID = GenerateID()
 	}
 	spanID := GenerateID()
 
-	// Create the span
 	span := &Span{
 		ID:        spanID,
 		TraceID:   traceID,
@@ -551,7 +564,6 @@ func (t *defaultTracer) StartSpanWithContext(ctx context.Context, name string, o
 		children:  make([]*Span, 0),
 	}
 
-	// Apply options
 	for _, opt := range opts {
 		opt(span)
 	}
@@ -569,22 +581,18 @@ func (t *defaultTracer) StartSpanWithContext(ctx context.Context, name string, o
 	baggage = copied
 	baggage["trace_id"] = traceID
 
-	// Store span
 	t.mu.Lock()
 	t.spans = append(t.spans, span)
 	if parentID == "" {
-		// This is a root span
 		t.active[traceID] = span
 	}
 	t.mu.Unlock()
 
-	// Create new context
 	ctx = ContextWithTraceID(ctx, traceID)
 	ctx = ContextWithSpanID(ctx, spanID)
 	ctx = ContextWithParentID(ctx, parentID)
 	ctx = ContextWithBaggage(ctx, baggage)
 
-	// Log span start
 	t.logger.Debug("span started", Fields{
 		"span_id":   spanID,
 		"trace_id":  traceID,
@@ -595,7 +603,6 @@ func (t *defaultTracer) StartSpanWithContext(ctx context.Context, name string, o
 	return span, ctx
 }
 
-// CurrentSpan implements Tracer.
 func (t *defaultTracer) CurrentSpan(ctx context.Context) *Span {
 	if ctx == nil {
 		return nil
@@ -611,14 +618,12 @@ func (t *defaultTracer) CurrentSpan(ctx context.Context) *Span {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	// For simplicity, we return the root span of the trace
 	if root, ok := t.active[traceID]; ok {
 		return root
 	}
 	return nil
 }
 
-// Finish implements Tracer.
 func (t *defaultTracer) Finish(span *Span) {
 	if span == nil {
 		return
@@ -636,7 +641,6 @@ func (t *defaultTracer) Finish(span *Span) {
 	})
 }
 
-// FinishWithError implements Tracer.
 func (t *defaultTracer) FinishWithError(span *Span, err error) {
 	if span == nil {
 		return
@@ -656,7 +660,6 @@ func (t *defaultTracer) FinishWithError(span *Span, err error) {
 	})
 }
 
-// Extract implements Tracer.
 func (t *defaultTracer) Extract(carrier map[string]string) SpanContext {
 	return SpanContext{
 		TraceID:  carrier["X-Trace-ID"],
@@ -666,7 +669,6 @@ func (t *defaultTracer) Extract(carrier map[string]string) SpanContext {
 	}
 }
 
-// Inject implements Tracer.
 func (t *defaultTracer) Inject(ctx context.Context, carrier map[string]string) {
 	if ctx == nil {
 		return
@@ -687,16 +689,8 @@ func parseBaggage(s string) map[string]string {
 		return nil
 	}
 	result := make(map[string]string)
-	// Simple parsing - in production use proper URL encoding
-	// Format: key1=value1,key2=value2
-	pairs := sort.StringSlice{}
-	for _, pair := range sort.StringSlice(strings.Split(s, ",")) {
-		if pair != "" {
-			pairs = append(pairs, pair)
-		}
-	}
-	pairs.Sort()
-
+	pairs := strings.Split(s, ",")
+	sort.Strings(pairs)
 	for _, pair := range pairs {
 		if kv := strings.SplitN(pair, "=", 2); len(kv) == 2 {
 			result[kv[0]] = kv[1]
@@ -709,7 +703,6 @@ func encodeBaggage(m map[string]string) string {
 	if len(m) == 0 {
 		return ""
 	}
-	// Sort keys for deterministic output
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -723,7 +716,6 @@ func encodeBaggage(m map[string]string) string {
 	return strings.Join(parts, ",")
 }
 
-// Global tracer instance
 var globalTracer = newDefaultTracer(globalLogger)
 
 // DefaultTracer returns the global tracer.
@@ -738,9 +730,7 @@ func SetDefaultTracer(t Tracer) {
 
 // StartSpan is a package-level convenience for starting a span.
 func StartSpan(name string, opts ...SpanOption) *Span {
-	span, ctx := DefaultTracer().StartSpanWithContext(context.Background(), name, opts...)
-	// We discard ctx as we're just starting a standalone span
-	_ = ctx
+	span, _ := DefaultTracer().StartSpanWithContext(context.Background(), name, opts...)
 	return span
 }
 
@@ -813,250 +803,139 @@ type Metric struct {
 
 // MetricsRegistry is the interface for registering and recording metrics.
 type MetricsRegistry interface {
-	// Counter operations
 	Inc(name string, labels ...map[string]string) error
 	IncBy(name string, value float64, labels ...map[string]string) error
 
-	// Gauge operations
 	Set(name string, value float64, labels ...map[string]string) error
 	Add(name string, value float64, labels ...map[string]string) error
 
-	// Histogram operations
 	Observe(name string, value float64, labels ...map[string]string) error
 
-	// Registry operations
 	RegisterCounter(name, description string) error
 	RegisterGauge(name, description string) error
 	RegisterHistogram(name, description string, buckets []float64) error
 
-	// Get all metrics
 	GetMetrics() []Metric
 }
 
-// defaultMetricsRegistry is the concrete implementation of MetricsRegistry.
 type defaultMetricsRegistry struct {
-	mu         sync.Mutex
-	counters   map[string]*counterMetric
-	gauges     map[string]*gaugeMetric
-	histograms map[string]*histogramMetric
+	mu      sync.Mutex
+	metrics map[metricKey]*registeredMetric
 }
 
-type counterMetric struct {
+type metricKey struct {
+	type_ MetricType
+	name  string
+}
+
+type registeredMetric struct {
 	name        string
+	type_       MetricType
 	description string
 	labels      map[string]string
 	value       float64
-}
-
-type gaugeMetric struct {
-	name        string
-	description string
-	labels      map[string]string
-	value       float64
-}
-
-type histogramMetric struct {
-	name        string
-	description string
 	buckets     []float64
-	labels      map[string]string
-	values      []float64 // counts for each bucket
+	values      []float64
 	total       float64
 	count       int64
 }
 
-// newDefaultMetricsRegistry creates a new default metrics registry.
 func newDefaultMetricsRegistry() *defaultMetricsRegistry {
 	return &defaultMetricsRegistry{
-		counters:   make(map[string]*counterMetric),
-		gauges:     make(map[string]*gaugeMetric),
-		histograms: make(map[string]*histogramMetric),
+		metrics: make(map[metricKey]*registeredMetric),
 	}
 }
 
-// Inc implements MetricsRegistry.
 func (r *defaultMetricsRegistry) Inc(name string, labels ...map[string]string) error {
 	return r.IncBy(name, 1, labels...)
 }
 
-// IncBy implements MetricsRegistry.
 func (r *defaultMetricsRegistry) IncBy(name string, value float64, labels ...map[string]string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, ok := r.counters[name]; !ok {
-		return fmt.Errorf("counter %s not registered", name)
-	}
-
-	// For simplicity, we just increment the counter
-	// In production, we'd handle labels properly
-	r.counters[name].value += value
-	return nil
+	return r.mutate(MetricTypeCounter, name, func(metric *registeredMetric) { metric.value += value })
 }
 
-// Set implements MetricsRegistry.
 func (r *defaultMetricsRegistry) Set(name string, value float64, labels ...map[string]string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, ok := r.gauges[name]; !ok {
-		return fmt.Errorf("gauge %s not registered", name)
-	}
-
-	r.gauges[name].value = value
-	return nil
+	return r.mutate(MetricTypeGauge, name, func(metric *registeredMetric) { metric.value = value })
 }
 
-// Add implements MetricsRegistry.
 func (r *defaultMetricsRegistry) Add(name string, value float64, labels ...map[string]string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, ok := r.gauges[name]; !ok {
-		return fmt.Errorf("gauge %s not registered", name)
-	}
-
-	r.gauges[name].value += value
-	return nil
+	return r.mutate(MetricTypeGauge, name, func(metric *registeredMetric) { metric.value += value })
 }
 
-// Observe implements MetricsRegistry.
 func (r *defaultMetricsRegistry) Observe(name string, value float64, labels ...map[string]string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, ok := r.histograms[name]; !ok {
-		return fmt.Errorf("histogram %s not registered", name)
-	}
-
-	h := r.histograms[name]
-	h.total += value
-	h.count++
-
-	// Find the appropriate bucket
-	for i, bucket := range h.buckets {
-		if value <= bucket {
-			if int(i) >= len(h.values) {
-				h.values = append(h.values, 0)
+	return r.mutate(MetricTypeHistogram, name, func(metric *registeredMetric) {
+		metric.total += value
+		metric.count++
+		for i, bucket := range metric.buckets {
+			if value <= bucket {
+				metric.values[i]++
+				break
 			}
-			h.values[i]++
-			break
 		}
-	}
-
-	return nil
+	})
 }
 
-// RegisterCounter implements MetricsRegistry.
 func (r *defaultMetricsRegistry) RegisterCounter(name, description string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, ok := r.counters[name]; ok {
-		return fmt.Errorf("counter %s already registered", name)
-	}
-
-	r.counters[name] = &counterMetric{
-		name:        name,
-		description: description,
-		labels:      make(map[string]string),
-	}
-	return nil
+	return r.register(MetricTypeCounter, name, description, nil)
 }
 
-// RegisterGauge implements MetricsRegistry.
 func (r *defaultMetricsRegistry) RegisterGauge(name, description string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, ok := r.gauges[name]; ok {
-		return fmt.Errorf("gauge %s already registered", name)
-	}
-
-	r.gauges[name] = &gaugeMetric{
-		name:        name,
-		description: description,
-		labels:      make(map[string]string),
-	}
-	return nil
+	return r.register(MetricTypeGauge, name, description, nil)
 }
 
-// RegisterHistogram implements MetricsRegistry.
 func (r *defaultMetricsRegistry) RegisterHistogram(name, description string, buckets []float64) error {
+	return r.register(MetricTypeHistogram, name, description, buckets)
+}
+
+func (r *defaultMetricsRegistry) register(kind MetricType, name, description string, buckets []float64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	if _, ok := r.histograms[name]; ok {
-		return fmt.Errorf("histogram %s already registered", name)
+	key := metricKey{kind, name}
+	if _, ok := r.metrics[key]; ok {
+		return fmt.Errorf("%s %s already registered", kind, name)
 	}
-
-	r.histograms[name] = &histogramMetric{
-		name:        name,
-		description: description,
-		buckets:     buckets,
-		labels:      make(map[string]string),
-		values:      make([]float64, len(buckets)),
+	r.metrics[key] = &registeredMetric{
+		name: name, type_: kind, description: description,
+		labels: make(map[string]string), buckets: append([]float64(nil), buckets...),
+		values: make([]float64, len(buckets)),
 	}
 	return nil
 }
 
-// GetMetrics implements MetricsRegistry.
+func (r *defaultMetricsRegistry) mutate(kind MetricType, name string, apply func(*registeredMetric)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	metric, ok := r.metrics[metricKey{kind, name}]
+	if !ok {
+		return fmt.Errorf("%s %s not registered", kind, name)
+	}
+	apply(metric)
+	return nil
+}
+
 func (r *defaultMetricsRegistry) GetMetrics() []Metric {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	metrics := make([]Metric, 0)
-
-	// Add counters
-	for name, c := range r.counters {
-		metrics = append(metrics, Metric{
-			Name:        name,
-			Type:        MetricTypeCounter,
-			Value:       c.value,
-			Labels:      c.labels,
-			Timestamp:   time.Now().UTC(),
-			Description: c.description,
-		})
+	metrics := make([]Metric, 0, len(r.metrics))
+	now := time.Now().UTC()
+	for _, registered := range r.metrics {
+		if registered.type_ != MetricTypeHistogram {
+			metrics = append(metrics, registered.snapshot(registered.name, registered.type_, registered.value, registered.description, now))
+			continue
+		}
+		metrics = append(metrics,
+			registered.snapshot(registered.name+"_total", MetricTypeGauge, registered.total, registered.description+" total", now),
+			registered.snapshot(registered.name+"_count", MetricTypeCounter, float64(registered.count), registered.description+" count", now),
+		)
 	}
-
-	// Add gauges
-	for name, g := range r.gauges {
-		metrics = append(metrics, Metric{
-			Name:        name,
-			Type:        MetricTypeGauge,
-			Value:       g.value,
-			Labels:      g.labels,
-			Timestamp:   time.Now().UTC(),
-			Description: g.description,
-		})
-	}
-
-	// Add histograms
-	for name, h := range r.histograms {
-		// For simplicity, we just return the total
-		// In production, we'd return all bucket values
-		metrics = append(metrics, Metric{
-			Name:        name + "_total",
-			Type:        MetricTypeGauge,
-			Value:       h.total,
-			Labels:      h.labels,
-			Timestamp:   time.Now().UTC(),
-			Description: h.description + " total",
-		})
-		metrics = append(metrics, Metric{
-			Name:        name + "_count",
-			Type:        MetricTypeCounter,
-			Value:       float64(h.count),
-			Labels:      h.labels,
-			Timestamp:   time.Now().UTC(),
-			Description: h.description + " count",
-		})
-	}
-
 	return metrics
 }
 
-// Global metrics registry instance
+func (m *registeredMetric) snapshot(name string, kind MetricType, value float64, description string, timestamp time.Time) Metric {
+	return Metric{Name: name, Type: kind, Value: value, Labels: m.labels, Timestamp: timestamp, Description: description}
+}
+
 var globalMetricsRegistry = newDefaultMetricsRegistry()
 
 // DefaultMetrics returns the global metrics registry.
@@ -1068,8 +947,6 @@ func DefaultMetrics() MetricsRegistry {
 func SetDefaultMetrics(r MetricsRegistry) {
 	globalMetricsRegistry = r.(*defaultMetricsRegistry)
 }
-
-// Package-level metric functions
 
 // Inc increments a counter metric.
 func Inc(name string, labels ...map[string]string) error {

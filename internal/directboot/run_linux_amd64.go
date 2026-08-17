@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor/kvm"
+	"github.com/CYPT71/platform-factory/internal/hypervisor/kvm"
 )
 
 func Run(ctx context.Context, config Config) (Result, error) {

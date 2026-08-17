@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor/sandbox"
-	"github.com/CYPT71/secure-oci-base/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/hypervisor/sandbox"
+	"github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 // fakeService builds a Service with every dependency faked, so tests
@@ -22,10 +22,12 @@ func fakeService() (svc Service, lookPathCalls, runCommandCalls *[]string) {
 			runs = append(runs, name)
 			return errors.New("should not be called for an absent tool")
 		},
-		FileExists:   func(path string) bool { return false },
-		UserHomeDir:  func() (string, error) { return "/home/test", nil },
-		ProbeNative:  func(context.Context) (microvm.Capabilities, error) { return microvm.Capabilities{}, nil },
-		ProbeSandbox: func() sandbox.Support { return sandbox.Support{} },
+		FileExists:    func(path string) bool { return false },
+		UserHomeDir:   func() (string, error) { return "/home/test", nil },
+		ProbeNative:   func(context.Context) (microvm.Capabilities, error) { return microvm.Capabilities{}, nil },
+		ProbeSandbox:  func() sandbox.Support { return sandbox.Support{} },
+		ProbeRegistry: func(context.Context, string) error { return errors.New("unreachable") },
+		ReadFile:      func(string) ([]byte, error) { return nil, errors.New("missing") },
 	}
 	return svc, &lookPaths, &runs
 }
@@ -187,4 +189,115 @@ func TestNewWiresRealDependenciesWithoutPanicking(t *testing.T) {
 	if report.Checks == nil {
 		t.Fatal("expected at least one check")
 	}
+}
+
+func TestRunScopeDeployChecksOnlyKubectl(t *testing.T) {
+	svc, lookups, _ := fakeService()
+	report := svc.RunScope(context.Background(), "deploy")
+	if len(*lookups) != 1 || (*lookups)[0] != "kubectl" {
+		t.Fatalf("lookups=%v", *lookups)
+	}
+	for _, check := range report.Checks {
+		if check.Name != "tool-kubectl" && check.Name != "runtime-kubernetes" {
+			t.Fatalf("deploy scope leaked unrelated check %+v", check)
+		}
+	}
+}
+
+func TestRunScopePublishDoesNotProbeUnrelatedToolsOrHardware(t *testing.T) {
+	svc, lookups, runs := fakeService()
+	report := svc.RunScope(context.Background(), "publish")
+	if len(*lookups) != 0 || len(*runs) != 0 {
+		t.Fatalf("lookups=%v runs=%v", *lookups, *runs)
+	}
+	if len(report.Checks) != 1 || report.Checks[0].Name != "registry-configured" {
+		t.Fatalf("checks=%+v", report.Checks)
+	}
+}
+
+func TestContainerdRuntimeUsesCtrClient(t *testing.T) {
+	svc, _, _ := fakeService()
+	var invoked string
+	svc.LookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	svc.RunCommand = func(_ context.Context, name string, args ...string) error {
+		if len(args) == 1 && args[0] == "version" {
+			invoked = name
+		}
+		return nil
+	}
+	svc.FileExists = func(string) bool { return true }
+	svc.ProbeNative = nil
+	svc.ProbeSandbox = nil
+	report := svc.Run(context.Background())
+	assertCheck(t, report, "runtime-containerd", true)
+	if invoked != "ctr" {
+		t.Fatalf("runtime-containerd invoked %q, want ctr", invoked)
+	}
+}
+
+func TestHypervisorChecksReportCurrentBackendAndSkipOtherPlatforms(t *testing.T) {
+	checks := hypervisorChecks(microvm.Capabilities{
+		Available: true, Architecture: "amd64",
+		Details: map[string]string{"backend": "linux-kvm-native"},
+	}, nil)
+	byName := map[string]Check{}
+	for _, check := range checks {
+		byName[check.Name] = check
+	}
+	if !byName["kvm-device"].OK || !byName["kvm-extensions"].OK {
+		t.Fatalf("KVM checks=%+v", checks)
+	}
+	for _, name := range []string{"hyper-v", "virtualization-framework"} {
+		if !byName[name].Skipped || byName[name].OK {
+			t.Fatalf("%s=%+v, want skipped", name, byName[name])
+		}
+	}
+}
+
+func TestSkippedPlatformChecksDoNotFailAggregate(t *testing.T) {
+	svc, _, _ := fakeService()
+	svc.LookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	svc.RunCommand = func(context.Context, string, ...string) error { return nil }
+	svc.FileExists = func(string) bool { return true }
+	svc.ProbeNative = func(context.Context) (microvm.Capabilities, error) {
+		return microvm.Capabilities{Available: true, Details: map[string]string{"backend": "darwin-native-virtualization"}}, nil
+	}
+	svc.ProbeSandbox = func() sandbox.Support {
+		return sandbox.Support{Namespaces: true, Cgroups: true, CapabilityBoundingDrop: true}
+	}
+	if report := svc.Run(context.Background()); !report.OK {
+		t.Fatalf("report=%+v", report)
+	}
+}
+
+func TestRunScopeWithOptionsProbesNamedRegistry(t *testing.T) {
+	svc, _, _ := fakeService()
+	var address string
+	svc.ProbeRegistry = func(_ context.Context, value string) error { address = value; return nil }
+	report := svc.RunScopeWithOptions(context.Background(), "publish", Options{Registry: "registry.example.com"})
+	assertCheck(t, report, "registry-access", true)
+	if address != "registry.example.com" {
+		t.Fatalf("address=%q", address)
+	}
+	for _, check := range report.Checks {
+		if check.Name == "registry-configured" {
+			t.Fatalf("configuration is not an access proof: %+v", report.Checks)
+		}
+	}
+}
+
+func TestPolicyCheckStrictlyValidatesSchemaAndVersion(t *testing.T) {
+	svc, _, _ := fakeService()
+	svc.ReadFile = func(string) ([]byte, error) {
+		return []byte(`{"api_version":"platform-factory.dev/policy/v1","require_sbom":true}`), nil
+	}
+	assertCheck(t, svc.RunScopeWithOptions(context.Background(), "build", Options{Policy: "policy.json"}), "policy", true)
+	svc.ReadFile = func(string) ([]byte, error) {
+		return []byte(`{"api_version":"platform-factory.dev/policy/v1","surprise":true}`), nil
+	}
+	assertCheck(t, svc.RunScopeWithOptions(context.Background(), "build", Options{Policy: "policy.json"}), "policy", false)
+	svc.ReadFile = func(string) ([]byte, error) {
+		return []byte(`{"api_version":"unsupported/v1"}`), nil
+	}
+	assertCheck(t, svc.RunScopeWithOptions(context.Background(), "build", Options{Policy: "policy.json"}), "policy", false)
 }

@@ -1,10 +1,10 @@
 # Project Governance
 
-This document describes the governance model for the secure-oci project.
+This document describes the governance model for the platform-factory project.
 
 ## Overview
 
-The secure-oci project is a secure, production-ready OCI (Open Container Initiative) implementation
+The platform-factory project is a secure, production-ready OCI (Open Container Initiative) implementation
 that provides deterministic builds, cryptographic provenance, and hardware-rooted trust for container
 workloads.
 
@@ -109,7 +109,7 @@ For critical security vulnerabilities, an emergency release process is followed:
 ### Reporting Vulnerabilities
 
 Security vulnerabilities should be reported privately to the security team at
-`security@secure-oci.dev` (example email - replace with actual contact).
+`security@platform-factory.dev` (example email - replace with actual contact).
 
 Do not report security vulnerabilities through public GitHub issues.
 

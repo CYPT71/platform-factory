@@ -2,12 +2,7 @@ package core
 
 import "fmt"
 
-// Phase is one canonical state a workload can be in - Sanetizer-todo.md
-// item 6: a single state machine every backend translates its own
-// native state into. containerd, KubeVirt, Kubernetes, Docker, and
-// Podman must never invent their own meaning for "running" - they
-// report their native state, and something outside this package (not
-// yet built - see the package doc comment) maps it to one of these.
+// Phase is the canonical workload state shared by every backend.
 type Phase string
 
 const (
@@ -27,10 +22,7 @@ const (
 	// PhaseUnknown is not a terminal or working state - it means the
 	// authoritative external system (containerd/KubeVirt/Kubernetes)
 	// could not be reached to confirm what the real state is. A caller
-	// observing Unknown must re-query, not assume the last known phase
-	// still holds - that assumption is exactly what item 7's "ne jamais
-	// prétendre qu'un workload est supprimé simplement parce que le
-	// plugin a perdu sa connexion" warns against.
+	// observing Unknown must re-query rather than assume the last phase.
 	PhaseUnknown Phase = "Unknown"
 )
 
@@ -49,10 +41,7 @@ func (p Phase) valid() bool {
 // TransitionRule documents one allowed state change: whether it's safe
 // to repeat verbatim after a crash (Idempotent), and what a caller must
 // do to compensate for a partial attempt before it may retry
-// (Compensation - empty when no cleanup is needed). This is item 6's
-// "chaque transition doit préciser... comment elle est reprise après
-// crash... comment elle est compensée" made concrete enough to test,
-// not just prose.
+// (Compensation, empty when no cleanup is needed).
 type TransitionRule struct {
 	From         Phase
 	To           Phase

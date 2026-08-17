@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 // NewBootBundle creates a canonical content-addressed boot description.

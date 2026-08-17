@@ -64,14 +64,9 @@ func (c Config) ContainerdConfig() (string, error) {
   # carries platform-factory-runtime's own direct-boot pin (kernel/init path and
   # digest) through from a Pod's container annotations. See
   # internal/ociruntime/supervisor_linux.go and rootfs_linux.go for what
-  # reads them. secure-oci.dev/* is also still passed through - not just
-  # decoded, see internal/ociruntime.normalizeLegacyAnnotations - for the
-  # documented compatibility overlap window (docs/api-compatibility.md): a
-  # Pod spec written before the rebrand may still use the old key, and
-  # containerd would silently drop it before the runtime ever saw it if
-  # this glob didn't still match it too.
-  pod_annotations = ["platform-factory.dev/*", "secure-oci.dev/*"]
-  container_annotations = ["platform-factory.dev/*", "secure-oci.dev/*"]
+  # reads them.
+  pod_annotations = ["platform-factory.dev/*"]
+  container_annotations = ["platform-factory.dev/*"]
 `
 	return fmt.Sprintf(base, c.Handler, runtimeType), nil
 }

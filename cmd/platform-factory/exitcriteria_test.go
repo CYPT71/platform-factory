@@ -18,7 +18,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/plugin"
+	"github.com/CYPT71/platform-factory/internal/plugin"
 )
 
 // zigPluginBinary builds the third-party "zig" plugin module (which

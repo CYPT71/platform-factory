@@ -5,12 +5,12 @@ import (
 	"log"
 	"strings"
 
-	sdk "github.com/CYPT71/secure-oci-base/sdk/pipeline"
+	sdk "github.com/CYPT71/platform-factory/sdk/pipeline"
 )
 
 func ExampleDecode() {
 	definition, graph, err := sdk.Decode(strings.NewReader(`{
-		"api_version":"secure-oci.dev/v1","name":"hello-sdk",
+		"api_version":"platform-factory.dev/v1","name":"hello-sdk",
 		"stages":[{"id":"build","command":{"executable":"/bin/build"}}]
 	}`))
 	if err != nil {

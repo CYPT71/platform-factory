@@ -5,8 +5,8 @@ package hypervisor
 import (
 	"context"
 
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor/hvf"
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/hypervisor/hvf"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 // ProbeNative reports native HVF availability on macOS.

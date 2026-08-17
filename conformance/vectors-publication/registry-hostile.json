@@ -1,0 +1,1 @@
+{"name":"registry-hostile-reference-rejected","registry":{"reference":"registry.example/../admin:latest"},"expect":{"valid":false}}

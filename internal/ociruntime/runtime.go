@@ -1,8 +1,7 @@
 //go:build linux
 
-// Package ociruntime owns the persistent OCI-facing lifecycle used by Podman.
-// It is deliberately independent from Podman: the engine invokes the standard
-// runtime commands and remains the initiator of every lifecycle transition.
+// Package ociruntime implements the persistent OCI lifecycle used by container
+// engines to run MicroVM workloads.
 package ociruntime
 
 import (
@@ -18,9 +17,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -90,15 +92,29 @@ type User struct {
 }
 
 type State struct {
-	OCIVersion  string            `json:"ociVersion"`
-	ID          string            `json:"id"`
-	Status      string            `json:"status"`
-	PID         int               `json:"pid"`
-	Bundle      string            `json:"bundle"`
-	Created     time.Time         `json:"created"`
-	ExitStatus  *uint32           `json:"exitStatus,omitempty"`
-	ExitedAt    *time.Time        `json:"exitedAt,omitempty"`
-	Annotations map[string]string `json:"annotations,omitempty"`
+	OCIVersion string `json:"ociVersion"`
+	ID         string `json:"id"`
+	Status     string `json:"status"`
+	PID        int    `json:"pid"`
+	// PIDStartTicks distinguishes this process from a later reuse of PID.
+	// Zero preserves compatibility with state created before this field existed.
+	PIDStartTicks int64             `json:"pidStartTicks,omitempty"`
+	Bundle        string            `json:"bundle"`
+	Created       time.Time         `json:"created"`
+	ExitStatus    *uint32           `json:"exitStatus,omitempty"`
+	ExitedAt      *time.Time        `json:"exitedAt,omitempty"`
+	Annotations   map[string]string `json:"annotations,omitempty"`
+	Metrics       *VMMMetrics       `json:"metrics,omitempty"`
+}
+
+// VMMMetrics is terminal, durable telemetry embedded in the canonical runtime
+// state rather than maintained in a second sidecar store.
+type VMMMetrics struct {
+	APIVersion string `json:"api_version"`
+	RuntimeMS  int64  `json:"runtime_ms"`
+	MemoryMiB  int    `json:"memory_mib"`
+	VCPUs      int    `json:"vcpus"`
+	ExitStatus uint32 `json:"exit_status"`
 }
 
 type startResult struct {
@@ -110,6 +126,14 @@ type startResult struct {
 	Started     bool   `json:"started,omitempty"`
 	Signaled    bool   `json:"signaled,omitempty"`
 	Error       string `json:"error,omitempty"`
+}
+
+// validSupervisorRequest binds a command to the host-visible supervisor
+// identity even when the VMM is PID 1 in its namespace.
+func validSupervisorRequest(request startResult, current, launched State, incarnation, command string) bool {
+	return request.Command == command && request.ID == launched.ID &&
+		launched.PID > 0 && request.PID == launched.PID && current.PID == launched.PID &&
+		request.Incarnation == incarnation && stateIncarnation(current) == incarnation
 }
 
 type Store struct {
@@ -157,6 +181,15 @@ func (s *Store) Close() error {
 }
 func (s *Store) Dir() string { return s.dir }
 
+// supervisorLogPath is the on-disk destination for a supervisor's stdout
+// and stderr - its own diagnostics plus the guest's relayed serial console
+// - kept independent of whatever pipe the short-lived CLI invocation that
+// launched it happened to inherit. Callers pass an id already validated
+// against idPattern, so it is safe as a filename.
+func supervisorLogPath(store *Store, id string) string {
+	return filepath.Join(store.Dir(), id+".supervisor.log")
+}
+
 func (s *Store) Create(ctx context.Context, id, bundle string) (State, error) {
 	if err := ctx.Err(); err != nil {
 		return State{}, err
@@ -186,49 +219,6 @@ func (s *Store) Create(ctx context.Context, id, bundle string) (State, error) {
 		return s.put(state)
 	})
 	return state, err
-}
-
-// legacyAnnotationKeys maps each pre-rebrand secure-oci.dev/* OCI
-// annotation key this package reads to its platform-factory.dev/*
-// replacement, for the documented compatibility overlap window (see
-// docs/api-compatibility.md) - a bundle produced by an older tool may
-// still carry the old keys. Deliberately spelled out as literal strings
-// rather than referencing supervisor_linux.go/rootfs_linux.go's own
-// annotationX constants: those live in linux&&amd64-only files, while
-// this one (and the linux/arm64 builds it must also serve) only
-// requires plain "linux".
-var legacyAnnotationKeys = map[string]string{
-	"secure-oci.dev/kernel-path":           "platform-factory.dev/kernel-path",
-	"secure-oci.dev/kernel-digest":         "platform-factory.dev/kernel-digest",
-	"secure-oci.dev/initramfs-path":        "platform-factory.dev/initramfs-path",
-	"secure-oci.dev/initramfs-digest":      "platform-factory.dev/initramfs-digest",
-	"secure-oci.dev/memory-mib":            "platform-factory.dev/memory-mib",
-	"secure-oci.dev/vcpus":                 "platform-factory.dev/vcpus",
-	"secure-oci.dev/sandbox-cgroups":       "platform-factory.dev/sandbox-cgroups",
-	"secure-oci.dev/sandbox-namespaces":    "platform-factory.dev/sandbox-namespaces",
-	"secure-oci.dev/block-device-path":     "platform-factory.dev/block-device-path",
-	"secure-oci.dev/block-device-readonly": "platform-factory.dev/block-device-readonly",
-	"secure-oci.dev/network-tap":           "platform-factory.dev/network-tap",
-	"secure-oci.dev/init-path":             "platform-factory.dev/init-path",
-	"secure-oci.dev/init-digest":           "platform-factory.dev/init-digest",
-}
-
-// normalizeLegacyAnnotations copies each legacy annotation's value
-// forward to its current key, in place, only when the current key isn't
-// already set - so every read site elsewhere in this package only ever
-// needs to look up the current key. Called once, here in LoadConfig, so
-// both config.Annotations (read directly) and State.Annotations (copied
-// from a LoadConfig result at Store.Create, see below) are covered by
-// the same normalization.
-func normalizeLegacyAnnotations(annotations map[string]string) {
-	for legacy, current := range legacyAnnotationKeys {
-		if _, ok := annotations[current]; ok {
-			continue
-		}
-		if value, ok := annotations[legacy]; ok {
-			annotations[current] = value
-		}
-	}
 }
 
 func LoadConfig(bundle string) (Config, error) {
@@ -261,7 +251,6 @@ func LoadConfig(bundle string) (Config, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return Config{}, errors.New("oci runtime: config.json must contain exactly one document")
 	}
-	normalizeLegacyAnnotations(config.Annotations)
 	if config.OCIVersion == "" || config.Root.Path == "" || len(config.Process.Args) == 0 ||
 		!filepath.IsAbs(config.Process.Cwd) {
 		return Config{}, errors.New("oci runtime: config.json lacks ociVersion, root.path, process.args, or absolute process.cwd")
@@ -330,9 +319,7 @@ func LoadConfig(bundle string) (Config, error) {
 	rootfs := config.Root.Path
 	var rootHandle *os.Root
 	if filepath.IsAbs(rootfs) {
-		// Podman's overlay storage driver points root.path at a "merged"
-		// directory it already owns, outside the bundle. Confine traversal
-		// within it directly instead of requiring a bundle-relative path.
+		// Overlay root paths may live outside the bundle but remain confined.
 		rootHandle, err = os.OpenRoot(rootfs)
 	} else {
 		if rootfs == ".." ||
@@ -396,11 +383,7 @@ func guestOwnedPseudoMount(mount Mount) bool {
 	return mount.Type == expected || expected == "cgroup" && mount.Type == "cgroup2"
 }
 
-// podmanContainerEnvMount recognizes Podman's standard bind mounts for
-// container metadata and /dev/shm (bind-mounted, not tmpfs, so it doesn't
-// match guestOwnedPseudoMount). The host path is never forwarded to the
-// MicroVM; microvm-init recreates a guest-owned equivalent at the same
-// destination.
+// podmanContainerEnvMount accepts metadata mounts recreated inside the guest.
 func podmanContainerEnvMount(mount Mount) bool {
 	if mount.Type != "bind" {
 		return false
@@ -474,21 +457,12 @@ func (s *Store) List(ctx context.Context) ([]State, error) {
 }
 
 func (s *Store) getUnlocked(id string) (State, bool, error) {
-	data, err := s.root.ReadFile(id + ".json")
-	if errors.Is(err, os.ErrNotExist) {
-		return State{}, false, nil
+	state, found, err := s.readUnlocked(id)
+	if err != nil || !found {
+		return state, found, err
 	}
-	if err != nil {
-		return State{}, false, err
-	}
-	if len(data) > maxConfig {
-		return State{}, false, errors.New("oci runtime: stored state exceeds 1 MiB")
-	}
-	var state State
-	if err := json.Unmarshal(data, &state); err != nil || state.ID != id {
-		return State{}, false, errors.New("oci runtime: corrupt stored state")
-	}
-	if state.PID > 0 && !processAlive(state.PID) {
+	// Only the host PID namespace can reconcile the persisted supervisor PID.
+	if state.PID > 0 && !processAlive(state.PID, state.PIDStartTicks) {
 		_ = os.Remove(s.controlSocketPath(state))
 		state.PID = 0
 		state.Status = "stopped"
@@ -505,6 +479,48 @@ func (s *Store) getUnlocked(id string) (State, bool, error) {
 	return state, true, nil
 }
 
+// readUnlocked reads persisted identity without attempting host-PID liveness
+// reconciliation. It is the only safe read primitive inside a PID namespace.
+func (s *Store) readUnlocked(id string) (State, bool, error) {
+	data, err := s.root.ReadFile(id + ".json")
+	if errors.Is(err, os.ErrNotExist) {
+		return State{}, false, nil
+	}
+	if err != nil {
+		return State{}, false, err
+	}
+	if len(data) > maxConfig {
+		return State{}, false, errors.New("oci runtime: stored state exceeds 1 MiB")
+	}
+	var state State
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil || state.ID != id {
+		return State{}, false, errors.New("oci runtime: corrupt stored state")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return State{}, false, errors.New("oci runtime: corrupt stored state")
+	}
+	return state, true, nil
+}
+
+// readPersisted returns state without host-PID reconciliation. Supervisor code
+// must use this method after entering its PID namespace.
+func (s *Store) readPersisted(ctx context.Context, id string) (State, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return State{}, false, err
+	}
+	var state State
+	var found bool
+	err := s.withLock(id, func() error {
+		var err error
+		state, found, err = s.readUnlocked(id)
+		return err
+	})
+	return state, found, err
+}
+
 func (s *Store) Delete(ctx context.Context, id string, force bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -517,13 +533,19 @@ func (s *Store) Delete(ctx context.Context, id string, force bool) error {
 		if !force && state.Status == "running" {
 			return errors.New("oci runtime: cannot delete a running container")
 		}
-		if state.PID > 0 && processAlive(state.PID) {
-			if !force {
-				return errors.New("oci runtime: cannot delete a live supervisor")
+		if state.PID > 0 {
+			// Signal the verified pidfd to avoid PID-reuse races.
+			if fd, ok := openVerifiedPidfd(state.PID, state.PIDStartTicks); ok {
+				if !force {
+					_ = unix.Close(fd)
+					return errors.New("oci runtime: cannot delete a live supervisor")
+				}
+				_ = unix.PidfdSendSignal(fd, syscall.SIGKILL, nil, 0)
+				_ = unix.Close(fd)
 			}
-			_ = syscall.Kill(state.PID, syscall.SIGKILL)
 		}
 		_ = os.Remove(s.controlSocketPath(state))
+		_ = os.Remove(supervisorLogPath(s, id))
 		if err := s.root.Remove(id + ".json"); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -535,8 +557,11 @@ func (s *Store) SetSupervisor(ctx context.Context, id string, pid int) error {
 	if pid <= 0 {
 		return errors.New("oci runtime: supervisor PID must be positive")
 	}
+	// Missing start ticks retain the legacy existence-only liveness check.
+	ticks, _ := processStartTicks(pid)
 	return s.update(ctx, id, func(state *State) {
 		state.PID = pid
+		state.PIDStartTicks = ticks
 	})
 }
 
@@ -546,20 +571,12 @@ func (s *Store) SetStatus(ctx context.Context, id, status string) error {
 	default:
 		return fmt.Errorf("oci runtime: invalid state %q", status)
 	}
-	return s.withLock(id, func() error {
-		state, found, err := s.getUnlocked(id)
-		if err != nil {
-			return err
-		}
-		if !found {
-			return fmt.Errorf("oci runtime: container %q does not exist", id)
-		}
+	return s.update(ctx, id, func(state *State) {
 		state.Status = status
 		if status == "stopped" {
-			_ = os.Remove(s.controlSocketPath(state))
+			_ = os.Remove(s.controlSocketPath(*state))
 			state.PID = 0
 		}
-		return s.put(state)
 	})
 }
 
@@ -569,20 +586,22 @@ func (s *Store) SetExited(ctx context.Context, id string, status uint32, exitedA
 		return errors.New("oci runtime: exit time is required")
 	}
 	exitedAt = exitedAt.UTC()
-	return s.withLock(id, func() error {
-		state, found, err := s.getUnlocked(id)
-		if err != nil {
-			return err
-		}
-		if !found {
-			return fmt.Errorf("oci runtime: container %q does not exist", id)
-		}
+	return s.update(ctx, id, func(state *State) {
 		state.Status = "stopped"
 		state.PID = 0
 		state.ExitStatus = &status
 		state.ExitedAt = &exitedAt
-		_ = os.Remove(s.controlSocketPath(state))
-		return s.put(state)
+		memoryMiB, _ := strconv.Atoi(state.Annotations["platform-factory.dev/memory-mib"])
+		vcpus, _ := strconv.Atoi(state.Annotations["platform-factory.dev/vcpus"])
+		runtimeMS := exitedAt.Sub(state.Created).Milliseconds()
+		if runtimeMS < 0 {
+			runtimeMS = 0
+		}
+		state.Metrics = &VMMMetrics{
+			APIVersion: "platform-factory.dev/vmm-metrics/v1", RuntimeMS: runtimeMS,
+			MemoryMiB: memoryMiB, VCPUs: vcpus, ExitStatus: status,
+		}
+		_ = os.Remove(s.controlSocketPath(*state))
 	})
 }
 
@@ -596,7 +615,7 @@ func (s *Store) Start(ctx context.Context, id string) error {
 		if !found {
 			return fmt.Errorf("oci runtime: container %q does not exist", id)
 		}
-		if current.Status != "created" || current.PID <= 0 || !processAlive(current.PID) {
+		if current.Status != "created" || current.PID <= 0 || !processAlive(current.PID, current.PIDStartTicks) {
 			return errors.New("oci runtime: container has no live created supervisor")
 		}
 		state = current
@@ -604,29 +623,27 @@ func (s *Store) Start(ctx context.Context, id string) error {
 	}); err != nil {
 		return err
 	}
-	socket := s.controlSocketPath(state)
-	dialer := net.Dialer{Timeout: 5 * time.Second}
-	connection, err := dialer.DialContext(ctx, "unix", socket)
-	if err != nil {
-		return fmt.Errorf("oci runtime: connect supervisor command socket: %w", err)
-	}
-	defer connection.Close()
-	deadline := time.Now().Add(30 * time.Second)
-	if value, ok := ctx.Deadline(); ok && value.Before(deadline) {
-		deadline = value
-	}
-	if err := connection.SetDeadline(deadline); err != nil {
-		return err
-	}
 	request := startResult{
 		Command: "start", ID: id, Incarnation: stateIncarnation(state), PID: state.PID,
 	}
-	if err := json.NewEncoder(connection).Encode(request); err != nil {
-		return fmt.Errorf("oci runtime: send supervisor start command: %w", err)
-	}
-	var response startResult
-	if err := json.NewDecoder(io.LimitReader(connection, 4097)).Decode(&response); err != nil {
-		return fmt.Errorf("oci runtime: read supervisor start response: %w", err)
+	response, err := s.supervisorCommand(ctx, state, request)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			// The supervisor accepted our connection and then closed it
+			// without answering - it died before it could write a
+			// response, rather than reporting a normal failure (which
+			// would come back as a decoded error response instead of a
+			// dropped connection). Point at its log instead of surfacing
+			// a bare "EOF": see supervisorLogPath's own doc comment for
+			// why writes to inherited stdio can kill it exactly this way.
+			liveness := "supervisor process is no longer running"
+			if processAlive(state.PID, state.PIDStartTicks) {
+				liveness = "supervisor process is still running but stopped answering"
+			}
+			return fmt.Errorf("oci runtime: supervisor died before responding to start (%s); see %s: %w",
+				liveness, supervisorLogPath(s, id), err)
+		}
+		return err
 	}
 	if response.ID != request.ID || response.Incarnation != request.Incarnation ||
 		response.PID != request.PID || response.Started == (response.Error != "") {
@@ -649,31 +666,16 @@ func (s *Store) Kill(ctx context.Context, id string, signal syscall.Signal) erro
 	if !found {
 		return fmt.Errorf("oci runtime: container %q does not exist", id)
 	}
-	if state.PID <= 0 || !processAlive(state.PID) {
+	if state.PID <= 0 || !processAlive(state.PID, state.PIDStartTicks) {
 		return errors.New("oci runtime: supervisor is not running")
-	}
-	connection, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", s.controlSocketPath(state))
-	if err != nil {
-		return fmt.Errorf("oci runtime: connect supervisor command socket: %w", err)
-	}
-	defer connection.Close()
-	deadline := time.Now().Add(30 * time.Second)
-	if value, ok := ctx.Deadline(); ok && value.Before(deadline) {
-		deadline = value
-	}
-	if err := connection.SetDeadline(deadline); err != nil {
-		return err
 	}
 	request := startResult{
 		Command: "signal", ID: id, Incarnation: stateIncarnation(state),
 		PID: state.PID, Signal: int(signal),
 	}
-	if err := json.NewEncoder(connection).Encode(request); err != nil {
-		return fmt.Errorf("oci runtime: send supervisor signal command: %w", err)
-	}
-	var response startResult
-	if err := json.NewDecoder(io.LimitReader(connection, 4097)).Decode(&response); err != nil {
-		return fmt.Errorf("oci runtime: read supervisor signal response: %w", err)
+	response, err := s.supervisorCommand(ctx, state, request)
+	if err != nil {
+		return err
 	}
 	if response.Command != "signal" || response.ID != request.ID ||
 		response.Incarnation != request.Incarnation || response.PID != request.PID ||
@@ -686,6 +688,29 @@ func (s *Store) Kill(ctx context.Context, id string, signal syscall.Signal) erro
 	return fmt.Errorf("oci runtime: supervisor rejected signal: %s", response.Error)
 }
 
+func (s *Store) supervisorCommand(ctx context.Context, state State, request startResult) (startResult, error) {
+	connection, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", s.controlSocketPath(state))
+	if err != nil {
+		return startResult{}, fmt.Errorf("oci runtime: connect supervisor command socket: %w", err)
+	}
+	defer connection.Close()
+	deadline := time.Now().Add(30 * time.Second)
+	if value, ok := ctx.Deadline(); ok && value.Before(deadline) {
+		deadline = value
+	}
+	if err := connection.SetDeadline(deadline); err != nil {
+		return startResult{}, err
+	}
+	if err := json.NewEncoder(connection).Encode(request); err != nil {
+		return startResult{}, fmt.Errorf("oci runtime: send supervisor %s command: %w", request.Command, err)
+	}
+	var response startResult
+	if err := json.NewDecoder(io.LimitReader(connection, 4097)).Decode(&response); err != nil {
+		return startResult{}, fmt.Errorf("oci runtime: read supervisor %s response: %w", request.Command, err)
+	}
+	return response, nil
+}
+
 func guestTerminationSignal(signal syscall.Signal) bool {
 	switch signal {
 	case syscall.SIGINT, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGTERM:
@@ -696,8 +721,6 @@ func guestTerminationSignal(signal syscall.Signal) bool {
 }
 
 func stateIncarnation(state State) string {
-	// Avoid an intermediate string allocation by formatting directly into
-	// a byte slice.
 	buf := make([]byte, 0)
 	buf = fmt.Appendf(buf, "%s\x00%d\x00%s", state.ID, state.PID, state.Created.Format(time.RFC3339Nano))
 	sum := sha256.Sum256(buf)
@@ -714,7 +737,7 @@ func (s *Store) controlSocketPath(state State) string {
 
 func (s *Store) update(ctx context.Context, id string, mutate func(*State)) error {
 	return s.withLock(id, func() error {
-		state, found, err := s.getUnlocked(id)
+		state, found, err := s.readUnlocked(id)
 		if err != nil {
 			return err
 		}
@@ -726,8 +749,58 @@ func (s *Store) update(ctx context.Context, id string, mutate func(*State)) erro
 	})
 }
 
-func processAlive(pid int) bool {
-	return pid > 0 && syscall.Kill(pid, 0) == nil
+// processAlive reports whether pid still identifies the recorded process.
+func processAlive(pid int, startTicks int64) bool {
+	fd, ok := openVerifiedPidfd(pid, startTicks)
+	if ok {
+		_ = unix.Close(fd)
+	}
+	return ok
+}
+
+// openVerifiedPidfd rejects PID reuse by matching the recorded start time.
+// A zero startTicks accepts an existing pidfd for backward compatibility.
+func openVerifiedPidfd(pid int, startTicks int64) (fd int, ok bool) {
+	if pid <= 0 {
+		return -1, false
+	}
+	pidfd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		return -1, false
+	}
+	if startTicks == 0 {
+		return pidfd, true
+	}
+	ticks, err := processStartTicks(pid)
+	if err != nil || ticks != startTicks {
+		_ = unix.Close(pidfd)
+		return -1, false
+	}
+	return pidfd, true
+}
+
+// processStartTicks reads field 22 of /proc/<pid>/stat. It locates the final
+// ')' because the preceding command field may contain spaces or parentheses.
+func processStartTicks(pid int) (int64, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+	line := string(data)
+	closeParen := strings.LastIndexByte(line, ')')
+	if closeParen < 0 || closeParen+2 > len(line) {
+		return 0, fmt.Errorf("oci runtime: malformed /proc/%d/stat", pid)
+	}
+	const starttimeFieldAfterComm = 20
+	fields := strings.Fields(line[closeParen+2:])
+	if len(fields) < starttimeFieldAfterComm {
+		return 0, fmt.Errorf("oci runtime: /proc/%d/stat has too few fields", pid)
+	}
+	ticks, err := strconv.ParseInt(fields[starttimeFieldAfterComm-1], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("oci runtime: parse start ticks for pid %d: %w", pid, err)
+	}
+	return ticks, nil
 }
 
 func (s *Store) withLock(id string, action func() error) error {
@@ -772,5 +845,11 @@ func (s *Store) put(state State) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, filepath.Join(s.dir, state.ID+".json"))
+	if err := os.Rename(name, filepath.Join(s.dir, state.ID+".json")); err != nil {
+		return err
+	}
+	if err := s.dirHandle.Sync(); err != nil {
+		return fmt.Errorf("oci runtime: sync state directory: %w", err)
+	}
+	return nil
 }

@@ -6,13 +6,47 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"os"
 	"reflect"
 	"testing"
 
-	apiplugin "github.com/CYPT71/secure-oci-base/api/plugin"
-	hostplugin "github.com/CYPT71/secure-oci-base/internal/plugin"
-	sdkplugin "github.com/CYPT71/secure-oci-base/sdk/plugin"
+	apiplugin "github.com/CYPT71/platform-factory/api/plugin/v1"
+	hostplugin "github.com/CYPT71/platform-factory/internal/plugin"
+	sdkplugin "github.com/CYPT71/platform-factory/sdk/plugin"
 )
+
+func TestPluginEnvForwardsDotnetRootAlongsidePath(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("DOTNET_ROOT", "/usr/lib/dotnet")
+	t.Setenv("SOME_CALLER_SECRET", "should-not-leak")
+
+	env := pluginEnv()
+
+	want := map[string]string{"PATH": "/usr/bin:/bin", "DOTNET_ROOT": "/usr/lib/dotnet"}
+	if len(env) != len(want) {
+		t.Fatalf("plugin env leaked or dropped variables: got %v, want exactly %v", env, want)
+	}
+	for _, kv := range env {
+		i := 0
+		for ; i < len(kv) && kv[i] != '='; i++ {
+		}
+		key, value := kv[:i], kv[i+1:]
+		if want[key] != value {
+			t.Fatalf("plugin env entry %q: got value %q, want %q", key, value, want[key])
+		}
+	}
+}
+
+func TestPluginEnvOmitsDotnetRootWhenUnset(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin:/bin")
+	os.Unsetenv("DOTNET_ROOT")
+
+	env := pluginEnv()
+
+	if len(env) != 1 || env[0] != "PATH=/usr/bin:/bin" {
+		t.Fatalf("plugin env with no DOTNET_ROOT set: got %v, want [PATH=/usr/bin:/bin]", env)
+	}
+}
 
 func TestPluginWireV1SDKAndHostRemainBidirectionallyCompatible(t *testing.T) {
 	request := hostplugin.Request{ID: "17", Method: "v1.deployment.apply", Params: json.RawMessage(`{"desired":"ready"}`), TraceID: "trace-1", OperationID: "operation-1"}

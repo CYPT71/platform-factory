@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/CYPT71/secure-oci-base/internal/project"
-	"github.com/CYPT71/secure-oci-base/internal/vmdisk"
+	"github.com/CYPT71/platform-factory/internal/project"
+	"github.com/CYPT71/platform-factory/internal/vmdisk"
 )
 
 // scanLegacyDiskCandidates looks at dir's own top-level regular files

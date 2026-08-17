@@ -1,28 +1,107 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
-	"encoding/json"
+	"compress/gzip"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/policy"
-	"github.com/CYPT71/secure-oci-base/internal/project"
+	"github.com/CYPT71/platform-factory/internal/project"
 )
+
+func writeInitSourceArchive(t *testing.T, filename string, compressed bool) {
+	t.Helper()
+	file, err := os.Create(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var writer io.Writer = file
+	var gz *gzip.Writer
+	if compressed {
+		gz = gzip.NewWriter(file)
+		writer = gz
+	}
+	tw := tar.NewWriter(writer)
+	content := []byte("print('archive')\n")
+	_ = tw.WriteHeader(&tar.Header{Name: "app.py", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(content))})
+	_, _ = tw.Write(content)
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if gz != nil {
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunInitExtractsTarSourcesTransactionally(t *testing.T) {
+	for _, format := range []string{"tar", "tar.gz"} {
+		t.Run(format, func(t *testing.T) {
+			root := t.TempDir()
+			archive := filepath.Join(root, "source."+format)
+			writeInitSourceArchive(t, archive, format == "tar.gz")
+			destination := filepath.Join(root, "project")
+			var stdout, stderr bytes.Buffer
+			args := []string{"--extract-to", destination, "--archive-format", format, "--language", "python", "--runtime", "container", "--yes", archive}
+			if code := runInit(args, nil, &stdout, &stderr); code != 0 {
+				t.Fatalf("code=%d stderr=%s", code, stderr.String())
+			}
+			for _, name := range []string{"app.py", "pf.yaml", "pf.lock", ".pf/inventory.json", ".pf/build.pipeline.json"} {
+				if _, err := os.Stat(filepath.Join(destination, name)); err != nil {
+					t.Fatalf("missing %s: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRunInitArchiveDryRunAndFailureLeaveNoDestination(t *testing.T) {
+	root := t.TempDir()
+	archive := filepath.Join(root, "source.tar")
+	writeInitSourceArchive(t, archive, false)
+	for name, args := range map[string][]string{
+		"dry run":          {"--dry-run", "--extract-to", filepath.Join(root, "preview"), "--archive-format", "tar", "--language", "python", archive},
+		"unknown language": {"--extract-to", filepath.Join(root, "failure"), "--archive-format", "tar", "--language", "missing", "--yes", archive},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runInit(args, nil, &stdout, &stderr)
+			if name == "dry run" && code != 0 {
+				t.Fatalf("dry-run code=%d stderr=%s", code, stderr.String())
+			}
+			if name != "dry run" && code == 0 {
+				t.Fatal("expected init failure")
+			}
+			destination := args[2]
+			if _, err := os.Stat(destination); !os.IsNotExist(err) {
+				t.Fatalf("destination remains: %v", err)
+			}
+		})
+	}
+}
 
 func TestRunInitDetectsEcosystemAndWritesLoadableConfig(t *testing.T) {
 	dir := t.TempDir()
 	writeProjectTestFile(t, filepath.Join(dir, "go.mod"), "module example.com/app\n\ngo 1.22\n", 0o644)
+	writeGoInitSource(t, dir)
 
 	var stdout, stderr bytes.Buffer
 	if code := runInit([]string{dir}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 
-	configPath := filepath.Join(dir, "platform-factory.yaml")
+	configPath := filepath.Join(dir, "pf.yaml")
 	loaded, err := project.Load(configPath)
 	if err != nil {
 		t.Fatalf("generated config does not load: %v", err)
@@ -33,43 +112,22 @@ func TestRunInitDetectsEcosystemAndWritesLoadableConfig(t *testing.T) {
 	if loaded.Config.Artifact == "" {
 		t.Fatal("artifact must be non-empty (a placeholder), Validate requires it")
 	}
-	for _, dir := range []string{".pf", "policies", "deploy", "dist", "reports"} {
-		if info, err := os.Stat(filepath.Join(loaded.Root, dir)); err != nil || !info.IsDir() {
-			t.Fatalf("%s directory missing: %v", dir, err)
-		}
+	if _, err := os.Stat(filepath.Join(loaded.Root, "pf.lock")); err != nil {
+		t.Fatalf("pf.lock missing: %v", err)
 	}
-	policyRules, err := os.ReadFile(filepath.Join(loaded.Root, "policies", "default.json"))
-	if err != nil {
-		t.Fatalf("policies/default.json missing: %v", err)
+}
+
+func TestRunInitRejectsUnknownLocalEngineBeforeWriting(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := runInit([]string{"--engine", "containerd", dir}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	var rules policy.Rules
-	if err := json.Unmarshal(policyRules, &rules); err != nil {
-		t.Fatalf("policies/default.json does not decode as policy.Rules: %v", err)
+	if !strings.Contains(stderr.String(), "--engine must be docker or podman") {
+		t.Fatalf("stderr=%s", stderr.String())
 	}
-	if _, err := policy.Evaluate(rules, policy.Evidence{}); err != nil {
-		t.Fatalf("policies/default.json does not Evaluate: %v", err)
-	}
-	for _, readme := range []string{
-		filepath.Join("deploy", "README.md"),
-		filepath.Join("reports", "README.md"),
-		filepath.Join(".pf", "README.md"),
-		filepath.Join("dist", "README.md"),
-	} {
-		if content, err := os.ReadFile(filepath.Join(loaded.Root, readme)); err != nil || len(content) == 0 {
-			t.Fatalf("%s missing or empty: content=%q err=%v", readme, content, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(loaded.Root, ".gitignore")); err != nil {
-		t.Fatalf(".gitignore missing: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(loaded.Root, "platform-factory.lock")); err != nil {
-		t.Fatalf("platform-factory.lock missing: %v", err)
-	}
-	if !isGitWorkTree(t, loaded.Root) {
-		t.Fatal("git init did not run")
-	}
-	if !strings.Contains(stdout.String(), "edit platform-factory.yaml") {
-		t.Fatalf("missing placeholder-edit reminder: stdout=%s", stdout.String())
+	if _, err := os.Stat(filepath.Join(dir, "pf.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("init wrote config: %v", err)
 	}
 }
 
@@ -88,11 +146,35 @@ func TestRunInitAmbiguousEcosystemNonInteractiveFailsClosedWithoutWritingJunk(t 
 	if code != 2 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "--language") {
+	if !strings.Contains(stderr.String(), "pf plugin load") {
 		t.Fatalf("stderr=%s", stderr.String())
 	}
-	if _, err := os.Stat(filepath.Join(dir, "platform-factory.yaml")); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "pf.yaml")); err == nil {
 		t.Fatal("expected no config to be written when the ecosystem is ambiguous and nothing can resolve it")
+	}
+}
+
+func TestRunInitExternalImportsRequireExplicitDependencyDecision(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectTestFile(t, filepath.Join(dir, "app.py"), "import requests\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := runInit([]string{dir}, nil, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "--dependency-mode") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pf.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("pf.yaml written before decision: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runInit([]string{"--dependency-mode=unresolved", dir}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "pf.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "mode: unresolved") {
+		t.Fatalf("config=%s", raw)
 	}
 }
 
@@ -106,7 +188,7 @@ func TestRunInitAmbiguousEcosystemResolvedByLanguageFlag(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	loaded, err := project.Load(filepath.Join(dir, "platform-factory.yaml"))
+	loaded, err := project.Load(filepath.Join(dir, "pf.yaml"))
 	if err != nil {
 		t.Fatalf("generated config does not load: %v", err)
 	}
@@ -127,7 +209,7 @@ func TestRunInitMigratesLegacyConfigAndRemovesOldFile(t *testing.T) {
 	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
 		t.Fatalf("legacy config was not removed: err=%v", err)
 	}
-	loaded, err := project.Load(filepath.Join(dir, "platform-factory.yaml"))
+	loaded, err := project.Load(filepath.Join(dir, "pf.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +218,15 @@ func TestRunInitMigratesLegacyConfigAndRemovesOldFile(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "migrated from") {
 		t.Fatalf("migration not reported: stdout=%s", stdout.String())
+	}
+	trace, err := os.ReadFile(filepath.Join(dir, ".pf", "migration.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"api_version": "platform-factory.dev/project-migration/v1"`, `"from": ".config_image.yaml"`, `"to": "pf.yaml"`, `"normalized": false`, `"field": "filename"`, `"reason": "use the canonical project configuration filename; document bytes and values are unchanged"`} {
+		if !strings.Contains(string(trace), want) {
+			t.Fatalf("migration trace missing %q: %s", want, trace)
+		}
 	}
 }
 
@@ -156,6 +247,7 @@ func TestRunInitFailsClosedWhenAlreadyInitialized(t *testing.T) {
 func TestRunInitSkipsAnAlreadyExistingGitRepo(t *testing.T) {
 	dir := t.TempDir()
 	writeProjectTestFile(t, filepath.Join(dir, "go.mod"), "module example.com/app\n\ngo 1.22\n", 0o644)
+	writeGoInitSource(t, dir)
 	if out, err := exec.Command("git", "init", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
@@ -174,9 +266,65 @@ func TestRunInitSkipsAnAlreadyExistingGitRepo(t *testing.T) {
 	}
 }
 
+func TestRunInitFromNestedGitDirectoryInitializesRepositoryRoot(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectTestFile(t, filepath.Join(dir, "go.mod"), "module example.com/app\n\ngo 1.22\n", 0o644)
+	writeGoInitSource(t, dir)
+	if out, err := exec.Command("git", "init", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	nested := filepath.Join(dir, "cmd", "demo")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runInit([]string{"--yes", "--language=go", "--artifact=app", nested}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pf.yaml")); err != nil {
+		t.Fatalf("repository root was not initialized: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(nested, "pf.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("nested source was incorrectly initialized: %v", err)
+	}
+}
+
+func TestRunInitPreservesCustomBuildCommandArgumentBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectTestFile(t, filepath.Join(dir, "app.py"), "print('ok')\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	args := []string{"--yes", "--language=python", "--artifact=app.py", "--build-command=builder tool", "--build-arg=arg with spaces", "--build-arg=$HOME;touch nope", dir}
+	if code := runInit(args, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	loaded, err := project.Load(filepath.Join(dir, "pf.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"builder tool", "arg with spaces", "$HOME;touch nope"}
+	if !slices.Equal(loaded.Config.BuildCommand, want) {
+		t.Fatalf("build command=%q want=%q", loaded.Config.BuildCommand, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "nope")); !os.IsNotExist(err) {
+		t.Fatalf("shell metacharacters were interpreted: %v", err)
+	}
+}
+
+func TestRunInitRejectsBuildArgsWithoutExecutable(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := runInit([]string{"--build-arg=x", dir}, nil, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "requires --build-command") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("invalid command mutated project: %v", entryNames(entries))
+	}
+}
+
 func TestRunInitPreservesAnExistingGitignore(t *testing.T) {
 	dir := t.TempDir()
 	writeProjectTestFile(t, filepath.Join(dir, "go.mod"), "module example.com/app\n\ngo 1.22\n", 0o644)
+	writeGoInitSource(t, dir)
 	custom := "# my own ignores\n*.local\n"
 	writeProjectTestFile(t, filepath.Join(dir, ".gitignore"), custom, 0o644)
 
@@ -196,6 +344,7 @@ func TestRunInitPreservesAnExistingGitignore(t *testing.T) {
 func TestRunInitDryRunWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	writeProjectTestFile(t, filepath.Join(dir, "go.mod"), "module example.com/app\n\ngo 1.22\n", 0o644)
+	writeGoInitSource(t, dir)
 	before, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +354,7 @@ func TestRunInitDryRunWritesNothing(t *testing.T) {
 	if code := runInit([]string{"--dry-run", dir}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "platform-factory.yaml") {
+	if !strings.Contains(stdout.String(), "pf.yaml") {
 		t.Fatalf("dry-run plan missing expected entries: stdout=%s", stdout.String())
 	}
 	after, err := os.ReadDir(dir)
@@ -238,19 +387,13 @@ func TestRunInitDryRunExplainsMultiComponentProposalWithoutSelectingRuntime(t *t
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 	output := stdout.String()
-	for _, expected := range []string{
-		"component api from api: recommended runtime container",
-		"component worker from worker: recommended runtime container",
-		"selected runtime unknown",
-		"unknown connections",
-		"unknown resources",
-	} {
+	for _, expected := range []string{"language go", "recommended runtime container", "system proposal"} {
 		if !strings.Contains(output, expected) {
 			t.Fatalf("dry-run missing %q:\n%s", expected, output)
 		}
 	}
-	if strings.Index(output, "component api") > strings.Index(output, "component worker") {
-		t.Fatalf("component explanation order is unstable:\n%s", output)
+	if strings.Contains(output, "component api") || strings.Contains(output, "component worker") {
+		t.Fatalf("the language-neutral core invented components:\n%s", output)
 	}
 	after, err := os.ReadDir(dir)
 	if err != nil {
@@ -261,31 +404,69 @@ func TestRunInitDryRunExplainsMultiComponentProposalWithoutSelectingRuntime(t *t
 	}
 }
 
-// TestRunInitRollsBackEverythingOnMidPlanFailure forces the *last* plan
-// step (git init) to fail - by making `git` unresolvable - so every
-// earlier step (config, all five directories, .gitignore, the lock
-// file) has genuinely already been created on disk before the failure,
-// giving rollback real work to undo rather than nothing.
-func TestRunInitRollsBackEverythingOnMidPlanFailure(t *testing.T) {
+func TestRunInitCreatesCompleteSafeProjectScaffold(t *testing.T) {
 	dir := t.TempDir()
 	writeProjectTestFile(t, filepath.Join(dir, "go.mod"), "module example.com/app\n\ngo 1.22\n", 0o644)
+	writeGoInitSource(t, dir)
 	preexisting := filepath.Join(dir, "README.md")
 	writeProjectTestFile(t, preexisting, "pre-existing user file\n", 0o644)
-	t.Setenv("PATH", t.TempDir()) // git becomes unresolvable
-
 	var stdout, stderr bytes.Buffer
 	code := runInit([]string{dir}, nil, &stdout, &stderr)
-	if code != 1 || !strings.Contains(stderr.String(), "rolled back") {
+	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	for _, name := range []string{".pf", "policies", "deploy", "dist", "reports", "platform-factory.yaml", ".gitignore", "platform-factory.lock", ".git"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
-			t.Fatalf("%s survived a rolled-back init: err=%v", name, err)
+	for _, name := range []string{"pf.yaml", "pf.lock", ".gitignore", ".git", ".pf", "policies", "deploy", "dist", "reports"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("required %s was not created: %v", name, err)
 		}
+	}
+	for _, name := range []string{"platform-factory.yaml", "platform-factory.lock"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("non-canonical alias %s was unexpectedly created: err=%v", name, err)
+		}
+	}
+	ignored, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil || !strings.Contains(string(ignored), "dist/") || !strings.Contains(string(ignored), ".platform-factory/") {
+		t.Fatalf("generated .gitignore is incomplete: content=%q err=%v", ignored, err)
 	}
 	got, err := os.ReadFile(preexisting)
 	if err != nil || string(got) != "pre-existing user file\n" {
 		t.Fatalf("pre-existing user file was not preserved: content=%q err=%v", got, err)
+	}
+}
+
+func TestRunInitLongFilenameStyleCreatesDiscoverableLongPair(t *testing.T) {
+	dir := t.TempDir()
+	writeProjectTestFile(t, filepath.Join(dir, "go.mod"), "module example.com/long\n\ngo 1.22\n", 0o644)
+	writeGoInitSource(t, dir)
+	var stdout, stderr bytes.Buffer
+	if code := runInit([]string{"--yes", "--filename-style", "long", dir}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	for _, name := range []string{"platform-factory.yaml", "platform-factory.lock"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("missing %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"pf.yaml", "pf.lock"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("unexpected alias %s: %v", name, err)
+		}
+	}
+	if _, err := project.Discover(dir, ""); err != nil {
+		t.Fatalf("long project does not discover: %v", err)
+	}
+}
+
+func TestRunInitRejectsInvalidFilenameStyleWithoutWrites(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if code := runInit([]string{"--filename-style", "both", dir}, nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("invalid style mutated project: %v %v", entries, err)
 	}
 }
 
@@ -338,7 +519,7 @@ func TestRunInitDetectsSingleBootableLegacyDiskAutomatically(t *testing.T) {
 		t.Fatalf("stdout=%s", stdout.String())
 	}
 
-	loaded, err := project.Load(filepath.Join(dir, "platform-factory.yaml"))
+	loaded, err := project.Load(filepath.Join(dir, "pf.yaml"))
 	if err != nil {
 		t.Fatalf("generated config does not load: %v", err)
 	}
@@ -365,7 +546,7 @@ func TestRunInitLegacyDiskAmbiguousWithBootDiskOverride(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	loaded, err := project.Load(filepath.Join(dir, "platform-factory.yaml"))
+	loaded, err := project.Load(filepath.Join(dir, "pf.yaml"))
 	if err != nil {
 		t.Fatalf("generated config does not load: %v", err)
 	}
@@ -388,7 +569,7 @@ func TestRunInitLegacyDiskAmbiguousPromptsInteractively(t *testing.T) {
 	// (no application source exists, only disks, so ecosystem detection
 	// is also unconfident), the ecosystem/language question, and the
 	// final "proceed?" confirmation.
-	stdin := strings.NewReader("1\n\ny\n")
+	stdin := strings.NewReader("1\ny\n")
 	var stdout, stderr bytes.Buffer
 	code := runInit([]string{dir}, stdin, &stdout, &stderr)
 	if code != 0 {
@@ -397,10 +578,10 @@ func TestRunInitLegacyDiskAmbiguousPromptsInteractively(t *testing.T) {
 	if !strings.Contains(stdout.String(), "enter the number of the boot disk") {
 		t.Fatalf("stdout=%s", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "proceed?") {
+	if !strings.Contains(stdout.String(), "Apply this plan?") {
 		t.Fatalf("stdout=%s", stdout.String())
 	}
-	loaded, err := project.Load(filepath.Join(dir, "platform-factory.yaml"))
+	loaded, err := project.Load(filepath.Join(dir, "pf.yaml"))
 	if err != nil {
 		t.Fatalf("generated config does not load: %v", err)
 	}
@@ -431,12 +612,13 @@ func TestRunInitLegacyDiskAmbiguousFailsClosedWithoutStdinOrOverride(t *testing.
 func TestRunInitWithoutLegacyDisksOmitsLegacyDisksField(t *testing.T) {
 	dir := t.TempDir()
 	writeProjectTestFile(t, filepath.Join(dir, "go.mod"), "module example.com/app\n\ngo 1.22\n", 0o644)
+	writeGoInitSource(t, dir)
 
 	var stdout, stderr bytes.Buffer
 	if code := runInit([]string{dir}, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	loaded, err := project.Load(filepath.Join(dir, "platform-factory.yaml"))
+	loaded, err := project.Load(filepath.Join(dir, "pf.yaml"))
 	if err != nil {
 		t.Fatalf("generated config does not load: %v", err)
 	}
@@ -457,10 +639,10 @@ func TestRunInitAmbiguousEcosystemPromptsForLanguageAndArtifact(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "1) Go") {
+	if !strings.Contains(stdout.String(), "[1] go") {
 		t.Fatalf("expected the numbered language menu, stdout=%s", stdout.String())
 	}
-	loaded, err := project.Load(filepath.Join(dir, "platform-factory.yaml"))
+	loaded, err := project.Load(filepath.Join(dir, "pf.yaml"))
 	if err != nil {
 		t.Fatalf("generated config does not load: %v", err)
 	}
@@ -481,7 +663,7 @@ func TestRunInitLanguageMenuRejectsOutOfRangeChoice(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `"99" isn't one of the numbers above`) {
+	if !strings.Contains(stdout.String(), `"99" is not a valid choice`) {
 		t.Fatalf("stdout=%s", stdout.String())
 	}
 	if _, err := os.Stat(filepath.Join(dir, "platform-factory.yaml")); err == nil {
@@ -492,6 +674,7 @@ func TestRunInitLanguageMenuRejectsOutOfRangeChoice(t *testing.T) {
 func TestRunInitDeclinedConfirmationWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	writeProjectTestFile(t, filepath.Join(dir, "go.mod"), "module example.com/app\n\ngo 1.22\n", 0o644)
+	writeGoInitSource(t, dir)
 
 	stdin := strings.NewReader("n\n")
 	var stdout, stderr bytes.Buffer
@@ -505,6 +688,11 @@ func TestRunInitDeclinedConfirmationWritesNothing(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "platform-factory.yaml")); err == nil {
 		t.Fatal("expected no config to be written after declining the confirmation prompt")
 	}
+}
+
+func writeGoInitSource(t *testing.T, dir string) {
+	t.Helper()
+	writeProjectTestFile(t, filepath.Join(dir, "main.go"), "package main\nfunc main() {}\n", 0o644)
 }
 
 func TestRunInitAssumeYesSkipsAllPromptsEvenWithStdin(t *testing.T) {

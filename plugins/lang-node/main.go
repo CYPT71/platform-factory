@@ -1,19 +1,3 @@
-// platform-factory-lang-node is the Node.js language plugin - see
-// plugins/lang-python/main.go for the full pattern this mirrors and
-// docs/language-plugin-layers.md for the architecture. Only the
-// freeze/deps-location specifics differ per language; every plugin
-// shares its tar-packaging logic via sdk/langplugin instead of
-// duplicating it.
-//
-//	platform-factory-lang-node freeze --root DIR
-//	platform-factory-lang-node build-layer --root DIR --output TAR --dest PREFIX
-//
-// freeze mirrors the host's own built-in Node freeze step exactly: `npm
-// ci --ignore-scripts` when a lockfile already exists, otherwise `npm
-// install --package-lock-only --ignore-scripts` followed by `npm ci
-// --ignore-scripts`. npm's own default install location, ./node_modules,
-// needs no redirection - unlike Java/dotnet/Rust, Node has no global
-// package cache to opt out of.
 package main
 
 import (
@@ -21,24 +5,18 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strings"
 
-	"github.com/CYPT71/secure-oci-base/sdk/langplugin"
+	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-	var err error
-	switch os.Args[1] {
-	case "freeze":
-		err = runFreeze(os.Args[2:])
-	case "build-layer":
-		err = runBuildLayer(os.Args[2:])
-	default:
+	err := langplugin.Dispatch(os.Args[1:], map[string]langplugin.Handler{
+		"inspect": runInspect, "scaffold": runScaffold,
+		"freeze": runFreeze, "build-layer": runBuildLayer,
+	})
+	if err == langplugin.ErrUsage {
 		usage()
 		os.Exit(2)
 	}
@@ -48,10 +26,75 @@ func main() {
 	}
 }
 
+func runScaffold(args []string) error {
+	flags := flag.NewFlagSet("scaffold", flag.ContinueOnError)
+	name := flags.String("name", "", "plugin name")
+	output := flags.String("output", "", "output directory")
+	dialect := flags.String("dialect", "js", "js or ts")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" || *output == "" {
+		return errors.New("--name and --output are required")
+	}
+	if *dialect != "js" && *dialect != "ts" {
+		return errors.New("--dialect must be js or ts")
+	}
+	if err := os.MkdirAll(*output, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(*output)
+	if err != nil {
+		return err
+	}
+	if len(entries) != 0 {
+		return errors.New("output directory must be empty")
+	}
+	ext := "js"
+	declaration := "const result ="
+	if *dialect == "ts" {
+		ext = "ts"
+		declaration = "const result: object ="
+	}
+	source := fmt.Sprintf("#!/usr/bin/env node\n%s {match:false,language:%q,profile:'unknown',evidence:[],dependencies:{mode:'unknown',reason:'customize me'}};\nconsole.log(JSON.stringify(result));\n", declaration, *name)
+	path := filepath.Join(*output, "plugin."+ext)
+	if err := os.WriteFile(path, []byte(source), 0o755); err != nil {
+		return err
+	}
+	fmt.Println(path)
+	return nil
+}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: platform-factory-lang-node <freeze|build-layer> [OPTIONS]")
+	fmt.Fprintln(os.Stderr, "usage: platform-factory-lang-node <inspect|freeze|build-layer> [OPTIONS]")
+	fmt.Fprintln(os.Stderr, "  inspect --root DIR")
 	fmt.Fprintln(os.Stderr, "  freeze --root DIR")
 	fmt.Fprintln(os.Stderr, "  build-layer --root DIR --output TAR --dest PREFIX")
+}
+
+func runInspect(args []string) error {
+	root, err := langplugin.ParseRootFlag("inspect", args)
+	if err != nil {
+		return err
+	}
+	result, err := langplugin.Inspect(root, langplugin.Definition{Language: "node", Profile: "node", Markers: []string{"package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock"}, SourceExtensions: []string{".js", ".mjs", ".cjs", ".ts"}, Entrypoints: []string{"index.js", "app.js", "server.js"}, Manifests: []string{"package.json"}, Imports: nodeImports})
+	if err != nil {
+		return err
+	}
+	return langplugin.WriteInspection(result)
+}
+func nodeImports(source string) ([]string, bool) {
+	var imports []string
+	dynamic := strings.Contains(source, "import(")
+	for _, line := range strings.Split(source, "\n") {
+		line = strings.TrimSpace(line)
+		if (strings.HasPrefix(line, "import ") && strings.Contains(line, " from ")) || strings.Contains(line, "require(") {
+			if !strings.Contains(line, `"./`) && !strings.Contains(line, `"../`) && !strings.Contains(line, `'./`) && !strings.Contains(line, `'../`) && !strings.Contains(line, "node:") {
+				imports = append(imports, "external-module")
+			}
+		}
+	}
+	return imports, dynamic
 }
 
 // depsRelPath is npm's own default install location - identical to the
@@ -59,73 +102,23 @@ func usage() {
 const depsRelPath = "node_modules"
 
 func runFreeze(args []string) error {
-	root, err := parseRootFlag("freeze", args)
+	root, err := langplugin.ParseRootFlag("freeze", args)
 	if err != nil {
 		return err
 	}
-	hasLockfile := fileExists(filepath.Join(root, "package-lock.json")) || fileExists(filepath.Join(root, "npm-shrinkwrap.json"))
+	hasLockfile := langplugin.FileExists(filepath.Join(root, "package-lock.json")) || langplugin.FileExists(filepath.Join(root, "npm-shrinkwrap.json"))
 	if hasLockfile {
-		return runIn(root, "npm", "ci", "--ignore-scripts")
+		return langplugin.RunIn(root, "npm", "ci", "--ignore-scripts")
 	}
-	if err := runIn(root, "npm", "install", "--package-lock-only", "--ignore-scripts"); err != nil {
+	if err := langplugin.RunIn(root, "npm", "install", "--package-lock-only", "--ignore-scripts"); err != nil {
 		return fmt.Errorf("npm install --package-lock-only: %w", err)
 	}
-	if err := runIn(root, "npm", "ci", "--ignore-scripts"); err != nil {
+	if err := langplugin.RunIn(root, "npm", "ci", "--ignore-scripts"); err != nil {
 		return fmt.Errorf("npm ci: %w", err)
 	}
 	return nil
 }
 
 func runBuildLayer(args []string) error {
-	root, output, dest, err := parseBuildLayerFlags(args)
-	if err != nil {
-		return err
-	}
-	source := filepath.Join(root, depsRelPath)
-	info, err := os.Stat(source)
-	if err != nil {
-		return fmt.Errorf("%s does not exist - run `platform-factory-lang-node freeze` first: %w", depsRelPath, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", depsRelPath)
-	}
-	return langplugin.WriteDeterministicTar(source, dest, output)
-}
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
-}
-
-func runIn(dir, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func parseRootFlag(subcommand string, args []string) (root string, err error) {
-	flags := flag.NewFlagSet(subcommand, flag.ContinueOnError)
-	rootFlag := flags.String("root", "", "project root directory")
-	if err := flags.Parse(args); err != nil {
-		return "", err
-	}
-	if *rootFlag == "" {
-		return "", errors.New("--root is required")
-	}
-	return *rootFlag, nil
-}
-
-func parseBuildLayerFlags(args []string) (root, output, dest string, err error) {
-	flags := flag.NewFlagSet("build-layer", flag.ContinueOnError)
-	rootFlag := flags.String("root", "", "project root directory")
-	outputFlag := flags.String("output", "", "path to write the uncompressed tar layer to")
-	destFlag := flags.String("dest", "", "container path prefix every entry in the layer is rooted at")
-	if err := flags.Parse(args); err != nil {
-		return "", "", "", err
-	}
-	if *rootFlag == "" || *outputFlag == "" || *destFlag == "" {
-		return "", "", "", errors.New("--root, --output, and --dest are all required")
-	}
-	return *rootFlag, *outputFlag, *destFlag, nil
+	return langplugin.BuildLayer(args, depsRelPath, "platform-factory-lang-node")
 }

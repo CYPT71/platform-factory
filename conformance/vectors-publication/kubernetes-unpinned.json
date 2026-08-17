@@ -1,0 +1,1 @@
+{"name":"kubernetes-unpinned-image-rejected","kubernetes":{"workload":"service","name":"demo","namespace":"default","image":"registry.example/team/app:latest","replicas":1,"port":8080,"cpu_request":"100m","memory_request":"128Mi"},"expect":{"valid":false}}

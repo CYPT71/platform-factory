@@ -18,17 +18,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 const (
 	// ManifestAPIVersion identifies the plugin manifest schema.
 	ManifestAPIVersion = "platform-factory.dev/plugin-manifest/v1"
-	// LegacyManifestAPIVersion is the pre-rebrand identifier, still
-	// accepted for the documented compatibility overlap window (see
-	// docs/api-compatibility.md) - a plugin.json a deployment already
-	// has on disk may not have been regenerated yet.
-	LegacyManifestAPIVersion = "secure-oci.dev/plugin-manifest/v1"
 	// ManifestFileName is the file a plugin directory must contain.
 	ManifestFileName = "plugin.json"
 
@@ -38,12 +33,10 @@ const (
 var (
 	manifestNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 	// manifestCapabilityPattern allows dot-notation for capabilities (family.action)
-	// Sanetizer-todo item 12: Capability negotiation with dot-notation.
 	manifestCapabilityPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)?$`)
 )
 
 // PluginFamily is which family of plugin a manifest declares itself as.
-// See Sanetizer-todo.md item 11 for the capability-based architecture.
 type PluginFamily string
 
 const (
@@ -73,17 +66,14 @@ type PluginPermissions struct {
 // Manifest pins one plugin: its executable by digest, its identity and
 // the capabilities it may advertise. A signature, when present, covers
 // the canonical manifest bytes without the signature field.
-//
-// As of Sanetizer-todo.md item 11, manifests now include Family and Permissions
-// for capability-based dispatch and least-privilege execution.
 type Manifest struct {
 	APIVersion   string             `json:"api_version"`
 	Name         string             `json:"name"`
 	Version      string             `json:"version"`
-	Family       PluginFamily       `json:"family,omitempty"` // Sanetizer-todo item 11: defaults to "unknown" if omitted
 	Capabilities []string           `json:"capabilities"`
-	Permissions  PluginPermissions  `json:"permissions,omitempty"` // Sanetizer-todo item 11: defaults to empty permissions if omitted
+	Family       PluginFamily       `json:"family,omitempty"`
 	Platforms    []string           `json:"platforms,omitempty"`
+	Permissions  PluginPermissions  `json:"permissions,omitempty"`
 	Executable   string             `json:"executable"`
 	Digest       string             `json:"digest"`
 	Signature    *ManifestSignature `json:"signature,omitempty"`
@@ -100,15 +90,7 @@ type ManifestSignature struct {
 // digest in the manifest is always enforced; AllowUnsigned relaxes only
 // the signature requirement, never the digest pin.
 //
-// RevokedKeyIDs and RevokedDigests implement Sanetizer-todo.md item 15's
-// revocation policy: a manifest signed by a revoked key, or pinning a
-// revoked digest, is refused unconditionally - even though the
-// signature would otherwise verify against a key still present in
-// Keys. Revocation always wins over trust: a key or digest only ever
-// needs to be revoked once for every plugin depending on it to stop
-// starting, without needing to also remove the key from Keys (which
-// may still be needed to verify other, non-revoked plugins the same
-// key legitimately signs).
+// Revocation takes precedence over trusted keys and AllowUnsigned.
 type TrustPolicy struct {
 	Keys []ed25519.PublicKey
 	// TrustedKeys binds the manifest key_id to key material. When present,
@@ -210,7 +192,7 @@ func LoadManifest(dir string) (Manifest, error) {
 
 // Validate checks every manifest field against the schema.
 func (m Manifest) Validate() error {
-	if m.APIVersion != ManifestAPIVersion && m.APIVersion != LegacyManifestAPIVersion {
+	if m.APIVersion != ManifestAPIVersion {
 		return fmt.Errorf("plugin manifest: unsupported api_version %q (want %q)", m.APIVersion, ManifestAPIVersion)
 	}
 	if !manifestNamePattern.MatchString(m.Name) {
@@ -219,7 +201,6 @@ func (m Manifest) Validate() error {
 	if m.Version == "" || strings.ContainsAny(m.Version, "\x00\n") {
 		return errors.New("plugin manifest: version must be a non-empty single-line string")
 	}
-	// Validate Family if present (Sanetizer-todo item 11)
 	if m.Family != "" {
 		switch PluginFamily(m.Family) {
 		case PluginFamilyLanguage, PluginFamilyAnalyzer, PluginFamilyBuild,
@@ -247,15 +228,7 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("plugin manifest: unsupported platform %q", platform)
 		}
 	}
-	// Sanetizer-todo.md item 14's risk-tiered sandbox policy: a language
-	// plugin gets no network access by default, full stop - the one rule
-	// in that item concrete enough to check against the current
-	// Permissions model (string lists, not a real capability schema).
-	// The containerd tier ("socket explicitly authorized") and the
-	// KubeVirt tier ("RBAC minimal", "namespace bounded") don't reduce to
-	// a boolean check against this model and are not enforced here -
-	// see Sanetize-Stabilisation/Sanetizer-todo.md item 14 for the
-	// honest scope of what this validates.
+	// Language plugins cannot request host networking.
 	if m.Family == PluginFamilyLanguage && len(m.Permissions.Network) > 0 {
 		return fmt.Errorf("plugin manifest: language-family plugins may not declare network permissions, got %v", m.Permissions.Network)
 	}
@@ -369,9 +342,7 @@ func SameStringSet(a, b []string) bool {
 	return true
 }
 
-// GetFamily returns the plugin family, defaulting to "unknown" if not set.
-// This implements Sanetizer-todo.md item 11: the core should ask
-// "what capabilities does this plugin provide?" rather than "are you KubeVirt?".
+// GetFamily returns the declared family or "unknown".
 func (m Manifest) GetFamily() PluginFamily {
 	if m.Family == "" {
 		return "unknown"
@@ -379,9 +350,7 @@ func (m Manifest) GetFamily() PluginFamily {
 	return m.Family
 }
 
-// HasCapability reports whether the manifest declares it can perform
-// the given capability. This enables capability-based dispatch as per
-// Sanetizer-todo.md item 12.
+// HasCapability reports whether the manifest declares capability.
 func (m Manifest) HasCapability(capability string) bool {
 	for _, c := range m.Capabilities {
 		if c == capability {
@@ -430,11 +399,11 @@ func verifyAndStart(ctx context.Context, dir string, manifest Manifest, policy T
 		return nil, err
 	}
 	afterVerifiedExecutableSnapshot()
-	startFn := Start
+	startFn := StartWithManifest
 	if policy.AllowUnsandboxedExecution {
-		startFn = StartAllowingUnsandboxed
+		startFn = StartAllowingUnsandboxedWithManifest
 	}
-	client, err := startFn(ctx, snapshot, nil, nil)
+	client, err := startFn(ctx, snapshot, nil, nil, manifest.GetFamily(), manifest.Permissions)
 	if err != nil {
 		cleanup()
 		return nil, err

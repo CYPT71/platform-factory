@@ -8,6 +8,33 @@ import (
 	"testing"
 )
 
+func TestPublicAPIDomainsContainOnlyVersionDirectories(t *testing.T) {
+	root, err := findWorkspaceRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	domains, err := os.ReadDir(filepath.Join(root, "api"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, domain := range domains {
+		if !domain.IsDir() {
+			t.Errorf("api/%s: public API files must live in api/<domain>/<version>", domain.Name())
+			continue
+		}
+		versions, err := os.ReadDir(filepath.Join(root, "api", domain.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, version := range versions {
+			name := version.Name()
+			if !version.IsDir() || len(name) < 2 || name[0] != 'v' || name[1] < '0' || name[1] > '9' {
+				t.Errorf("api/%s/%s: expected a version directory", domain.Name(), version.Name())
+			}
+		}
+	}
+}
+
 func TestForbiddenImports(t *testing.T) {
 	CheckForbiddenImports(t)
 }

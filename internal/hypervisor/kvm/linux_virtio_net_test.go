@@ -173,3 +173,27 @@ func TestVirtioNetConfigSpaceReportsMACAndLinkUp(t *testing.T) {
 		t.Fatalf("config space status = %#x, want VIRTIO_NET_S_LINK_UP", status)
 	}
 }
+
+func TestVirtioNetStopClosesTAPAndJoinsReceiver(t *testing.T) {
+	tapDevice, peer := testTAPPair(t)
+	defer peer.Close()
+	_, stop, err := newVirtioNetMMIODevice(NetworkDeviceOptions{
+		TAP: tapDevice, MAC: net.HardwareAddr{0x02, 0, 0, 0, 0, 9},
+	}, virtioMMIODeviceBaseAddress(0), virtioFirstDeviceIRQ)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stop did not unblock and join the TAP receiver")
+	}
+	if _, err := tapDevice.Stat(); err == nil {
+		t.Fatal("stop left the TAP descriptor open")
+	}
+}

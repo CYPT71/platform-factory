@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/control"
-	"github.com/CYPT71/secure-oci-base/internal/provenance"
-	"github.com/CYPT71/secure-oci-base/internal/quota"
+	"github.com/CYPT71/platform-factory/internal/control"
+	"github.com/CYPT71/platform-factory/internal/provenance"
+	"github.com/CYPT71/platform-factory/internal/quota"
 )
 
 // authenticatedRequest builds a request as if it arrived over a real mTLS
@@ -549,6 +549,26 @@ func TestTenantQuotaRefusesSubmissionOverMaxParallelAndReleasesOnCompletion(t *t
 
 	if rec := post("/lease/submit", submitRequest{Payload: "third", Tenant: "acme"}); rec.Code != http.StatusOK {
 		t.Fatalf("third tenant submit after release: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRestoreQuotaUsageRebuildsOpenTenantSlots(t *testing.T) {
+	plane := control.NewControlPlane(time.Minute)
+	leaseID, err := plane.SubmitLeaseWithTenant("work", "", nil, "", "acme", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := quota.NewFairScheduler(quota.NewTenantQuota(quota.Quota{MaxParallel: 1}))
+	server := &Server{Plane: plane, Scheduler: scheduler}
+	if err := server.RestoreQuotaUsage(); err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.Schedule("acme", quota.ResourceTypeParallel, 1); err == nil {
+		t.Fatal("restored open lease did not consume tenant quota")
+	}
+	server.releaseTenantSlot(leaseID)
+	if err := scheduler.Schedule("acme", quota.ResourceTypeParallel, 1); err != nil {
+		t.Fatalf("released restored slot remains charged: %v", err)
 	}
 }
 

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/layout"
 )
 
 // writeTestTar builds an uncompressed tar file at path from the given

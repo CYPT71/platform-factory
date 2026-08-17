@@ -16,7 +16,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/CYPT71/secure-oci-base/internal/detect"
+	"github.com/CYPT71/platform-factory/internal/detect"
 )
 
 const copyBufferSize = 1 << 20

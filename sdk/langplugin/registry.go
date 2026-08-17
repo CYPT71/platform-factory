@@ -44,17 +44,39 @@ func binaryName(name string) string {
 // name was never loaded, since that's the ordinary, expected case for
 // any language a project hasn't opted into yet.
 func Resolve(name string) (string, error) {
+	if err := validateName(name); err != nil {
+		return "", err
+	}
 	dir, err := Dir()
 	if err != nil {
 		return "", err
 	}
 	path := filepath.Join(dir, binaryName(name))
 	info, err := os.Stat(path)
-	if err != nil {
-		return "", fmt.Errorf("language plugin %q isn't loaded - run `pf plugin load %s` first", name, name)
+	if err == nil && info.Mode().IsRegular() {
+		return path, nil
 	}
-	if !info.Mode().IsRegular() {
+	if err == nil {
 		return "", fmt.Errorf("language plugin %q is loaded at %s, but that isn't a regular file", name, path)
+	}
+	if adjacent, adjacentErr := adjacentBinary(name); adjacentErr == nil {
+		return adjacent, nil
+	}
+	return "", fmt.Errorf("language plugin %q isn't installed - reinstall platform-factory or run `pf plugin load %s`", name, name)
+}
+
+// adjacentBinary finds plugins shipped as part of the same installation as
+// the running CLI. This keeps a fresh install self-contained while the managed
+// directory remains available for user-installed overrides.
+func adjacentBinary(name string) (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(filepath.Dir(self), binaryName(name))
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", os.ErrNotExist
 	}
 	return path, nil
 }
@@ -65,8 +87,8 @@ func Resolve(name string) (string, error) {
 // directory, then renamed into place) so a Resolve racing a Load never
 // observes a partially-written binary.
 func Load(name, sourcePath string) (installedPath string, err error) {
-	if name == "" {
-		return "", errors.New("plugin name must not be empty")
+	if err := validateName(name); err != nil {
+		return "", err
 	}
 	info, err := os.Stat(sourcePath)
 	if err != nil {
@@ -116,6 +138,9 @@ func copyExecutable(sourcePath, destinationPath string) error {
 // language that was never loaded is not an error - the end state
 // (not loaded) is what the caller asked for either way.
 func Unload(name string) error {
+	if err := validateName(name); err != nil {
+		return err
+	}
 	dir, err := Dir()
 	if err != nil {
 		return err
@@ -123,6 +148,19 @@ func Unload(name string) error {
 	err = os.Remove(filepath.Join(dir, binaryName(name)))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("unload %q: %w", name, err)
+	}
+	return nil
+}
+
+func validateName(name string) error {
+	if name == "" {
+		return errors.New("plugin name must not be empty")
+	}
+	for index, character := range name {
+		valid := character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || (index > 0 && (character == '-' || character == '_' || character == '.'))
+		if !valid {
+			return fmt.Errorf("invalid plugin name %q (use lowercase letters, digits, '-', '_' or '.')", name)
+		}
 	}
 	return nil
 }
@@ -139,26 +177,38 @@ func List() ([]string, error) {
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("read plugin directory %s: %w", dir, err)
 		}
-		return nil, fmt.Errorf("read plugin directory %s: %w", dir, err)
+		entries = nil
 	}
 	const prefix = "platform-factory-lang-"
+	namesSet := make(map[string]struct{})
+	collect := func(entries []os.DirEntry) {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			fileName := entry.Name()
+			if strings.HasSuffix(fileName, ".loading") {
+				continue // an install still in progress, or one that was interrupted
+			}
+			fileName = strings.TrimSuffix(fileName, ".exe")
+			if !strings.HasPrefix(fileName, prefix) {
+				continue
+			}
+			namesSet[strings.TrimPrefix(fileName, prefix)] = struct{}{}
+		}
+	}
+	collect(entries)
+	if self, executableErr := os.Executable(); executableErr == nil {
+		if adjacentEntries, readErr := os.ReadDir(filepath.Dir(self)); readErr == nil {
+			collect(adjacentEntries)
+		}
+	}
 	var names []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		fileName := entry.Name()
-		if strings.HasSuffix(fileName, ".loading") {
-			continue // an install still in progress, or one that was interrupted
-		}
-		fileName = strings.TrimSuffix(fileName, ".exe")
-		if !strings.HasPrefix(fileName, prefix) {
-			continue
-		}
-		names = append(names, strings.TrimPrefix(fileName, prefix))
+	for name := range namesSet {
+		names = append(names, name)
 	}
 	sort.Strings(names)
 	return names, nil

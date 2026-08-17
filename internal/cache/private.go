@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 // PrivateStoreAdapter is a dedicated CAS for migration artifacts. It keeps the

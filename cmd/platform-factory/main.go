@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,36 +18,81 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/detect"
-	"github.com/CYPT71/secure-oci-base/internal/executor"
-	"github.com/CYPT71/secure-oci-base/internal/layout"
-	"github.com/CYPT71/secure-oci-base/internal/networking"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
-	"github.com/CYPT71/secure-oci-base/internal/oci"
-	"github.com/CYPT71/secure-oci-base/internal/plugin"
+	"github.com/mattn/go-isatty"
+
+	"github.com/CYPT71/platform-factory/cmd/tui/buildtui"
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
+	"github.com/CYPT71/platform-factory/internal/attestation"
+	"github.com/CYPT71/platform-factory/internal/budget"
+	"github.com/CYPT71/platform-factory/internal/detect"
+	"github.com/CYPT71/platform-factory/internal/dockerarchive"
+	"github.com/CYPT71/platform-factory/internal/executor"
+	"github.com/CYPT71/platform-factory/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/networking"
+	"github.com/CYPT71/platform-factory/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/oci"
+	"github.com/CYPT71/platform-factory/internal/plugin"
+	"github.com/CYPT71/platform-factory/internal/policy"
+	"github.com/CYPT71/platform-factory/internal/project"
+	"github.com/CYPT71/platform-factory/internal/sbom"
+	"github.com/CYPT71/platform-factory/internal/signing"
+	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
 
 var version = "dev"
 
-// newCommandContext creates a new context with a trace ID for the given command.
-// The trace ID is propagated through the call stack for end-to-end correlation.
-// TODO(Sanetizer-todo item 18): Pass this context to all run* functions.
-func newCommandContext(command string) context.Context {
-	// Use "cli" as the origin since this is the CLI entry point
-	// Generate a trace ID using the observability package
-	traceID := observability.NewTraceID("cli", command)
-	return observability.ContextWithTraceID(context.Background(), string(traceID))
+const cliOutputAPIVersion = "platform-factory.dev/cli-output/v1"
+
+type cliHandler func([]string, io.Writer, io.Writer) int
+
+var directCommands = map[string]cliHandler{
+	"compose":           runCompose,
+	"diff":              runDiff,
+	"sbom":              runSBOM,
+	"evidence":          runEvidence,
+	"plugin-provenance": runPluginProvenance,
+	"pipeline":          runPipeline,
+	"verify-release":    runVerifyRelease,
+	"completion":        runCompletion,
+	"doctor":            runDoctor,
+	"plugin":            runPlugin,
+	"marketplace":       runMarketplace,
+	"registry":          runRegistry,
+	"status":            runStatus,
+	"explain":           runExplain,
+	"mcp":               runMCP,
+}
+
+// commandContext preserves an existing trace, then checks the environment,
+// then creates one.
+func commandContext(ctx context.Context, command string) context.Context {
+	if observability.TraceIDFromContext(ctx) != "" {
+		return ctx
+	}
+	traceID := strings.TrimSpace(os.Getenv("PLATFORM_FACTORY_TRACE_ID"))
+	if traceID == "" {
+		traceID = observability.NewTraceID("cli", command).String()
+	}
+	return observability.ContextWithTraceID(ctx, traceID)
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	// Sanetizer-todo item 18: Create command context with trace_id for end-to-end correlation - COMPLETE
-	// The context is propagated through all command handlers for trace_id injection
-	// into logs, errors, and plugin calls.
-	var ctx context.Context
+	filtered, quiet, verbose, globalErr := extractGlobalOutputFlags(args)
+	if globalErr != "" {
+		fmt.Fprintln(stderr, "platform-factory:", globalErr)
+		return 2
+	}
+	args = filtered
+	command := "unknown"
 	if len(args) > 0 {
-		ctx = newCommandContext(args[0])
-	} else {
-		ctx = newCommandContext("unknown")
+		command = args[0]
+	}
+	ctx := commandContext(context.Background(), command)
+	if quiet {
+		stdout = io.Discard
+	}
+	if verbose {
+		fmt.Fprintf(stderr, "platform-factory: command=%s trace_id=%s\n", command, observability.TraceIDFromContext(ctx))
 	}
 
 	if len(args) < 1 {
@@ -53,6 +100,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		if len(args) == 2 && args[1] == "--all" {
+			printFullUsage(stdout)
+			return 0
+		}
 		printUsage(stdout)
 		return 0
 	}
@@ -76,7 +127,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
 		switch args[0] {
-		case "inspect", "verify", "launch", "microvm", "project", "plan":
+		case "inspect", "verify", "launch", "project", "plan":
 			printUsage(stdout)
 			return 0
 		}
@@ -85,58 +136,53 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runInit(args[1:], os.Stdin, stdout, stderr)
 	}
 	if args[0] == "build" {
-		return runBuildWithContext(ctx, args[1:], stdout, stderr)
+		if projectBuildInvocation(args[1:]) {
+			if _, err := project.Discover(".", ""); err == nil {
+				return runProjectContext(ctx, append([]string{"build"}, args[1:]...), stdout, stderr, executeProjectCommand, executeContainerRuntime, executeMicroVMCommand)
+			}
+		}
+		return runBuild(ctx, args[1:], stdout, stderr)
 	}
 	if args[0] == "project" {
-		return runProject(args[1:], stdout, stderr, executeProjectCommand, executeContainerRuntime, executeMicroVMCommand)
+		return runProjectContext(ctx, args[1:], stdout, stderr, executeProjectCommand, executeContainerRuntime, executeMicroVMCommand)
 	}
 	if args[0] == "plan" {
 		fmt.Fprintln(stderr, `platform-factory: warning: "platform-factory plan" is deprecated, use "platform-factory project plan" instead`)
-		return runProject(append([]string{"plan"}, args[1:]...), stdout, stderr, executeProjectCommand, executeContainerRuntime, executeMicroVMCommand)
+		return runProjectContext(ctx, append([]string{"plan"}, args[1:]...), stdout, stderr, executeProjectCommand, executeContainerRuntime, executeMicroVMCommand)
 	}
 	if args[0] == "freeze" {
 		fmt.Fprintln(stderr, `platform-factory: warning: "platform-factory freeze" is deprecated, use "platform-factory project freeze" instead`)
-		return runProject(append([]string{"freeze"}, args[1:]...), stdout, stderr, executeProjectCommand, executeContainerRuntime, executeMicroVMCommand)
+		return runProjectContext(ctx, append([]string{"freeze"}, args[1:]...), stdout, stderr, executeProjectCommand, executeContainerRuntime, executeMicroVMCommand)
 	}
-	if args[0] == "compose" {
-		return runCompose(args[1:], stdout, stderr)
-	}
-	if args[0] == "diff" {
-		return runDiff(args[1:], stdout, stderr)
-	}
-	if args[0] == "sbom" {
-		return runSBOM(args[1:], stdout, stderr)
-	}
-	if args[0] == "evidence" {
-		return runEvidence(args[1:], stdout, stderr)
-	}
-	if args[0] == "pipeline" {
-		return runPipeline(args[1:], stdout, stderr)
+	if handler := directCommands[args[0]]; handler != nil {
+		return handler(args[1:], stdout, stderr)
 	}
 	if args[0] == "publish" {
-		return runPublishWithContext(ctx, args[1:], stdout, stderr, executeContainerRuntime)
-	}
-	if args[0] == "verify-release" {
-		return runVerifyRelease(args[1:], stdout, stderr)
+		return runPublish(ctx, args[1:], stdout, stderr, executeContainerRuntime)
 	}
 	if args[0] == "deploy" {
-		return runDeployWithContext(ctx, args[1:], stdout, stderr, executeContainerRuntime)
+		return runDeploy(ctx, args[1:], stdout, stderr, executeContainerRuntime)
+	}
+	if args[0] == "logs" || args[0] == "events" {
+		return runProjectObservation(args[0], args[1:], stdout, stderr, executeContainerRuntime)
 	}
 	if args[0] == "rollback" {
 		return runRollback(args[1:], stdout, stderr, executeContainerRuntime)
 	}
-	if args[0] == "completion" {
-		return runCompletion(args[1:], stdout, stderr)
-	}
-	if args[0] == "doctor" {
-		return runDoctor(args[1:], stdout, stderr)
-	}
-	if args[0] == "plugin" {
-		return runPlugin(args[1:], stdout, stderr)
-	}
 	if args[0] == "run" {
 		if hasIsolationFlag(args[1:]) {
 			return runLaunch(args[1:], stdout, stderr, executeContainerRuntime, executeMicroVMCommand)
+		}
+		// No explicit IMAGE/layout given (e.g. bare `pf run` or `pf run
+		// --runtime docker`): the same "just run my project" shorthand
+		// `pf launch` already gives bare invocations, so a junior never
+		// has to learn `pf project run` - or, with nothing to discover
+		// either, project.Discover's own error path (via
+		// suggestProjectConfig) points them at `pf init` instead of a
+		// generic "usage: ... IMAGE" wall of text.
+		if !runHasExplicitTarget(args[1:]) {
+			return runProjectContext(ctx, append([]string{"run"}, args[1:]...), stdout, stderr,
+				executeProjectCommand, executeContainerRuntime, executeMicroVMCommand)
 		}
 		return runContainer(args[1:], stdout, stderr, executeContainerRuntime)
 	}
@@ -157,10 +203,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "platform-factory launch: %v\n", err)
 				return 2
 			}
-			return runProject(append([]string{action}, projectArgs...), stdout, stderr,
+			return runProjectContext(ctx, append([]string{action}, projectArgs...), stdout, stderr,
 				executeProjectCommand, executeContainerRuntime, executeMicroVMCommand)
 		}
 		return runLaunch(args[1:], stdout, stderr, executeContainerRuntime, executeMicroVMCommand)
+	}
+	if args[0] == "inspect" && len(args) == 1 {
+		return runStatus([]string{"--format", "json"}, stdout, stderr)
 	}
 	if args[0] == "inspect" || args[0] == "verify" {
 		return runInspect(args[0], args[1:], stdout, stderr)
@@ -195,6 +244,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if result.Kind == "unknown" && !result.Ambiguous {
+		if info, statErr := os.Stat(flags.Arg(0)); statErr == nil && info.IsDir() {
+			inspections, inspectErr := langplugin.InspectLoaded(flags.Arg(0))
+			if inspectErr != nil {
+				fmt.Fprintf(stderr, "platform-factory detect: inspect language plugins: %v\n", inspectErr)
+				return 1
+			}
+			result = detectionFromPlugins(flags.Arg(0), inspections)
+		}
+	}
+	if result.Kind == "unknown" && !result.Ambiguous {
 		plugins, pluginErr := pluginFlags.start(context.Background())
 		if pluginErr != nil {
 			fmt.Fprintf(stderr, "platform-factory detect: %v\n", pluginErr)
@@ -210,7 +269,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if *outputFormat == "text" {
 		fmt.Fprintf(stdout, "%s %s (%s)\n", result.Kind, result.Profile, strings.Join(result.Evidence, ", "))
 	} else {
-		output, err := detect.JSON(result)
+		output, err := json.MarshalIndent(struct {
+			APIVersion string `json:"api_version"`
+			detect.Result
+		}{APIVersion: cliOutputAPIVersion, Result: result}, "", "  ")
 		if err != nil {
 			fmt.Fprintf(stderr, "platform-factory detect: %v\n", err)
 			return 1
@@ -224,14 +286,37 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// validOutputFormat accepts the two machine/human output formats every
-// read-only command shares.
+// extractGlobalOutputFlags accepts --quiet/--verbose before or after the
+// command without forcing every subcommand to duplicate their parsing. It
+// deliberately logs only the command name, never arguments that may contain
+// credentials or paths with sensitive data.
+func extractGlobalOutputFlags(args []string) ([]string, bool, bool, string) {
+	filtered := make([]string, 0, len(args))
+	quiet, verbose := false, false
+	for _, arg := range args {
+		switch arg {
+		case "--quiet", "-q":
+			quiet = true
+		case "--verbose", "-v":
+			verbose = true
+		default:
+			filtered = append(filtered, arg)
+		}
+	}
+	if quiet && verbose {
+		return nil, false, false, "--quiet and --verbose are mutually exclusive"
+	}
+	return filtered, quiet, verbose, ""
+}
+
 func validOutputFormat(value string) bool { return value == "json" || value == "text" }
 
 func runInspect(command string, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	outputFormat := flags.String("format", "json", "result format: json or text")
+	archiveFormat := flags.String("archive-format", "", "verify an archive: oci-layout.tar.gz or docker-save.tar")
+	archiveSHA256 := flags.String("sha256", "", "expected SHA-256 of the archive bytes (requires --archive-format)")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -246,6 +331,51 @@ func runInspect(command string, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "platform-factory %s: format must be json or text\n", command)
 		return 2
 	}
+	if *archiveSHA256 != "" && *archiveFormat == "" {
+		fmt.Fprintf(stderr, "platform-factory %s: --sha256 requires --archive-format\n", command)
+		return 2
+	}
+	if *archiveFormat != "" {
+		if *archiveFormat != "oci-layout.tar.gz" && *archiveFormat != "docker-save.tar" {
+			fmt.Fprintf(stderr, "platform-factory %s: archive format must be oci-layout.tar.gz or docker-save.tar\n", command)
+			return 2
+		}
+		expectedDigest, err := decodeOptionalSHA256(*archiveSHA256)
+		if err != nil {
+			fmt.Fprintf(stderr, "platform-factory %s: %v\n", command, err)
+			return 2
+		}
+		file, err := os.Open(flags.Arg(0))
+		if err != nil {
+			fmt.Fprintf(stderr, "platform-factory %s: open archive: %v\n", command, err)
+			return 1
+		}
+		hash := sha256.New()
+		var report any
+		tee := io.TeeReader(file, hash)
+		if *archiveFormat == "docker-save.tar" {
+			report, err = dockerarchive.Verify(context.Background(), tee)
+		} else {
+			report, err = layout.VerifyArchive(context.Background(), *archiveFormat, tee)
+		}
+		closeErr := file.Close()
+		if err != nil || closeErr != nil {
+			fmt.Fprintf(stderr, "platform-factory %s: %v\n", command, errors.Join(err, closeErr))
+			return 1
+		}
+		actualDigest := hash.Sum(nil)
+		if expectedDigest != nil && subtle.ConstantTimeCompare(expectedDigest, actualDigest) != 1 {
+			fmt.Fprintf(stderr, "platform-factory %s: archive SHA-256 mismatch: expected %s, got %s\n", command, *archiveSHA256, hex.EncodeToString(actualDigest))
+			return 1
+		}
+		if *outputFormat == "text" {
+			fmt.Fprintf(stdout, "valid: %s archive sha256:%s\n", *archiveFormat, hex.EncodeToString(actualDigest))
+		} else {
+			encoded, _ := json.MarshalIndent(map[string]any{"api_version": cliOutputAPIVersion, "valid": true, "format": *archiveFormat, "sha256": hex.EncodeToString(actualDigest), "report": report}, "", "  ")
+			fmt.Fprintln(stdout, string(encoded))
+		}
+		return 0
+	}
 	report, err := layout.Verify(flags.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory %s: %v\n", command, err)
@@ -257,16 +387,31 @@ func runInspect(command string, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "  %s %s/%s %s\n", platform.Reference, platform.OS, platform.Architecture, platform.Digest)
 		}
 	} else {
-		output, _ := json.MarshalIndent(report, "", "  ")
+		output, _ := json.MarshalIndent(struct {
+			APIVersion string `json:"api_version"`
+			layout.Report
+		}{APIVersion: cliOutputAPIVersion, Report: report}, "", "  ")
 		fmt.Fprintln(stdout, string(output))
 	}
 	return 0
 }
 
-// commandAlias translates a deprecated alias spelling to its canonical
-// command. warning is non-empty exactly when a translation happened, so
-// run can print a deprecation notice without commandAlias itself doing
-// I/O - keeping it a pure function callers can unit-test directly.
+func decodeOptionalSHA256(value string) ([]byte, error) {
+	if value == "" {
+		return nil, nil
+	}
+	value = strings.TrimPrefix(value, "sha256:")
+	if len(value) != sha256.Size*2 {
+		return nil, errors.New("--sha256 must be exactly 64 lowercase hexadecimal characters, optionally prefixed by sha256:")
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || value != strings.ToLower(value) {
+		return nil, errors.New("--sha256 must be exactly 64 lowercase hexadecimal characters, optionally prefixed by sha256:")
+	}
+	return decoded, nil
+}
+
+// commandAlias translates deprecated spellings without performing I/O.
 func commandAlias(args []string) (translated []string, warning string) {
 	if len(args) == 0 {
 		return args, ""
@@ -289,12 +434,40 @@ func commandAlias(args []string) (translated []string, warning string) {
 	return args, ""
 }
 
+func projectBuildInvocation(args []string) bool {
+	return len(args) == 0 || (len(args) == 1 && args[0] == "--dry-run")
+}
+
+// printUsage shows the commands a newcomer actually needs for the
+// init -> build -> publish -> deploy path, plus the everyday
+// status/doctor/run/help commands - not the full ~30-command surface.
+// Progressive disclosure: "platform-factory help --all" (printFullUsage)
+// has everything else. Every "platform-factory COMMAND --help" keeps
+// working exactly as before regardless of which list a user found the
+// command name in.
 func printUsage(output io.Writer) {
+	fmt.Fprintln(output, `platform-factory — build, verify and run hardened OCI applications
+
+Common commands:
+  platform-factory init [DIRECTORY]        turn a source directory into a project
+  platform-factory build                   build the nearest project (or an EXECUTABLE directly)
+  platform-factory run TARGET [ARG...]     run a built image or executable locally
+  platform-factory publish LAYOUT IMAGE    push to a registry, with SBOM/provenance/signatures
+  platform-factory deploy IMAGE            apply a digest-pinned image to Kubernetes
+  platform-factory status [DIRECTORY]      build/publish/deploy state and the next safe command
+  platform-factory doctor                  check local tools, runtimes and hardware support
+  platform-factory help --all              show every command, including advanced/low-level ones
+
+Run "platform-factory COMMAND --help" for a command's own options and examples.`)
+}
+
+func printFullUsage(output io.Writer) {
 	fmt.Fprintln(output, `platform-factory — build, verify and run hardened OCI applications
 
 Usage:
   platform-factory init [--dry-run] [DIRECTORY]
-  platform-factory build [OPTIONS] [--rebuild=N --require-identical] EXECUTABLE
+  platform-factory build [--dry-run]                 # build nearest pf.yaml project
+  platform-factory build [OPTIONS] EXECUTABLE        # low-level executable build
   platform-factory project <show|freeze|build|run> [--config FILE] [DIRECTORY]
   platform-factory plan [--config FILE] [DIRECTORY]
   platform-factory freeze [--config FILE] [DIRECTORY]
@@ -304,7 +477,12 @@ Usage:
   platform-factory diff [--format json|text] LAYOUT_A LAYOUT_B
   platform-factory sbom [--format json|text] PATH [PATH...]
   platform-factory evidence [--plugin-dir DIR] [--reproducible] PIPELINE.json
+  platform-factory plugin-provenance --executable PATH --name NAME [OPTIONS]
   platform-factory pipeline <plan|run> [OPTIONS] PIPELINE.json
+  platform-factory status [--format text|json] [DIRECTORY]
+  platform-factory explain [DIRECTORY]
+  platform-factory logs [--tail N] [--follow]
+  platform-factory events [--tail N]
   platform-factory publish [OPTIONS] LAYOUT IMAGE
   platform-factory verify-release [OPTIONS] LAYOUT
   platform-factory import [--runtime docker|podman] --layout LAYOUT IMAGE
@@ -314,7 +492,7 @@ Usage:
   platform-factory rollback [OPTIONS] NAME
   platform-factory launch [--dry-run] [--config FILE] [DIRECTORY]
   platform-factory launch --isolation=<container|microvm> [RUNTIME OPTIONS]
-  platform-factory microvm <probe|create|start|run|status|logs|restart|stop|delete|package> [OPTIONS]
+  platform-factory microvm <probe|create|start|run|status|logs|restart|stop|delete|rbac|package> [OPTIONS]
   platform-factory completion <bash|zsh|fish|powershell>
   platform-factory doctor [--json]
   platform-factory plugin <load|unload|list> [OPTIONS]
@@ -361,7 +539,8 @@ func runImport(args []string, stdout, stderr io.Writer, execute containerExecuto
 func cliObserver(output io.Writer) func(oci.Event) {
 	return func(event oci.Event) {
 		record := map[string]any{
-			"time": event.Time.Format(time.RFC3339Nano), "level": event.Level,
+			"api_version": cliOutputAPIVersion,
+			"time":        event.Time.Format(time.RFC3339Nano), "level": event.Level,
 			"component": event.Component, "operation": event.Operation,
 			"phase": event.Phase, "trace_id": event.TraceID,
 			"message": event.Message,
@@ -405,7 +584,10 @@ func runCompose(args []string, stdout, stderr io.Writer) int {
 	if *outputFormat == "text" {
 		fmt.Fprintf(stdout, "composed %d manifests and %d blobs -> %s\n", report.Manifests, report.Blobs, report.Path)
 	} else {
-		encoded, _ := json.MarshalIndent(report, "", "  ")
+		encoded, _ := json.MarshalIndent(struct {
+			APIVersion string `json:"api_version"`
+			layout.Report
+		}{APIVersion: cliOutputAPIVersion, Report: report}, "", "  ")
 		fmt.Fprintln(stdout, string(encoded))
 	}
 	return 0
@@ -441,23 +623,69 @@ func executeProjectCommand(name string, args []string, directory string, stdout,
 	return command.Run()
 }
 
-func runContainer(args []string, stdout, stderr io.Writer, execute containerExecutor) int {
+// runFlags is every flag `platform-factory run` accepts, factored out
+// of runContainer so runHasExplicitTarget can parse the exact same
+// definitions to determine whether a positional IMAGE/layout was given
+// - without duplicating the list and risking it drifting out of sync.
+type runFlags struct {
+	runtimeName                     *string
+	cpus, memory, network, hostname *string
+	containerName, layoutName       *string
+	pidsLimit                       *int
+	allowHostNetwork, watch         *bool
+	publishes, dnsServers, addHosts *repeatedFlag
+	volumes, envVars                *repeatedFlag
+}
+
+func newRunFlagSet(output io.Writer) (*flag.FlagSet, *runFlags) {
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	runtimeName := flags.String("runtime", "docker", "container runtime: docker or podman")
-	cpus := flags.String("cpus", "1", "positive CPU limit")
-	memory := flags.String("memory", "128m", "non-empty runtime memory limit")
-	pidsLimit := flags.Int("pids-limit", 128, "positive process limit")
-	network := flags.String("network", "none", "network mode or named runtime network")
-	allowHostNetwork := flags.Bool("allow-host-network", false, "explicitly accept host network namespace sharing")
-	hostname := flags.String("hostname", "", "container hostname")
-	layoutName := flags.String("layout", "", "verified local OCI layout to import automatically when needed")
-	var publishes, dnsServers, addHosts repeatedFlag
-	flags.Var(&publishes, "publish", "publish [IP:]HOST:CONTAINER[/tcp|udp]; repeatable")
-	flags.Var(&publishes, "port", "alias for --publish; repeatable")
-	flags.Var(&publishes, "p", "short alias for --publish; repeatable")
-	flags.Var(&dnsServers, "dns", "DNS server IPv4/IPv6 address; repeatable")
-	flags.Var(&addHosts, "add-host", "static NAME:IP host entry; repeatable")
+	flags.SetOutput(output)
+	values := &runFlags{
+		publishes: &repeatedFlag{}, dnsServers: &repeatedFlag{}, addHosts: &repeatedFlag{},
+		volumes: &repeatedFlag{}, envVars: &repeatedFlag{},
+	}
+	values.runtimeName = flags.String("runtime", "docker", "container runtime: docker or podman")
+	values.cpus = flags.String("cpus", "1", "positive CPU limit")
+	values.memory = flags.String("memory", "128m", "non-empty runtime memory limit")
+	values.pidsLimit = flags.Int("pids-limit", 128, "positive process limit")
+	values.network = flags.String("network", "none", "network mode or named runtime network")
+	values.allowHostNetwork = flags.Bool("allow-host-network", false, "explicitly accept host network namespace sharing")
+	values.hostname = flags.String("hostname", "", "container hostname")
+	values.containerName = flags.String("name", "", "container name")
+	values.layoutName = flags.String("layout", "", "verified local OCI layout to import automatically when needed")
+	values.watch = flags.Bool("watch", false, "only valid with no IMAGE argument: discover the project in the current directory and keep rebuilding/restarting it whenever a source file changes (same as `pf project run --watch`)")
+	flags.Var(values.publishes, "publish", "publish [IP:]HOST:CONTAINER[/tcp|udp]; repeatable")
+	flags.Var(values.publishes, "port", "alias for --publish; repeatable")
+	flags.Var(values.publishes, "p", "short alias for --publish; repeatable")
+	flags.Var(values.dnsServers, "dns", "DNS server IPv4/IPv6 address; repeatable")
+	flags.Var(values.addHosts, "add-host", "static NAME:IP host entry; repeatable")
+	flags.Var(values.volumes, "volume", "HOST:CONTAINER[:ro|rw] bind mount; repeatable")
+	flags.Var(values.volumes, "v", "short alias for --volume; repeatable")
+	flags.Var(values.envVars, "env", "NAME=VALUE or bare NAME (inherited from this process's own environment); repeatable")
+	flags.Var(values.envVars, "e", "short alias for --env; repeatable")
+	return flags, values
+}
+
+// runHasExplicitTarget reports whether args (platform-factory run's own
+// argument list, after "run" itself) names a positional IMAGE/layout -
+// parsed with runContainer's own flag definitions so a value-taking
+// flag given as two separate args (e.g. "--memory 128m") is never
+// mistaken for the target. A parse error is treated as "yes" so the
+// real, detailed error still comes from runContainer itself rather
+// than being swallowed here.
+func runHasExplicitTarget(args []string) bool {
+	flags, _ := newRunFlagSet(io.Discard)
+	if err := flags.Parse(args); err != nil {
+		return true
+	}
+	return flags.NArg() >= 1
+}
+
+func runContainer(args []string, stdout, stderr io.Writer, execute containerExecutor) int {
+	flags, values := newRunFlagSet(stderr)
+	runtimeName, cpus, memory, pidsLimit := values.runtimeName, values.cpus, values.memory, values.pidsLimit
+	network, allowHostNetwork, hostname := values.network, values.allowHostNetwork, values.hostname
+	containerName, layoutName := values.containerName, values.layoutName
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -465,9 +693,16 @@ func runContainer(args []string, stdout, stderr io.Writer, execute containerExec
 		return 2
 	}
 	if flags.NArg() < 1 {
+		fmt.Fprintln(stderr, "platform-factory run: an IMAGE or local OCI layout is required")
 		flags.Usage()
 		return 2
 	}
+	if *values.watch {
+		fmt.Fprintln(stderr, "platform-factory run: --watch is not valid with an explicit IMAGE/layout - drop the argument to watch the project in the current directory, or use `pf project run --watch`")
+		return 2
+	}
+	publishes, dnsServers, addHosts := *values.publishes, *values.dnsServers, *values.addHosts
+	volumes, envVars := *values.volumes, *values.envVars
 	if *runtimeName != "docker" && *runtimeName != "podman" {
 		fmt.Fprintln(stderr, "platform-factory run: runtime must be docker or podman")
 		return 2
@@ -493,6 +728,10 @@ func runContainer(args []string, stdout, stderr io.Writer, execute containerExec
 		fmt.Fprintf(stderr, "platform-factory run: %v\n", err)
 		return 2
 	}
+	if *containerName != "" && !validContainerName(*containerName) {
+		fmt.Fprintln(stderr, "platform-factory run: name must match [a-zA-Z0-9][a-zA-Z0-9_.-]*")
+		return 2
+	}
 	if *network == "none" && len(publishes) > 0 {
 		fmt.Fprintln(stderr, "platform-factory run: publish cannot be used with network=none")
 		return 2
@@ -515,10 +754,33 @@ func runContainer(args []string, stdout, stderr io.Writer, execute containerExec
 			return 2
 		}
 	}
+	for _, value := range volumes {
+		if err := validVolumeSpec(value); err != nil {
+			fmt.Fprintf(stderr, "platform-factory run: %v\n", err)
+			return 2
+		}
+	}
+	for _, value := range envVars {
+		if err := validEnvSpec(value); err != nil {
+			fmt.Fprintf(stderr, "platform-factory run: %v\n", err)
+			return 2
+		}
+	}
 	image := flags.Arg(0)
 	if strings.HasPrefix(image, "-") || strings.ContainsRune(image, 0) {
 		fmt.Fprintln(stderr, "platform-factory run: invalid image reference")
 		return 2
+	}
+	// A real OCI/Docker image reference never starts with "." or "/" (its
+	// own reference grammar forbids it), so a target that does is always
+	// meant as a local path - if nothing exists there, say so clearly
+	// instead of forwarding a path-shaped string straight to `docker run`,
+	// which only ever reports a confusing "invalid reference format".
+	if (strings.HasPrefix(image, ".") || strings.HasPrefix(image, "/")) && *layoutName == "" {
+		if _, err := os.Stat(image); errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stderr, "platform-factory run: %q looks like a local path, but nothing exists there - run `pf build`/`pf project build` first, or pass a real image reference\n", image)
+			return 1
+		}
 	}
 	if *layoutName != "" || localLayoutPath(image) {
 		prepared, err := prepareContainerImage(*runtimeName, image, *layoutName, stderr, execute)
@@ -538,6 +800,9 @@ func runContainer(args []string, stdout, stderr io.Writer, execute containerExec
 	if *hostname != "" {
 		runtimeArgs = append(runtimeArgs, "--hostname="+*hostname)
 	}
+	if *containerName != "" {
+		runtimeArgs = append(runtimeArgs, "--name="+*containerName)
+	}
 	for _, value := range publishes {
 		runtimeArgs = append(runtimeArgs, "--publish="+value)
 	}
@@ -546,6 +811,12 @@ func runContainer(args []string, stdout, stderr io.Writer, execute containerExec
 	}
 	for _, value := range addHosts {
 		runtimeArgs = append(runtimeArgs, "--add-host="+value)
+	}
+	for _, value := range volumes {
+		runtimeArgs = append(runtimeArgs, "--volume="+value)
+	}
+	for _, value := range envVars {
+		runtimeArgs = append(runtimeArgs, "--env="+value)
 	}
 	runtimeArgs = append(runtimeArgs, image)
 	runtimeArgs = append(runtimeArgs, flags.Args()[1:]...)
@@ -560,6 +831,64 @@ func runContainer(args []string, stdout, stderr io.Writer, execute containerExec
 	return 0
 }
 
+// validContainerName matches docker/podman's own accepted container name
+// shape: [a-zA-Z0-9][a-zA-Z0-9_.-]*.
+func validContainerName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index, r := range value {
+		alnum := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		if index == 0 {
+			if !alnum {
+				return false
+			}
+			continue
+		}
+		if !alnum && r != '_' && r != '.' && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// validVolumeSpec validates structure; the runtime validates mount options.
+func validVolumeSpec(value string) error {
+	if strings.ContainsRune(value, 0) {
+		return fmt.Errorf("invalid --volume %q: contains a NUL byte", value)
+	}
+	parts := strings.SplitN(value, ":", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("invalid --volume %q: want HOST:CONTAINER[:OPTIONS]", value)
+	}
+	return nil
+}
+
+// validEnvSpec accepts NAME=VALUE and runtime-forwarded NAME forms.
+func validEnvSpec(value string) error {
+	if value == "" || strings.ContainsRune(value, 0) {
+		return fmt.Errorf("invalid --env %q: must be non-empty and NUL-free", value)
+	}
+	name, _, _ := strings.Cut(value, "=")
+	if name == "" {
+		return fmt.Errorf("invalid --env %q: variable name must not be empty", value)
+	}
+	return nil
+}
+
+// containsHelpFlag reports whether args asks for help anywhere, so a
+// command can print a curated description + examples before its flag
+// defaults instead of falling through to flag.FlagSet's bare alphabetical
+// dump (the stdlib default -h/--help behavior).
+func containsHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
 type repeatedFlag []string
 
 func (f *repeatedFlag) String() string { return "" }
@@ -568,25 +897,30 @@ func (f *repeatedFlag) Set(value string) error {
 	return nil
 }
 
-// runBuildWithContext wraps runBuild with context support for trace_id propagation.
-// Sanetizer-todo item 18: End-to-end trace correlation - COMPLETE
-func runBuildWithContext(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	// Extract trace_id from context for propagation to internal functions
-	// If context has a trace_id, use it; otherwise create a new one
-	traceID := observability.TraceIDFromContext(ctx)
-	if traceID == "" {
-		traceID = observability.NewTraceID("cli", "build").String()
-	}
+func printBuildUsage(output io.Writer, flags *flag.FlagSet) {
+	fmt.Fprintln(output, `platform-factory build — build a verified, reproducible OCI layout from a single executable
 
-	// Create a new context with the trace_id for any internal calls that support it
-	// and set it as an environment variable for functions that read from env
-	ctx = observability.ContextWithTraceID(ctx, traceID)
+Usage:
+  platform-factory build [OPTIONS] EXECUTABLE
+  platform-factory build [OPTIONS] --platform linux/ARCH=EXECUTABLE [--platform ...]
 
-	// Pass context to runBuild
-	return runBuild(ctx, args, stdout, stderr)
+Inside a pf.yaml project, prefer "platform-factory build" with no
+EXECUTABLE argument - it builds the nearest project instead of this
+low-level, single-binary form.
+
+Examples:
+  platform-factory build --output oci-image ./hello
+  platform-factory build --dist dist --reports reports ./hello
+  platform-factory build --rebuild 3 --require-identical ./hello
+  platform-factory build --platform linux/amd64=./hello-amd64 --platform linux/arm64=./hello-arm64
+
+Options:`)
+	flags.SetOutput(output)
+	flags.PrintDefaults()
 }
 
 func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	startedAt := time.Now()
 	flags := flag.NewFlagSet("build", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	var output string
@@ -606,16 +940,39 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	outputFormat := flags.String("format", "json", "result format: json or text")
 	semanticLayers := flags.Bool("semantic-layers", false, "write one layer per toolchain/dependencies/application/metadata category")
 	dryRun := flags.Bool("dry-run", false, "validate inputs and print the planned build without writing the layout")
+	yes := flags.Bool("yes", false, "skip the interactive image reference confirmation")
 	rebuild := flags.Int("rebuild", 1, "build the target this many times in fresh directories and compare every layout for reproducibility")
 	requireIdentical := flags.Bool("require-identical", false, "with --rebuild, fail and report the divergence if the layouts are not byte-identical")
 	var extras, labels repeatedFlag
 	flags.Var(&extras, "extra-file", "additional [CATEGORY@]/container/path=host/path; repeatable")
 	flags.Var(&labels, "label", "image label key=value; repeatable")
+	distDir := flags.String("dist", "", "write the layout to DIST/oci-layout (unless --output/-o is also given) plus DIST/sbom.json")
+	reportsDir := flags.String("reports", "", "write REPORTS/build.json (and REPORTS/reproducibility.json with --rebuild) after a successful build")
+	signKeyDir := flags.String("sign-key-dir", "", "sign release evidence with an Ed25519 key stored in DIR")
+	signKeyName := flags.String("sign-key-name", "release", "signing key name used with --sign-key-dir")
+	maxWallClock := flags.Duration("max-wall-clock", 0, "maximum build wall-clock duration, for example 30s or 2m (0 disables)")
+	maxCPU := flags.Duration("max-cpu", 0, "maximum build CPU duration, for example 30s (0 disables)")
+	maxMemory := flags.String("max-memory", "0", "maximum process heap during build, for example 512MiB or 2GiB (0 disables)")
+	if containsHelpFlag(args) {
+		printBuildUsage(stdout, flags)
+		return 0
+	}
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
+	}
+	if *distDir != "" {
+		outputExplicit := false
+		flags.Visit(func(f *flag.Flag) {
+			if f.Name == "output" || f.Name == "o" {
+				outputExplicit = true
+			}
+		})
+		if !outputExplicit {
+			output = filepath.Join(*distDir, "oci-layout")
+		}
 	}
 	createdAt, err := time.Parse(time.RFC3339, *createdName)
 	if err != nil {
@@ -624,6 +981,26 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	if *outputFormat != "json" && *outputFormat != "text" {
 		fmt.Fprintln(stderr, "platform-factory build: format must be json or text")
+		return 2
+	}
+	if !*dryRun && !*yes && isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd()) {
+		confirmed, err := buildtui.Confirm(*imageName, *tagName)
+		if err != nil {
+			fmt.Fprintf(stderr, "platform-factory build: confirm image reference: %v\n", err)
+			return 1
+		}
+		if !confirmed.Confirmed {
+			fmt.Fprintln(stderr, "platform-factory build: canceled")
+			return 1
+		}
+		*imageName, *tagName = confirmed.Image, confirmed.Tag
+	}
+	memoryLimit, err := parseByteLimit(*maxMemory)
+	if err != nil || *maxWallClock < 0 || *maxCPU < 0 {
+		if err == nil {
+			err = errors.New("time budgets cannot be negative")
+		}
+		fmt.Fprintf(stderr, "platform-factory build: invalid resource budget: %v\n", err)
 		return 2
 	}
 	parsedLabels, err := oci.LabelsFromPairs(labels)
@@ -653,17 +1030,7 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			extraFiles = append(extraFiles, oci.ExtraFile{Dest: systemFile.destination, Source: systemFile.source, Mode: 0o444})
 		}
 	}
-	// Sanetizer-todo item 18: Extract trace_id from context for end-to-end correlation
-	// Try context first, then environment variable, then generate new
-	traceID := observability.TraceIDFromContext(ctx)
-	if traceID == "" {
-		traceID = os.Getenv("PLATFORM_FACTORY_TRACE_ID")
-		if traceID == "" {
-			var trace [16]byte
-			_, _ = rand.Read(trace[:])
-			traceID = hex.EncodeToString(trace[:])
-		}
-	}
+	traceID := observability.TraceIDFromContext(commandContext(ctx, "build"))
 	targets, code, err := buildTargets(platforms, flags.Args(), *osName, *architecture)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory build: %v\n", err)
@@ -675,6 +1042,7 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		created: createdAt, labels: parsedLabels, extraFiles: extraFiles,
 		config: config, traceID: traceID, observer: cliObserver(stderr),
 		semanticLayers: *semanticLayers || config.SemanticLayers,
+		budget:         budget.Budget{WallClock: *maxWallClock, CPU: *maxCPU, Memory: memoryLimit},
 	}
 	if *dryRun {
 		planned := make([]map[string]any, 0, len(targets))
@@ -690,8 +1058,10 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			})
 		}
 		result, _ := json.MarshalIndent(map[string]any{
-			"dry_run": true, "layout": output, "reference": *imageName + ":" + *tagName,
-			"platforms": planned, "semantic_layers": settings.semanticLayers, "valid": true,
+			"api_version": cliOutputAPIVersion,
+			"dry_run":     true, "layout": output, "reference": *imageName + ":" + *tagName,
+			"platforms": planned, "semantic_layers": settings.semanticLayers,
+			"resource_budget": resourceBudgetPlan(settings.budget), "valid": true,
 		}, "", "  ")
 		fmt.Fprintln(stdout, string(result))
 		return 0
@@ -705,7 +1075,7 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			fmt.Fprintln(stderr, "platform-factory build: --rebuild verifies a single target; run one --platform at a time")
 			return 2
 		}
-		return runReproducibleBuild(targets[0], output, settings, *rebuild, *requireIdentical, *outputFormat, stdout, stderr)
+		return runReproducibleBuild(targets[0], output, settings, *rebuild, *requireIdentical, *outputFormat, *distDir, *reportsDir, stdout, stderr)
 	}
 	results := make([]map[string]any, 0, len(targets))
 	if len(targets) == 1 {
@@ -743,12 +1113,49 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		}
 	}
 	result := map[string]any{
-		"layout": output, "reference": *imageName + ":" + *tagName,
+		"api_version": cliOutputAPIVersion,
+		"layout":      output, "reference": *imageName + ":" + *tagName,
 		"platforms": results, "valid": true,
 	}
 	if len(results) == 1 {
 		for key, value := range results[0] {
 			result[key] = value
+		}
+	}
+	if *reportsDir != "" {
+		if err := writeReportJSON(*reportsDir, "build.json", result); err != nil {
+			fmt.Fprintf(stderr, "platform-factory build: write build report: %v\n", err)
+			return 1
+		}
+	}
+	if *distDir != "" && len(targets) == 1 {
+		if err := writeSBOMToDist(*distDir, targets[0], settings); err != nil {
+			fmt.Fprintf(stderr, "platform-factory build: write SBOM: %v\n", err)
+			return 1
+		}
+	}
+	if len(targets) == 1 && (*distDir != "" || *reportsDir != "") {
+		if err := writeBuildEvidence(*distDir, *reportsDir, *signKeyDir, *signKeyName, result, targets[0], settings); err != nil {
+			fmt.Fprintf(stderr, "platform-factory build: write release evidence: %v\n", err)
+			return 1
+		}
+	}
+	if *reportsDir != "" {
+		verified, verifyErr := layout.Verify(output)
+		if verifyErr != nil {
+			fmt.Fprintf(stderr, "platform-factory build: collect metrics: %v\n", verifyErr)
+			return 1
+		}
+		metrics := map[string]any{
+			"api_version": "platform-factory.dev/metrics/v1",
+			"operation":   "build", "trace_id": settings.traceID,
+			"duration_ms": time.Since(startedAt).Milliseconds(),
+			"platforms":   len(verified.Platforms), "manifests": verified.Manifests,
+			"blobs": verified.Blobs, "success": true,
+		}
+		if err := writeReportJSON(*reportsDir, "metrics.json", metrics); err != nil {
+			fmt.Fprintf(stderr, "platform-factory build: write metrics: %v\n", err)
+			return 1
 		}
 	}
 	if *outputFormat == "text" {
@@ -767,6 +1174,14 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	return 0
 }
 
+func resourceBudgetPlan(value budget.Budget) map[string]any {
+	return map[string]any{
+		"max_wall_clock":   value.WallClock.String(),
+		"max_cpu":          value.CPU.String(),
+		"max_memory_bytes": value.Memory,
+	}
+}
+
 type buildTarget struct {
 	os, architecture, input string
 }
@@ -779,6 +1194,32 @@ type buildSettings struct {
 	config                                                oci.BuildConfig
 	observer                                              func(oci.Event)
 	semanticLayers                                        bool
+	budget                                                budget.Budget
+}
+
+func parseByteLimit(value string) (int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, errors.New("memory budget must not be empty")
+	}
+	multipliers := map[string]int64{"": 1, "B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30}
+	suffix := ""
+	for _, candidate := range []string{"KiB", "MiB", "GiB", "B"} {
+		if strings.HasSuffix(value, candidate) {
+			suffix = candidate
+			value = strings.TrimSuffix(value, candidate)
+			break
+		}
+	}
+	number, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || number < 0 {
+		return 0, errors.New("memory budget must be a non-negative integer with optional B, KiB, MiB, or GiB suffix")
+	}
+	multiplier := multipliers[suffix]
+	if number > (1<<63-1)/multiplier {
+		return 0, errors.New("memory budget overflows int64")
+	}
+	return number * multiplier, nil
 }
 
 func buildTargets(platforms, positional []string, defaultOS, defaultArchitecture string) ([]buildTarget, int, error) {
@@ -824,9 +1265,7 @@ func parsePlatform(value string) (string, string, error) {
 	return parts[0], parts[1], nil
 }
 
-// resolveBuildTarget runs input detection and entrypoint/profile
-// resolution without side effects, so the same logic backs both the
-// real build and --dry-run.
+// resolveBuildTarget is the shared side-effect-free build planner.
 func resolveBuildTarget(target buildTarget, settings buildSettings) (string, string, error) {
 	detected, err := detect.Path(target.input)
 	if err != nil {
@@ -871,6 +1310,7 @@ func buildCLIImage(target buildTarget, output string, settings buildSettings) (m
 		Healthcheck: settings.config.Healthcheck, TraceID: settings.traceID,
 		Compression: settings.compression, Observer: settings.observer,
 		SemanticLayers: settings.semanticLayers,
+		Budget:         settings.budget,
 	})
 	if err != nil {
 		return nil, 1, err
@@ -881,13 +1321,8 @@ func buildCLIImage(target buildTarget, output string, settings buildSettings) (m
 	}, 0, nil
 }
 
-// runReproducibleBuild builds target rebuilds times into fresh
-// directories that cannot reuse each other's output, compares every
-// layout against the first with layout.Diff, and reports the result. On
-// reproducible output the first layout is installed at output; on
-// divergence it emits a structured report of the differing descriptors
-// and, under requireIdentical, fails without installing anything.
-func runReproducibleBuild(target buildTarget, output string, settings buildSettings, rebuilds int, requireIdentical bool, outputFormat string, stdout, stderr io.Writer) int {
+// runReproducibleBuild compares isolated builds and installs only identical output.
+func runReproducibleBuild(target buildTarget, output string, settings buildSettings, rebuilds int, requireIdentical bool, outputFormat, distDir, reportsDir string, stdout, stderr io.Writer) int {
 	if _, err := os.Stat(output); err == nil {
 		fmt.Fprintf(stderr, "platform-factory build: output already exists: %s\n", output)
 		return 1
@@ -935,13 +1370,19 @@ func runReproducibleBuild(target buildTarget, output string, settings buildSetti
 			fmt.Fprintf(stderr, "platform-factory build: install layout: %v\n", err)
 			return 1
 		}
+		if distDir != "" {
+			if err := writeSBOMToDist(distDir, target, settings); err != nil {
+				fmt.Fprintf(stderr, "platform-factory build: write SBOM: %v\n", err)
+				return 1
+			}
+		}
 	}
 	return emitRebuildResult(rebuildOutcome{
 		reference: settings.image + ":" + settings.tag,
 		platform:  target.os + "/" + target.architecture,
 		rebuilds:  rebuilds, digest: digests[0], output: output,
 		divergences: divergences, requireIdentical: requireIdentical,
-	}, outputFormat, stdout, stderr)
+	}, outputFormat, reportsDir, stdout, stderr)
 }
 
 type rebuildOutcome struct {
@@ -951,13 +1392,12 @@ type rebuildOutcome struct {
 	requireIdentical                    bool
 }
 
-// emitRebuildResult renders the reproducibility outcome and returns the
-// process exit code: 0 when reproducible or when a divergence is only
-// reported, 1 when a divergence is found under --require-identical.
-func emitRebuildResult(outcome rebuildOutcome, outputFormat string, stdout, stderr io.Writer) int {
+// emitRebuildResult reports divergence and enforces requireIdentical.
+func emitRebuildResult(outcome rebuildOutcome, outputFormat, reportsDir string, stdout, stderr io.Writer) int {
 	reproducible := len(outcome.divergences) == 0
 	result := map[string]any{
-		"reference": outcome.reference, "platform": outcome.platform,
+		"api_version": cliOutputAPIVersion,
+		"reference":   outcome.reference, "platform": outcome.platform,
 		"rebuilds": outcome.rebuilds, "reproducible": reproducible,
 		"digest": outcome.digest, "valid": true,
 	}
@@ -965,6 +1405,12 @@ func emitRebuildResult(outcome rebuildOutcome, outputFormat string, stdout, stde
 		result["layout"] = outcome.output
 	} else {
 		result["divergences"] = outcome.divergences
+	}
+	if reportsDir != "" {
+		if err := writeReportJSON(reportsDir, "reproducibility.json", result); err != nil {
+			fmt.Fprintf(stderr, "platform-factory build: write reproducibility report: %v\n", err)
+			return 1
+		}
 	}
 	if outputFormat == "text" {
 		if reproducible {
@@ -987,10 +1433,134 @@ func emitRebuildResult(outcome rebuildOutcome, outputFormat string, stdout, stde
 	return 0
 }
 
+// writeReportJSON writes data as pretty-printed JSON to dir/name,
+// creating dir if needed - the "reports/" side of v6.4's "Sorties"
+// contract (build.json, reproducibility.json), reusing the exact result
+// map already computed for stdout rather than a second representation.
+func writeReportJSON(dir, name string, data any) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	encoded, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
+	return atomicfile.Write(dir, name, encoded, 0o644, true)
+}
+
+// writeSBOMToDist generates a native SBOM (internal/sbom) over exactly
+// the files this build actually embedded - the resolved entrypoint plus
+// every --extra-file - and writes it to dist/sbom.json. This is the
+// build's own real inputs, not a guess: the same paths oci.Build itself
+// just read.
+func writeSBOMToDist(distDir string, target buildTarget, settings buildSettings) error {
+	entrypoint, _, err := resolveBuildTarget(target, settings)
+	if err != nil {
+		return err
+	}
+	paths := map[string]string{entrypoint: target.input}
+	for _, extra := range settings.extraFiles {
+		paths[extra.Dest] = extra.Source
+	}
+	document, err := sbom.Generate(paths)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(distDir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", distDir, err)
+	}
+	file, err := os.Create(filepath.Join(distDir, "sbom.json"))
+	if err != nil {
+		return err
+	}
+	writeErr := sbom.Write(file, document)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
+}
+
+func writeBuildEvidence(distDir, reportsDir, signKeyDir, signKeyName string, result map[string]any, target buildTarget, settings buildSettings) error {
+	digest, _ := result["digest"].(string)
+	if digest == "" {
+		return errors.New("build result has no subject digest")
+	}
+	provenance := map[string]any{
+		"api_version": "platform-factory.dev/provenance/v1", "builder": "platform-factory/" + version,
+		"subject_digest": digest, "platform": target.os + "/" + target.architecture,
+		"entrypoint": settings.entrypoint, "created": settings.created.UTC().Format(time.RFC3339),
+	}
+	if distDir != "" {
+		if err := writeReportJSON(distDir, "provenance.json", provenance); err != nil {
+			return err
+		}
+		if signKeyDir != "" {
+			store, err := signing.NewFileKeyStore(signKeyDir)
+			if err != nil {
+				return err
+			}
+			publicKey, err := store.PublicKey(signKeyName)
+			if err != nil {
+				return err
+			}
+			keyID := "ed25519:" + base64.RawURLEncoding.EncodeToString(publicKey)
+			provenanceEnvelope, err := attestation.Sign(store, signKeyName, keyID, "application/vnd.in-toto+json", provenance)
+			if err != nil {
+				return err
+			}
+			if err := writeReportJSON(filepath.Join(distDir, "attestations"), "provenance.dsse.json", provenanceEnvelope); err != nil {
+				return err
+			}
+			subjectEnvelope, err := attestation.Sign(store, signKeyName, keyID,
+				"application/vnd.platform-factory.subject.v1+json",
+				map[string]string{"digest": digest, "reference": settings.image + ":" + settings.tag})
+			if err != nil {
+				return err
+			}
+			if err := writeReportJSON(filepath.Join(distDir, "signatures"), "subject.dsse.json", subjectEnvelope); err != nil {
+				return err
+			}
+		}
+	}
+	evidence := policy.Evidence{
+		SubjectDigest: digest, NonRoot: true, ReadOnlyRootFS: true,
+		CapabilitiesDropped: true, SecretsAbsent: true, SBOM: distDir != "",
+		Provenance: distDir != "", Signature: signKeyDir != "", Reproducible: true,
+	}
+	rules := policy.Rules{
+		APIVersion: policy.APIVersion, RequireHardening: true,
+		RequireSBOM: distDir != "", RequireProvenance: distDir != "",
+		RequireReproducible: true,
+	}
+	decision, err := policy.Evaluate(rules, evidence)
+	if err != nil {
+		return err
+	}
+	if reportsDir != "" {
+		if err := writeReportJSON(reportsDir, "policy-rules.json", rules); err != nil {
+			return err
+		}
+		if err := writeReportJSON(reportsDir, "evidence.json", evidence); err != nil {
+			return err
+		}
+		if err := writeReportJSON(reportsDir, "policy.json", map[string]any{
+			"rules": rules, "evidence": evidence, "decision": decision,
+		}); err != nil {
+			return err
+		}
+		summary := fmt.Sprintf("Build complete\nSubject: %s\nPlatform: %s/%s\nPolicy: allowed=%t\n",
+			digest, target.os, target.architecture, decision.Allowed)
+		if err := atomicfile.Write(reportsDir, "summary.txt", []byte(summary), 0o644, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func main() {
-	// The sandboxed and memory-limited executors, and sandboxed plugin
-	// subprocesses, re-exec this binary as their helper; these
-	// interceptors must run before any other work.
+	// Re-exec helpers must intercept before normal CLI work.
 	executor.MaybeApplyRlimitHelper()
 	executor.MaybeApplySandboxHelper(networking.ServeDNSRelay)
 	plugin.MaybeApplyPluginSandboxHelper()

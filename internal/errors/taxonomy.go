@@ -3,24 +3,8 @@ package errors
 import (
 	"context"
 
-	"github.com/CYPT71/secure-oci-base/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/observability"
 )
-
-// This file adds the two pieces Sanetize-Stabilisation/Sanetizer-todo.md
-// items 16-17 ask for that errors.go's existing typed-error model didn't
-// yet have: a retryable/permanent classification per error code, and a
-// stable process exit code per error code. trace_id (item 18) piggybacks
-// on the same TraceID/WithTraceID pair rather than a new mechanism.
-//
-// New in this update: WithObservabilityTraceID for integrating with the
-// observability package's TraceID type (item 18 propagation).
-//
-// Deliberately NOT done here: wiring ExitCode into every CLI command in
-// cmd/platform-factory (dozens of handlers, each currently returning a
-// hardcoded int) and propagating trace_id from CLI -> service -> plugin
-// -> runtime -> evidence -> journal (item 18's full path) - both are
-// real, separately-scoped efforts, not something to rush as part of
-// defining the taxonomy itself.
 
 // retryableByCode classifies each error code as transient (safe to retry
 // the same operation unmodified) or permanent (retrying without changing
@@ -60,7 +44,6 @@ func Retryable(err error) bool {
 }
 
 // exitCodeByCode maps each error code to the stable process exit code
-// defined by Sanetizer-todo.md item 17. Codes not listed here fall back
 // to 1 (ExitCode's default), the generic failure exit code this codebase
 // already uses throughout cmd/platform-factory - these specific codes
 // exist for scripts and CI to branch on a known failure category, not to
@@ -100,10 +83,7 @@ func ExitCode(err error) int {
 	return 1
 }
 
-// TraceID returns the trace ID attached to err via WithTraceID, or "" if
-// none was attached. This is item 18's per-error half of trace_id
-// propagation - carrying an already-assigned trace ID through an error
-// value, not assigning one in the first place.
+// TraceID returns the trace ID attached by WithTraceID, or "".
 func TraceID(err error) string {
 	switch e := err.(type) {
 	case *baseError:

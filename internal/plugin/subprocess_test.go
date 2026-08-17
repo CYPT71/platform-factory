@@ -79,7 +79,7 @@ var demoPluginPath = sync.OnceValues(func() (string, error) {
 		return "", err
 	}
 	binary := filepath.Join(dir, "platform-factory-plugin-demo")
-	cmd := exec.Command("go", "build", "-o", binary, "github.com/CYPT71/secure-oci-base/cmd/platform-factory-plugin-demo")
+	cmd := exec.Command("go", "build", "-o", binary, "github.com/CYPT71/platform-factory/cmd/platform-factory-plugin-demo")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("build demo plugin: %w: %s", err, output)
 	}
@@ -126,7 +126,9 @@ func TestClientRefusesWhenSandboxUnavailableUnlessPolicyAllowsDegradation(t *tes
 		t.Fatalf("build demo plugin: %v", err)
 	}
 	original := pluginSandboxWrapper
-	pluginSandboxWrapper = func(*exec.Cmd) error { return errors.New("sandbox unavailable (stub)") }
+	pluginSandboxWrapper = func(*exec.Cmd, PluginFamily, PluginPermissions) error {
+		return errors.New("sandbox unavailable (stub)")
+	}
 	defer func() { pluginSandboxWrapper = original }()
 
 	if client, err := Start(context.Background(), binary, nil, nil); err == nil {
@@ -150,7 +152,7 @@ func TestClientRefusesWhenSandboxUnavailableUnlessPolicyAllowsDegradation(t *tes
 
 func TestStartReportsSandboxedAndFallbackExecFailures(t *testing.T) {
 	original := pluginSandboxWrapper
-	pluginSandboxWrapper = func(*exec.Cmd) error { return nil }
+	pluginSandboxWrapper = func(*exec.Cmd, PluginFamily, PluginPermissions) error { return nil }
 	defer func() { pluginSandboxWrapper = original }()
 
 	missing := filepath.Join(t.TempDir(), "missing-plugin")

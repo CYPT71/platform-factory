@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 // TestMain is required by MaybeApplyRlimitHelper's documented contract:

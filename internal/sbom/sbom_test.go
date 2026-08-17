@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/assemble"
-	"github.com/CYPT71/secure-oci-base/internal/cache"
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/assemble"
+	"github.com/CYPT71/platform-factory/internal/cache"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 func testPipelineWithOneOutput() core.Pipeline {

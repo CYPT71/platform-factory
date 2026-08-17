@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	appmigration "github.com/CYPT71/secure-oci-base/internal/app/migration"
+	appmigration "github.com/CYPT71/platform-factory/internal/app/migration"
 )
 
 func TestDiscoverAndRegister(t *testing.T) {

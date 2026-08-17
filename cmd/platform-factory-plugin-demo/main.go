@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	plugin "github.com/CYPT71/secure-oci-base/sdk/plugin"
+	plugin "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 type extension struct{}

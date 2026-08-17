@@ -8,9 +8,9 @@ import (
 	"sync"
 	"testing"
 
-	appmigration "github.com/CYPT71/secure-oci-base/internal/app/migration"
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
+	appmigration "github.com/CYPT71/platform-factory/internal/app/migration"
+	"github.com/CYPT71/platform-factory/internal/core"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
 )
 
 const migrationTestDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -161,5 +161,58 @@ func TestMigrationExecutionStoreRejectsCancelledContext(t *testing.T) {
 	cancel()
 	if err := store.RecordExecution(ctx, validMigrationEvidence("migration-cancelled")); err == nil {
 		t.Fatal("cancelled persistence accepted")
+	}
+}
+
+func TestMigrationWorkflowStorePersistsCompleteHostEvidence(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewMigrationExecutionStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := appmigration.WorkflowEvidence{
+		TraceID: "trace-workflow", SourcePluginID: "plugin-a", SourcePluginDigest: migrationTestDigest, SourceCapability: "migration.discover",
+		CanonicalGraphDigest: migrationTestDigest, PlanDigest: migrationTestDigest,
+		SourceResourceIDs: []string{"database", "api"}, TargetResourceIDs: []string{"api", "database"},
+		TargetPluginIDs: []string{"plugin-b"}, TargetPluginDigests: []string{migrationTestDigest},
+		RequestedCapabilities: []string{"compute"}, ResolvedCapabilities: []string{"compute"}, VerifiedCapabilities: []string{"compute"},
+		OperationIDs: []string{"migration-operation-b", "migration-operation-a"}, ObservationCount: 4, VerificationCount: 4, FinalState: "verified",
+	}
+	if err := store.RecordWorkflow(context.Background(), evidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordWorkflow(context.Background(), evidence); err != nil {
+		t.Fatalf("idempotent replay: %v", err)
+	}
+	reloaded, err := NewMigrationExecutionStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := reloaded.WorkflowRecords()
+	if len(records) != 1 || records[0].SourceResourceIDs[0] != "api" || records[0].OperationIDs[0] != "migration-operation-a" || records[0].FinalState != "verified" {
+		t.Fatalf("records=%+v", records)
+	}
+	conflict := evidence
+	conflict.FinalState = "failed"
+	if err := reloaded.RecordWorkflow(context.Background(), conflict); err == nil || !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("conflict=%v", err)
+	}
+}
+
+func TestMigrationWorkflowStoreRejectsFalseOrSecretEvidence(t *testing.T) {
+	store, err := NewMigrationExecutionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := appmigration.WorkflowEvidence{TraceID: "trace", SourcePluginID: "plugin-a", SourcePluginDigest: migrationTestDigest, SourceCapability: "migration.discover", CanonicalGraphDigest: migrationTestDigest, PlanDigest: migrationTestDigest, SourceResourceIDs: []string{"a"}, TargetResourceIDs: []string{"a"}, TargetPluginIDs: []string{"plugin-b"}, TargetPluginDigests: []string{migrationTestDigest}, RequestedCapabilities: []string{"compute"}, ResolvedCapabilities: []string{"compute"}, VerifiedCapabilities: []string{"compute"}, OperationIDs: []string{"migration-operation-a"}, VerificationCount: 1, FinalState: "verified"}
+	secret := base
+	secret.SourcePluginID = "secret-sentinel"
+	if err := store.RecordWorkflow(context.Background(), secret); err == nil {
+		t.Fatal("secret workflow accepted")
+	}
+	falseClaim := base
+	falseClaim.VerificationCount = 0
+	if err := store.RecordWorkflow(context.Background(), falseClaim); err == nil {
+		t.Fatal("unverified workflow accepted")
 	}
 }

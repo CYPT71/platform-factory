@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	api "github.com/CYPT71/secure-oci-base/internal/core"
-	typederrors "github.com/CYPT71/secure-oci-base/internal/errors"
+	api "github.com/CYPT71/platform-factory/internal/core"
+	typederrors "github.com/CYPT71/platform-factory/internal/errors"
 )
 
 func TestScheduleErrorMessages(t *testing.T) {

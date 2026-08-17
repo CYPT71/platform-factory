@@ -1,0 +1,1 @@
+{"private":true,"scripts":{"build":"tsc -p tsconfig.json && chmod +x plugin.js"},"devDependencies":{"typescript":"^5.6.0","@types/node":"^20.0.0"}}

@@ -82,13 +82,30 @@ type CompatibilityGap struct {
 	RequiresApproval bool
 }
 
+type ExternalDependency struct {
+	ResourceID string
+	Kind       string
+	Reference  string
+	Required   bool
+}
+
+type Transformation struct {
+	ResourceID string
+	Field      string
+	From       string
+	To         string
+	Reason     string
+}
+
 // Aggregate is the normalized, implementation-independent input to planning.
 type Aggregate struct {
-	Discovery DiscoveryStatus
-	Resources []Resource
-	Edges     []DependencyEdge
-	Unknowns  []UnknownObservation
-	Gaps      []CompatibilityGap
+	Discovery            DiscoveryStatus
+	Resources            []Resource
+	Edges                []DependencyEdge
+	Unknowns             []UnknownObservation
+	Gaps                 []CompatibilityGap
+	ExternalDependencies []ExternalDependency
+	Transformations      []Transformation
 }
 
 // ComputeDigest identifies the canonical logical discovery result. Provider
@@ -186,6 +203,28 @@ func (a Aggregate) Validate() error {
 		}
 		gaps[key] = struct{}{}
 	}
+	externals := map[string]struct{}{}
+	for _, dependency := range a.ExternalDependencies {
+		if _, ok := ids[dependency.ResourceID]; !ok || invalidText(dependency.Kind) || invalidText(dependency.Reference) || secretValue(dependency.Reference) {
+			return invalid("invalid external dependency")
+		}
+		key := externalDependencyKey(dependency)
+		if _, ok := externals[key]; ok {
+			return invalid("duplicate external dependency")
+		}
+		externals[key] = struct{}{}
+	}
+	transformations := map[string]struct{}{}
+	for _, transformation := range a.Transformations {
+		if _, ok := ids[transformation.ResourceID]; !ok || invalidText(transformation.Field) || invalidOptionalText(transformation.From) || invalidOptionalText(transformation.To) || invalidText(transformation.Reason) || secretKey(transformation.Field) || secretValue(transformation.From) || secretValue(transformation.To) {
+			return invalid("invalid or secret-like transformation")
+		}
+		key := transformationKey(transformation)
+		if _, ok := transformations[key]; ok {
+			return invalid("duplicate transformation")
+		}
+		transformations[key] = struct{}{}
+	}
 	if _, err := topologicalResourceIDs(a.Resources, a.Edges); err != nil {
 		return err
 	}
@@ -229,7 +268,7 @@ func validateResource(resource Resource) error {
 		return invalid("resource %q has too many attributes", resource.ID)
 	}
 	for key, value := range resource.Attributes {
-		if invalidText(key) || secretKey(key) || invalidOptionalText(value) {
+		if invalidText(key) || secretKey(key) || invalidOptionalText(value) || secretValue(value) {
 			return invalid("resource %q has a secret-like key or invalid attribute", resource.ID)
 		}
 	}
@@ -254,6 +293,14 @@ func (a Aggregate) Canonical() Aggregate {
 	sort.Slice(out.Unknowns, func(i, j int) bool { return unknownKey(out.Unknowns[i]) < unknownKey(out.Unknowns[j]) })
 	out.Gaps = append([]CompatibilityGap(nil), a.Gaps...)
 	sort.Slice(out.Gaps, func(i, j int) bool { return gapKey(out.Gaps[i]) < gapKey(out.Gaps[j]) })
+	out.ExternalDependencies = append([]ExternalDependency(nil), a.ExternalDependencies...)
+	sort.Slice(out.ExternalDependencies, func(i, j int) bool {
+		return externalDependencyKey(out.ExternalDependencies[i]) < externalDependencyKey(out.ExternalDependencies[j])
+	})
+	out.Transformations = append([]Transformation(nil), a.Transformations...)
+	sort.Slice(out.Transformations, func(i, j int) bool {
+		return transformationKey(out.Transformations[i]) < transformationKey(out.Transformations[j])
+	})
 	return out
 }
 
@@ -283,6 +330,16 @@ func secretKey(value string) bool {
 	return false
 }
 
+func secretValue(value string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, marker := range []string{"secret-sentinel", "password=", "passwd=", "secret=", "access_token=", "api_key=", "private_key=", "-----begin private key", "-----begin rsa private key"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func cloneMap(values map[string]string) map[string]string {
 	if values == nil {
 		return nil
@@ -302,6 +359,12 @@ func unknownKey(u UnknownObservation) string {
 }
 func gapKey(g CompatibilityGap) string {
 	return g.ResourceID + "\x00" + g.Requirement + "\x00" + string(g.Compatibility) + "\x00" + g.Reason + "\x00" + g.LostGuarantee + fmt.Sprint(g.RequiresApproval)
+}
+func externalDependencyKey(d ExternalDependency) string {
+	return d.ResourceID + "\x00" + d.Kind + "\x00" + d.Reference + fmt.Sprint(d.Required)
+}
+func transformationKey(t Transformation) string {
+	return t.ResourceID + "\x00" + t.Field + "\x00" + t.From + "\x00" + t.To + "\x00" + t.Reason
 }
 func invalid(format string, args ...any) error {
 	return &ValidationError{Message: fmt.Sprintf(format, args...)}

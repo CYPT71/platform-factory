@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,7 +14,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/sdk/langplugin"
+	hostplugin "github.com/CYPT71/platform-factory/internal/plugin"
+	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
 
 // withTestPluginDir points sdk/langplugin's registry at a fresh temp
@@ -26,8 +31,67 @@ func writeFakePluginBinary(t *testing.T, path string) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("#!/bin/sh\necho fake\n"), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho '{\"match\":false,\"dependencies\":{\"mode\":\"unknown\",\"reason\":\"test\"}}'\n"), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func writeRPCPluginBundle(t *testing.T, dir, name string) {
+	t.Helper()
+	executable := []byte("#!/bin/sh\nexit 0\n")
+	digest := sha256.Sum256(executable)
+	manifest := hostplugin.Manifest{
+		APIVersion: hostplugin.ManifestAPIVersion, Name: name, Version: "1.0.0",
+		Capabilities: []string{"monitor"}, Family: hostplugin.PluginFamilyCapability,
+		Executable: "bin/plugin", Digest: "sha256:" + hex.EncodeToString(digest[:]),
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, hostplugin.ManifestFileName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bin", "plugin"), executable, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPluginInstallAndRemoveRPCBundle(t *testing.T) {
+	withTestPluginDir(t)
+	source, registry := t.TempDir(), t.TempDir()
+	writeRPCPluginBundle(t, source, "acme-monitor")
+	var stdout, stderr bytes.Buffer
+	args := []string{"install", "--from", source, "--plugin-dir", registry}
+	if code := runPlugin(args, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "unsigned manifest") {
+		t.Fatalf("unsigned install code=%d stderr=%s", code, stderr.String())
+	}
+	stderr.Reset()
+	args = append(args, "--allow-unsigned")
+	if code := runPlugin(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("install code=%d stderr=%s", code, stderr.String())
+	}
+	installed := filepath.Join(registry, "acme-monitor")
+	manifest, err := hostplugin.LoadManifest(installed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manifest.VerifyExecutable(installed); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if code := runPlugin([]string{"list", "--plugin-dir", registry}, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "acme-monitor installed (RPC, 1.0.0)") {
+		t.Fatalf("list code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	if code := runPlugin([]string{"remove", "--plugin-dir", registry, "acme-monitor"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("remove code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(installed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("installed plugin still exists: %v", err)
 	}
 }
 
@@ -42,7 +106,7 @@ func writeMinimalPluginModule(t *testing.T, dir string) {
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/testplugin\n\ngo 1.21\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nimport \"fmt\"\nfunc main(){fmt.Println(`{\"match\":false,\"dependencies\":{\"mode\":\"unknown\",\"reason\":\"test\"}}`)}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -103,8 +167,160 @@ func TestRunPluginLoadWithFromDirectoryWithoutGoModErrors(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected failure, stdout=%s", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "go.mod") {
-		t.Fatalf("stderr=%s, want a hint about the missing go.mod", stderr.String())
+	if !strings.Contains(stderr.String(), "supported plugin entrypoint") {
+		t.Fatalf("stderr=%s, want the supported entrypoints", stderr.String())
+	}
+}
+
+func TestPluginLoadInspectAndUnloadSourceLanguages(t *testing.T) {
+	tests := []struct {
+		name, tool, filename, source string
+	}{
+		{"python", "python3", "plugin.py", "import json\nprint(json.dumps({'match': True, 'language': 'acme-python', 'profile': 'python', 'dependencies': {'mode': 'none', 'reason': 'test'}}))\n"},
+		{"javascript", "node", "plugin.js", "console.log(JSON.stringify({match:true,language:'acme-js',profile:'node',dependencies:{mode:'none',reason:'test'}}));\n"},
+		{"typescript", "node", "plugin.ts", "const result: object = {match:true,language:'acme-ts',profile:'node',dependencies:{mode:'none',reason:'test'}}; console.log(JSON.stringify(result));\n"},
+		{"php", "php", "plugin.php", "<?php echo json_encode(['match'=>true,'language'=>'acme-php','profile'=>'php','dependencies'=>['mode'=>'none','reason'=>'test']]);\n"},
+		{"csharp", "dotnet", "Plugin.cs", "using System; Console.WriteLine(\"{\\\"match\\\":true,\\\"language\\\":\\\"acme-csharp\\\",\\\"profile\\\":\\\"dotnet\\\",\\\"dependencies\\\":{\\\"mode\\\":\\\"none\\\",\\\"reason\\\":\\\"test\\\"}}\");\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := exec.LookPath(test.tool); err != nil {
+				t.Skipf("%s unavailable: %v", test.tool, err)
+			}
+			withTestPluginDir(t)
+			source := filepath.Join(t.TempDir(), test.filename)
+			if err := os.WriteFile(source, []byte(test.source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			pluginName := "source-" + test.name
+			var stdout, stderr bytes.Buffer
+			if code := runPlugin([]string{"load", "--from", source, pluginName}, &stdout, &stderr); code != 0 {
+				t.Fatalf("load code=%d stderr=%s", code, stderr.String())
+			}
+			binary, err := langplugin.Resolve(pluginName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inspection, err := langplugin.RunInspection(binary, t.TempDir())
+			if err != nil || !inspection.Match || !strings.HasPrefix(inspection.Language, "acme-") {
+				t.Fatalf("inspection=%+v err=%v", inspection, err)
+			}
+			stdout.Reset()
+			stderr.Reset()
+			if code := runPlugin([]string{"unload", pluginName}, &stdout, &stderr); code != 0 {
+				t.Fatalf("unload code=%d stderr=%s", code, stderr.String())
+			}
+			if _, err := langplugin.Resolve(pluginName); err == nil {
+				t.Fatal("plugin still resolves after unload")
+			}
+		})
+	}
+}
+
+func TestPluginLoadRollsBackInvalidInspectContract(t *testing.T) {
+	withTestPluginDir(t)
+	source := filepath.Join(t.TempDir(), "broken.py")
+	if err := os.WriteFile(source, []byte("print('not json')\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runPlugin([]string{"load", "--from", source, "broken"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("invalid plugin loaded: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "failed the inspect contract") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+	if _, err := langplugin.Resolve("broken"); err == nil {
+		t.Fatal("invalid plugin remained installed")
+	}
+}
+
+func TestIntermediateCreatesPluginThroughLoadedPythonLanguagePlugin(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skipf("python3 unavailable: %v", err)
+	}
+	withTestPluginDir(t)
+	languageBinary := filepath.Join(t.TempDir(), "platform-factory-lang-python")
+	if runtime.GOOS == "windows" {
+		languageBinary += ".exe"
+	}
+	build := exec.Command("go", "build", "-o", languageBinary, ".")
+	build.Dir = filepath.Join("..", "..", "plugins", "lang-python")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build language plugin: %v\n%s", err, output)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runPlugin([]string{"load", "--from", languageBinary, "python"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("load language plugin: %s", stderr.String())
+	}
+	generated := filepath.Join(t.TempDir(), "acme-plugin")
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPlugin([]string{"create", "--language", "python", "--output", generated, "acme"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("create: code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(generated, "plugin.py")); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPlugin([]string{"load", "--from", filepath.Join(generated, "plugin.py"), "acme"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("load generated plugin: %s", stderr.String())
+	}
+	if _, err := langplugin.Resolve("acme"); err != nil {
+		t.Fatal(err)
+	}
+	if code := runPlugin([]string{"unload", "acme"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("unload generated plugin: %s", stderr.String())
+	}
+}
+
+func TestIntermediateCreatesPluginsInPreferredLanguage(t *testing.T) {
+	tests := []struct{ language, dialect, entry, tool string }{{"node", "js", "plugin.js", "node"}, {"node", "ts", "plugin.ts", "node"}, {"php", "", "plugin.php", "php"}, {"dotnet", "", "Plugin.csproj", "dotnet"}}
+	for _, test := range tests {
+		t.Run(test.language+test.dialect, func(t *testing.T) {
+			if _, err := exec.LookPath(test.tool); err != nil {
+				t.Skipf("%s unavailable", test.tool)
+			}
+			withTestPluginDir(t)
+			binary := filepath.Join(t.TempDir(), "platform-factory-lang-"+test.language)
+			if runtime.GOOS == "windows" {
+				binary += ".exe"
+			}
+			build := exec.Command("go", "build", "-o", binary, ".")
+			build.Dir = filepath.Join("..", "..", "plugins", "lang-"+test.language)
+			if output, err := build.CombinedOutput(); err != nil {
+				t.Fatalf("build: %v\n%s", err, output)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := runPlugin([]string{"load", "--from", binary, test.language}, &stdout, &stderr); code != 0 {
+				t.Fatalf("load lang: %s", stderr.String())
+			}
+			out := filepath.Join(t.TempDir(), "generated")
+			args := []string{"create", "--language", test.language, "--output", out}
+			if test.dialect != "" {
+				args = append(args, "--dialect", test.dialect)
+			}
+			args = append(args, "acme-"+test.language+test.dialect)
+			stdout.Reset()
+			stderr.Reset()
+			if code := runPlugin(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("create: %s", stderr.String())
+			}
+			entry := filepath.Join(out, test.entry)
+			if _, err := os.Stat(entry); err != nil {
+				t.Fatal(err)
+			}
+			name := "generated-" + test.language + test.dialect
+			stdout.Reset()
+			stderr.Reset()
+			if code := runPlugin([]string{"load", "--from", entry, name}, &stdout, &stderr); code != 0 {
+				t.Fatalf("load generated: %s", stderr.String())
+			}
+			if code := runPlugin([]string{"unload", name}, &stdout, &stderr); code != 0 {
+				t.Fatalf("unload: %s", stderr.String())
+			}
+		})
 	}
 }
 

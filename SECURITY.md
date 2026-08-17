@@ -16,7 +16,7 @@ profiles are unsupported unless a release notice states otherwise.
 ## Reporting a vulnerability
 
 Do not open a public issue for a suspected vulnerability. Use GitHub's private
-security advisory reporting for `CYPT71/secure-oci-base`. Include the affected
+security advisory reporting for `CYPT71/platform-factory`. Include the affected
 commit or release, reproduction steps, impact, and any suggested mitigation.
 
 Receipt is acknowledged within three business days. An initial assessment is

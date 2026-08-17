@@ -1,14 +1,14 @@
 #!/usr/bin/env node
-// Reference secure-oci v1 language plugin, built on the
-// @secure-oci/plugin-sdk package's typed capability schemas. This is the
+// Reference platform-factory v1 language plugin, built on the
+// @platform-factory/plugin-sdk package's typed capability schemas. This is the
 // TypeScript counterpart of examples/sdk/plugin-go: where the Go example
 // implements sdk/plugin.LanguageExtension and lets sdk/plugin.Runtime
 // handle framing, handshake and dispatch, this example imports
 // sdk/plugin-js's Server (and its index.d.ts types) and does the same.
 // Both speak the exact same wire protocol and pass the exact same
-// conformance suite (secure-oci-conformance plugin).
+// conformance suite (platform-factory-conformance plugin).
 //
-// In a real deployment, install the SDK (`npm install @secure-oci/plugin-sdk`)
+// In a real deployment, install the SDK (`npm install @platform-factory/plugin-sdk`)
 // instead of this relative path; it exists only so this example compiles
 // directly from a source checkout with no publish step.
 import { Server, DetectParams, DetectResult, FreezeParams, FreezeResult, PlanParams, PlanResult } from "../../../sdk/plugin-js";

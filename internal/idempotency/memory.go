@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 // MemoryJournal implements the canonical journal contract for tests and

@@ -1,7 +1,6 @@
 package control
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
+	"github.com/CYPT71/platform-factory/internal/strictjson"
 )
 
 const snapshotVersion = 3
@@ -52,28 +54,7 @@ func (c *ControlPlane) Save(path string) error {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	file, err := os.CreateTemp(parent, ".control-state-*")
-	if err != nil {
-		return err
-	}
-	name := file.Name()
-	defer os.Remove(name)
-	if err := file.Chmod(0o600); err != nil {
-		file.Close()
-		return err
-	}
-	if _, err := file.Write(data); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
+	return atomicfile.Write(parent, filepath.Base(path), data, 0o600, true)
 }
 
 // LoadControlPlane restores a snapshot and safely requeues every lease that
@@ -91,15 +72,9 @@ func LoadControlPlane(heartbeatTimeout time.Duration, path string) (*ControlPlan
 	if len(data) > 64<<20 {
 		return nil, errors.New("control: snapshot exceeds 64 MiB")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	var state snapshot
-	if err := decoder.Decode(&state); err != nil {
+	if err := strictjson.Decode(data, &state); err != nil {
 		return nil, fmt.Errorf("control: decode snapshot: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return nil, errors.New("control: snapshot must contain exactly one document")
 	}
 	if (state.Version < 1 || state.Version > snapshotVersion) || state.NextID < 0 {
 		return nil, errors.New("control: unsupported or invalid snapshot")

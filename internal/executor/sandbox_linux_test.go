@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 // sandboxTestExecutor returns a sandboxed executor over a fresh stage

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/microvm"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
-	"github.com/CYPT71/secure-oci-base/internal/policy"
+	"github.com/CYPT71/platform-factory/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/policy"
 )
 
 func TestBuildRejectsInvalidMachineInputs(t *testing.T) {
@@ -37,7 +37,7 @@ func TestBuildRejectsInvalidMachineInputs(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if code := runBuildWithContext(context.Background(), test.args, &stdout, &stderr); code == 0 {
+			if code := runBuild(commandContext(context.Background(), "build"), test.args, &stdout, &stderr); code == 0 {
 				t.Fatalf("invalid input accepted: stdout=%s", stdout.String())
 			}
 			if !strings.Contains(strings.ToLower(stderr.String()), strings.ToLower(test.want)) {
@@ -80,7 +80,7 @@ func TestNativeLifecycleFailuresRemainExplicit(t *testing.T) {
 	}
 	for _, action := range []string{"stop", "restart", "status", "logs", "delete", "unsupported"} {
 		var stdout, stderr bytes.Buffer
-		code := runNative(action, microvm.Spec{Name: "demo"}, "runner", &stdout, &stderr, execute)
+		code := runNative(action, microvm.Spec{Name: "demo"}, "runner", false, &stdout, &stderr, execute)
 		if code == 0 {
 			t.Fatalf("action %s succeeded", action)
 		}
@@ -109,11 +109,56 @@ func TestBuildPropagatesCallerTraceToMachineEvidence(t *testing.T) {
 	traceID := "cli-contract-trace"
 	ctx := observability.ContextWithTraceID(context.Background(), traceID)
 	var stdout, stderr bytes.Buffer
-	if code := runBuildWithContext(ctx, []string{"--output", filepath.Join(root, "layout"), binary}, &stdout, &stderr); code != 0 {
+	if code := runBuild(commandContext(ctx, "build"), []string{"--output", filepath.Join(root, "layout"), binary}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), `"trace_id":"`+traceID+`"`) {
 		t.Fatalf("caller trace not propagated: %s", stderr.String())
+	}
+}
+
+func TestCommandContextHonorsExternalTraceIDEnvVar(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_TRACE_ID", "external-correlation-id")
+	ctx := commandContext(context.Background(), "build")
+	if got := observability.TraceIDFromContext(ctx); got != "external-correlation-id" {
+		t.Fatalf("trace_id=%q, want the env var's value", got)
+	}
+}
+
+func TestCommandContextGeneratesATraceIDWhenNoneIsSupplied(t *testing.T) {
+	ctx := commandContext(context.Background(), "build")
+	if got := observability.TraceIDFromContext(ctx); got == "" {
+		t.Fatal("commandContext produced no trace ID")
+	}
+}
+
+func TestGlobalQuietSuppressesSuccessfulOutputAnywhereInArguments(t *testing.T) {
+	for _, args := range [][]string{{"--quiet", "version"}, {"version", "-q"}} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("args=%v code=%d stderr=%s", args, code, stderr.String())
+		}
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Fatalf("args=%v stdout=%q stderr=%q", args, stdout.String(), stderr.String())
+		}
+	}
+}
+
+func TestGlobalVerboseReportsCommandAndTraceWithoutEchoingArguments(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_TRACE_ID", "demo-trace")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"version", "--verbose"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "command=version trace_id=demo-trace") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+func TestGlobalQuietAndVerboseAreMutuallyExclusive(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--quiet", "version", "--verbose"}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 

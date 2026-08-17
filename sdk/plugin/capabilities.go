@@ -22,7 +22,6 @@ type HelloResult struct {
 // yet. It belongs to the publish/SBOM path, which still orchestrates
 // external tooling.
 //
-// Sanetizer-todo item 11-12: Extended capabilities for capability-based dispatch.
 // Capabilities follow dot-notation: {family}.{action} for better organization
 // and to enable the core to ask "Who can provide deployment.apply?" instead of
 // "Are you KubeVirt?".
@@ -34,11 +33,18 @@ const (
 	CapabilityScan   = "scan"
 
 	// Runtime capabilities - for runtime environment management
-	CapabilityRuntimeCreate = "runtime.create"
-	CapabilityRuntimeStop   = "runtime.stop"
-	CapabilityRuntimeLogs   = "runtime.logs"
-	CapabilityRuntimeStatus = "runtime.status"
-	CapabilityRuntimeExec   = "runtime.exec"
+	CapabilityRuntimeCreate  = "runtime.create"
+	CapabilityRuntimeStart   = "runtime.start"
+	CapabilityRuntimeStop    = "runtime.stop"
+	CapabilityRuntimeRestart = "runtime.restart"
+	CapabilityRuntimeDelete  = "runtime.delete"
+	CapabilityRuntimeLogs    = "runtime.logs"
+	CapabilityRuntimeStatus  = "runtime.status"
+	CapabilityRuntimeExec    = "runtime.exec"
+	// CapabilityRuntimeRBAC asks a runtime plugin to render (and, if asked,
+	// apply) the minimal RBAC objects its own lifecycle actions need -
+	// see plugins/kubevirt.RBAC for the reference implementation.
+	CapabilityRuntimeRBAC = "runtime.rbac"
 
 	// Deployment capabilities - for workload deployment
 	CapabilityDeploymentPlan     = "deployment.plan"
@@ -68,6 +74,7 @@ const (
 	// Migration capabilities are deliberately independent: source-only and
 	// target-only plugins are valid protocol participants.
 	CapabilityMigrationDiscover        = "migration.discover"
+	CapabilityMigrationInspect         = "migration.inspect"
 	CapabilityMigrationObserve         = "migration.observe"
 	CapabilityMigrationApply           = "migration.apply"
 	CapabilityMigrationExport          = "migration.export"
@@ -107,7 +114,6 @@ func ValidateCapability(cap string) error {
 // HasCapability checks if a given capability is in the list of supported capabilities.
 // This enables capability-based dispatch: "Who can provide deployment.apply?"
 // instead of "Are you KubeVirt?".
-// Sanetizer-todo item 12: Capability negotiation.
 func HasCapability(capabilities []string, cap string) bool {
 	for _, c := range capabilities {
 		if c == cap {

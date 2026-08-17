@@ -93,7 +93,7 @@ if [ "$image_arch" != "$HOST_ARCH" ]; then
 fi
 log "phase=read-config arch=$image_arch entrypoint=${entrypoint[*]}"
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/secure-oci-base-microvm.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-base-microvm.XXXXXX")
 qemu_pid=""
 tail_pid=""
 cleanup() {

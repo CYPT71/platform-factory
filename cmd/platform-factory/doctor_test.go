@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/app/doctor"
+	"github.com/CYPT71/platform-factory/internal/app/doctor"
 )
 
 // These tests exercise runDoctor's CLI facade behavior only - argument
@@ -22,8 +22,9 @@ func TestRunDoctorTextReportListsEveryCheck(t *testing.T) {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 	for _, want := range []string{
-		"tool-git", "tool-docker", "tool-podman", "tool-containerd", "tool-kubectl",
-		"native-hypervisor", "sandbox-namespaces", "sandbox-cgroups", "sandbox-capability-bounding-drop",
+		"tool-git", "tool-docker", "tool-podman", "tool-containerd", "tool-ctr", "tool-kubectl",
+		"kvm-device", "kvm-extensions", "hyper-v", "virtualization-framework",
+		"sandbox-namespaces", "sandbox-cgroups", "sandbox-capability-bounding-drop",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("report missing %q: %s", want, stdout.String())
@@ -48,7 +49,7 @@ func TestRunDoctorJSONReportIsWellFormedAndConsistent(t *testing.T) {
 		if c.Name == "" {
 			t.Fatalf("check with empty name: %+v", report.Checks)
 		}
-		if !c.OK {
+		if !c.OK && !c.Skipped {
 			allOK = false
 			if c.Suggestion == "" && c.Name != "native-hypervisor" {
 				t.Fatalf("failing check %q has no suggestion", c.Name)

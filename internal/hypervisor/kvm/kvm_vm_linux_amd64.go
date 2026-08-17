@@ -138,13 +138,7 @@ type PortWrite struct {
 // and runs it (KVM_RUN) until KVM_EXIT_HLT or maxSteps I/O exits are
 // observed, whichever comes first.
 //
-// This is the minimal real primitive the roadmap's "Créer VM, vCPU et
-// mémoire invitée" item asks for. It deliberately does not attempt to
-// boot a real Linux kernel yet (a separate, larger, not-yet-implemented
-// item - Linux's own 32/64-bit boot protocol, e820 map and virtio
-// devices are unrelated work) and is amd64-only: arm64 KVM's vCPU
-// initialization (KVM_ARM_VCPU_INIT, KVM_SET_ONE_REG) is a materially
-// different API with no shared code path, left for a follow-up slice.
+// RunFlatPayload is amd64-only and does not implement the Linux boot protocol.
 func RunFlatPayload(ctx context.Context, memoryBytes uint64, payload []byte, loadAddr uint64, maxSteps int) (KVMRunResult, error) {
 	if err := ctx.Err(); err != nil {
 		return KVMRunResult{}, err

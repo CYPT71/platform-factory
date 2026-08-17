@@ -296,6 +296,15 @@ func applyLayer(layout string, root *os.Root, desc descriptor, diffID string, bu
 		if header.Size < 0 || header.Size > budget.maxFileBytes {
 			return fmt.Errorf("layer entry %q exceeds MaxFileBytes", header.Name)
 		}
+		if isRootSelfEntry(header.Name) {
+			// Many real-world builders (BuildKit among them) emit a "./"
+			// entry describing the layer's own root directory. It carries
+			// no content to extract - the root already exists - so it is
+			// a benign no-op, not a traversal attempt; only skip it here,
+			// never for a hardlink target (safeArchivePath's other call
+			// site), where "." would be a nonsensical link destination.
+			continue
+		}
 		name, err := safeArchivePath(header.Name)
 		if err != nil {
 			return err
@@ -344,7 +353,8 @@ func applyLayer(layout string, root *os.Root, desc descriptor, diffID string, bu
 				return err
 			}
 		case tar.TypeSymlink:
-			if err := validateSymlinkTarget(name, header.Linkname); err != nil {
+			linkTarget, err := validateSymlinkTarget(name, header.Linkname)
+			if err != nil {
 				return err
 			}
 			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -353,7 +363,7 @@ func applyLayer(layout string, root *os.Root, desc descriptor, diffID string, bu
 			if err := root.RemoveAll(target); err != nil {
 				return err
 			}
-			if err := root.Symlink(filepath.FromSlash(header.Linkname), target); err != nil {
+			if err := root.Symlink(filepath.FromSlash(linkTarget), target); err != nil {
 				return fmt.Errorf("create symlink %q: %w", name, err)
 			}
 		case tar.TypeLink:
@@ -399,15 +409,46 @@ func applyLayer(layout string, root *os.Root, desc descriptor, diffID string, bu
 	return nil
 }
 
-func validateSymlinkTarget(name, target string) error {
-	if target == "" || strings.HasPrefix(target, "/") || path.IsAbs(target) {
-		return fmt.Errorf("unsafe symlink target %q for %q", target, name)
+// validateSymlinkTarget rejects a relative target that would escape the
+// tree root, and rewrites an absolute target into an equivalent
+// tree-relative one rather than rejecting it outright: once this tree
+// becomes an actual container/VM root, a runtime resolves an absolute
+// symlink target ("/usr/bin/mawk", the real, common Debian
+// update-alternatives pattern) against its own root anyway, so a
+// tree-relative "../../usr/bin/mawk" from a shallower entry means exactly
+// the same thing on disk - but only the relative form can be safely
+// confined by os.Root during extraction itself, so the absolute string is
+// never stored or followed literally. The rewrite can never itself escape
+// the tree: it is computed purely from name's own (already-validated)
+// depth and the target's own tree-relative path, both rooted at this
+// tree, never at the host's.
+func validateSymlinkTarget(name, target string) (string, error) {
+	if target == "" {
+		return "", fmt.Errorf("unsafe symlink target %q for %q", target, name)
 	}
-	resolved := path.Clean(path.Join(path.Dir(name), target))
+	rewritten := target
+	if strings.HasPrefix(target, "/") || path.IsAbs(target) {
+		treeRelative := strings.TrimPrefix(path.Clean(target), "/")
+		relative, err := filepath.Rel(filepath.FromSlash(path.Dir(name)), filepath.FromSlash(treeRelative))
+		if err != nil {
+			return "", fmt.Errorf("unsafe symlink target %q for %q: %w", target, name, err)
+		}
+		rewritten = filepath.ToSlash(relative)
+	}
+	resolved := path.Clean(path.Join(path.Dir(name), rewritten))
 	if resolved == ".." || strings.HasPrefix(resolved, "../") {
-		return fmt.Errorf("symlink target %q for %q escapes rootfs", target, name)
+		return "", fmt.Errorf("symlink target %q for %q escapes rootfs", target, name)
 	}
-	return nil
+	return rewritten, nil
+}
+
+// isRootSelfEntry reports whether value names the tar entry's own root
+// directory: exactly "." or "./". Deliberately narrow - every other case
+// safeArchivePath rejects (including a bare empty name) keeps being
+// rejected exactly as before; only this one, specific, real-world-common
+// pattern (BuildKit and other builders emit it) is treated as a no-op.
+func isRootSelfEntry(value string) bool {
+	return value == "." || value == "./"
 }
 
 func safeArchivePath(value string) (string, error) {
@@ -596,6 +637,20 @@ func digestTree(root string) (string, int, int64, error) {
 			}
 			files++
 			bytes += n
+		}
+		// Chtimes follows symlinks, and the stdlib has no portable way to
+		// stamp a symlink's own mtime without following it - so skip
+		// symlinks here rather than fail closed on a dangling one (a
+		// real, common pattern in stripped Debian-based images, e.g. an
+		// update-alternatives entry pointing at a man page removed to
+		// save space) or silently stamp the wrong file (the target's
+		// mtime instead of the link's own, for a valid one). The digest
+		// hash above is already computed from name/mode/size before this
+		// call and never depends on mtime, so skipping here only leaves
+		// a symlink's own mtime unnormalized - it does not weaken the
+		// deterministic-digest guarantee.
+		if info.Mode()&os.ModeSymlink != 0 {
+			continue
 		}
 		if err := os.Chtimes(name, epoch, epoch); err != nil {
 			return "", 0, 0, err

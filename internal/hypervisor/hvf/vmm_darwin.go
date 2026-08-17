@@ -30,9 +30,9 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/CYPT71/secure-oci-base/internal/guest"
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
-	vmruntime "github.com/CYPT71/secure-oci-base/internal/runtime"
+	"github.com/CYPT71/platform-factory/internal/guest"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
+	vmruntime "github.com/CYPT71/platform-factory/internal/runtime"
 )
 
 const errorBufferSize = 512
@@ -56,10 +56,7 @@ type HVFLinuxRunResult struct {
 // of RunLinux: no QEMU or third-party VMM participates in the boot.
 //
 // macAddress, when non-empty ("xx:xx:xx:xx:xx:xx", locally administered),
-// attaches a single NAT-backed virtio-net device - see vz_create_machine's
-// doc comment for what that does and does not guarantee, including that
-// this path is UNVERIFIED ON REAL HARDWARE as of the commit that added
-// this parameter. Empty means no network device, matching prior behavior.
+// attaches a single NAT-backed virtio-net device. Empty disables networking.
 //
 // liveWriter, when non-nil, receives each newly-appended chunk of serial
 // output as soon as a poll iteration observes it - unlike the Serial
@@ -312,10 +309,7 @@ func (v *DarwinVMM) Create(ctx context.Context, spec api.MachineSpec) (api.Machi
 
 	errBuf := make([]C.char, errorBufferSize)
 	agentFD := C.int(-1)
-	// mac_address is nil here (no network device): the microVM Machine
-	// lifecycle this Create implements has no network-intent field on
-	// api.MachineSpec yet. Direct-boot callers (RunLinuxHVF) are the
-	// ones wired to the new native networking path for now.
+	// MachineSpec has no network intent; direct-boot callers configure networking.
 	handle := C.vz_create_machine(
 		cKernel, cInitrd, cCmdline, cLogPath,
 		C.ulonglong(spec.Resources.MemoryMiB*1024*1024), C.uint(spec.Resources.VCPUs),

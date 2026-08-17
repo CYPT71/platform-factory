@@ -1,23 +1,37 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/executor"
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor"
-	"github.com/CYPT71/secure-oci-base/internal/layout"
-	"github.com/CYPT71/secure-oci-base/internal/microvm"
-	"github.com/CYPT71/secure-oci-base/internal/networking"
-	"github.com/CYPT71/secure-oci-base/internal/oci"
-	"github.com/CYPT71/secure-oci-base/internal/plugin"
+	"github.com/CYPT71/platform-factory/internal/attestation"
+	"github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/executor"
+	"github.com/CYPT71/platform-factory/internal/hypervisor"
+	"github.com/CYPT71/platform-factory/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/networking"
+	"github.com/CYPT71/platform-factory/internal/oci"
+	"github.com/CYPT71/platform-factory/internal/plugin"
+	"github.com/CYPT71/platform-factory/internal/signing"
+	"github.com/CYPT71/platform-factory/internal/vmdisk"
+	api "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 // nativeKVMAvailableForTest reports, for real, whether this test process's
@@ -47,7 +61,30 @@ func TestMain(m *testing.M) {
 	executor.MaybeApplyRlimitHelper()
 	executor.MaybeApplySandboxHelper(networking.ServeDNSRelay)
 	plugin.MaybeApplyPluginSandboxHelper()
-	os.Exit(m.Run())
+	if existing := os.Getenv("PLATFORM_FACTORY_LANG_PLUGIN_DIR"); existing != "" {
+		if info, statErr := os.Stat(existing); statErr == nil && info.IsDir() {
+			os.Exit(m.Run())
+		}
+	}
+	pluginDir, err := os.MkdirTemp("", "platform-factory-test-language-plugins-*")
+	if err != nil {
+		panic(err)
+	}
+	for _, language := range []string{"go", "python", "node", "rust"} {
+		name := "platform-factory-lang-" + language
+		if runtime.GOOS == "windows" {
+			name += ".exe"
+		}
+		command := exec.Command("go", "build", "-o", filepath.Join(pluginDir, name), ".")
+		command.Dir = filepath.Join("..", "..", "plugins", "lang-"+language)
+		if output, buildErr := command.CombinedOutput(); buildErr != nil {
+			panic(fmt.Sprintf("build %s test plugin: %v: %s", language, buildErr, output))
+		}
+	}
+	_ = os.Setenv("PLATFORM_FACTORY_LANG_PLUGIN_DIR", pluginDir)
+	code := m.Run()
+	_ = os.RemoveAll(pluginDir)
+	os.Exit(code)
 }
 
 func TestRunDetect(t *testing.T) {
@@ -59,7 +96,7 @@ func TestRunDetect(t *testing.T) {
 	if code := run([]string{"detect", file}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `"kind": "python"`) {
+	if !strings.Contains(stdout.String(), `"kind": "script"`) || !strings.Contains(stdout.String(), `"interpreter": "/usr/bin/env python3"`) {
 		t.Fatalf("stdout=%s", stdout.String())
 	}
 }
@@ -125,6 +162,29 @@ func TestRunContainerNetworkConfiguration(t *testing.T) {
 		"--runtime=podman", "--network=production", "--hostname=api.example",
 		"--publish=127.0.0.1:8443:443/tcp", "--publish=[::1]:5353:53/udp",
 		"--dns=1.1.1.1", "--add-host=database:10.0.0.5", "service:local",
+	}, &stdout, &stderr, execute)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunContainerVolumesAndEnv(t *testing.T) {
+	execute := func(name string, args []string, _ io.Reader, _, _ io.Writer) error {
+		joined := strings.Join(args, " ")
+		for _, want := range []string{
+			"--volume=/host/data:/data:ro", "--volume=/host/cache:/cache",
+			"--env=LOG_LEVEL=debug", "--env=INHERITED",
+		} {
+			if !strings.Contains(joined, want) {
+				t.Fatalf("%s command missing %s: %v", name, want, args)
+			}
+		}
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := runContainer([]string{
+		"--volume=/host/data:/data:ro", "-v=/host/cache:/cache",
+		"--env=LOG_LEVEL=debug", "-e=INHERITED", "service:local",
 	}, &stdout, &stderr, execute)
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
@@ -258,6 +318,10 @@ func TestRunContainerRejectsUnsafeOrInvalidOptions(t *testing.T) {
 		{"--network=bridge", "--dns=resolver", "image"},
 		{"--network=bridge", "--hostname=../bad", "image"},
 		{"--network=bridge", "--add-host=bad", "image"},
+		{"--volume=bad", "image"},
+		{"--volume=:/container", "image"},
+		{"--env=", "image"},
+		{"--env==novalue", "image"},
 		{"--cpus=0", "image"},
 		{"--memory=", "image"},
 		{"--pids-limit=0", "image"},
@@ -294,6 +358,34 @@ func TestRunMicroVMNative(t *testing.T) {
 			"MICROVM_FORWARDS=tcp|127.0.0.1|9090|9090",
 		}) {
 		t.Fatalf("command=%s args=%v environment=%v", command, args, environment)
+	}
+}
+
+// TestRunMicroVMRequireNativeRefusesQEMUFallback exercises --require-native
+// against a spec nativeKVMEligible always rejects (2 vCPUs - see
+// TestNativeKVMEligible's "multiple vCPUs falls back" subtest), independent
+// of whether this host actually has native KVM: without --require-native
+// this would silently fall back to run-microvm.sh/QEMU (TestRunMicroVMNative
+// already covers that default), but --require-native must instead fail
+// closed and must never invoke the QEMU-based runner at all.
+func TestRunMicroVMRequireNativeRefusesQEMUFallback(t *testing.T) {
+	executed := false
+	execute := func(string, []string, []string, io.Reader, io.Writer, io.Writer) error {
+		executed = true
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := runMicroVM([]string{
+		"run", "--backend=native", "--require-native", "--layout=/verified/layout", "--vcpus=2",
+	}, &stdout, &stderr, execute)
+	if code != 1 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if executed {
+		t.Fatal("--require-native must never invoke the QEMU-based runner")
+	}
+	if !strings.Contains(stderr.String(), "--require-native was set") {
+		t.Fatalf("stderr=%s", stderr.String())
 	}
 }
 
@@ -439,78 +531,147 @@ func TestRunMicroVMNativeLifecycleUsesSystemd(t *testing.T) {
 	}
 }
 
-func TestRunMicroVMKubeVirtLifecycle(t *testing.T) {
-	var calls [][]string
-	execute := func(name string, args, _ []string, _ io.Reader, _, _ io.Writer) error {
-		calls = append(calls, append([]string{name}, args...))
-		return nil
+// stubKubeVirtPlugin is a pluginClient double for dispatchKubeVirt's own
+// routing logic (which capability, Call vs CallWithIdempotency, result
+// formatting) - the same separation TestPluginHostDetectFreezeAndNotes
+// already uses for detect/freeze/plan, so these tests do not need a real
+// plugin subprocess. TestRunMicroVMKubeVirtCreateThroughRealPlugin below
+// covers the real discover->verify->start->call path end to end instead.
+type stubKubeVirtPlugin struct {
+	capabilities []string
+	calls        []string
+	result       kubevirtResult
+	err          error
+}
+
+func (s *stubKubeVirtPlugin) Hello() plugin.HelloResult {
+	return plugin.HelloResult{Name: "kubevirt", Capabilities: s.capabilities}
+}
+func (s *stubKubeVirtPlugin) HasCapability(capability string) bool {
+	for _, declared := range s.capabilities {
+		if declared == capability {
+			return true
+		}
 	}
-	for _, action := range []string{"start", "stop", "restart", "status", "logs", "delete"} {
+	return false
+}
+func (s *stubKubeVirtPlugin) Close() error { return nil }
+func (s *stubKubeVirtPlugin) Call(_ context.Context, method string, params, result any) error {
+	s.calls = append(s.calls, "call:"+method)
+	if s.err != nil {
+		return s.err
+	}
+	data, _ := json.Marshal(s.result)
+	return json.Unmarshal(data, result)
+}
+func (s *stubKubeVirtPlugin) CallWithIdempotency(_ context.Context, operationID core.OperationID, method string, params, result any) error {
+	s.calls = append(s.calls, "idempotent:"+method+":"+string(operationID))
+	if s.err != nil {
+		return s.err
+	}
+	data, _ := json.Marshal(s.result)
+	return json.Unmarshal(data, result)
+}
+
+func allKubeVirtCapabilities() []string {
+	return []string{
+		api.CapabilityRuntimeCreate, api.CapabilityRuntimeStart, api.CapabilityRuntimeStop,
+		api.CapabilityRuntimeRestart, api.CapabilityRuntimeStatus, api.CapabilityRuntimeLogs,
+		api.CapabilityRuntimeDelete, api.CapabilityRuntimeRBAC,
+	}
+}
+
+func TestDispatchKubeVirtRoutesMutatingActionsThroughIdempotency(t *testing.T) {
+	stub := &stubKubeVirtPlugin{capabilities: allKubeVirtCapabilities()}
+	host := &pluginHost{clients: []pluginClient{stub}}
+	spec := microvm.Spec{Name: "demo", Namespace: "production"}
+
+	for _, action := range []string{"start", "stop", "restart", "delete", "create", "rbac"} {
 		var stdout, stderr bytes.Buffer
-		code := runMicroVM([]string{
-			action, "--backend=kubevirt", "--name=demo", "--namespace=production",
-		}, &stdout, &stderr, execute)
-		if code != 0 {
+		if code := dispatchKubeVirt(context.Background(), host, action, spec, nil, false, &stdout, &stderr); code != 0 {
 			t.Fatalf("%s code=%d stderr=%s", action, code, stderr.String())
 		}
 	}
-	if len(calls) != 6 ||
-		calls[0][0] != "platform-factory-kubevirt" || calls[0][1] != "start" ||
-		!strings.Contains(strings.Join(calls[0], " "), "--namespace production") ||
-		!strings.Contains(strings.Join(calls[0], " "), "--name demo") {
-		t.Fatalf("calls=%v", calls)
+	for _, action := range []string{"status", "logs"} {
+		var stdout, stderr bytes.Buffer
+		if code := dispatchKubeVirt(context.Background(), host, action, spec, nil, false, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s code=%d stderr=%s", action, code, stderr.String())
+		}
+	}
+	if len(stub.calls) != 8 {
+		t.Fatalf("calls=%v", stub.calls)
+	}
+	for i, action := range []string{"start", "stop", "restart", "delete", "create", "rbac"} {
+		if !strings.HasPrefix(stub.calls[i], "idempotent:v1.runtime."+action+":") {
+			t.Fatalf("action %s did not go through CallWithIdempotency: calls[%d]=%q", action, i, stub.calls[i])
+		}
+	}
+	if stub.calls[6] != "call:v1.runtime.status" || stub.calls[7] != "call:v1.runtime.logs" {
+		t.Fatalf("status/logs did not go through the read-only Call path: calls=%v", stub.calls)
+	}
+}
+
+func TestDispatchKubeVirtSendsSpecFieldsAsParams(t *testing.T) {
+	stub := &stubKubeVirtPlugin{capabilities: allKubeVirtCapabilities()}
+	host := &pluginHost{clients: []pluginClient{stub}}
+	spec := microvm.Spec{
+		Name: "demo", Namespace: "production",
+		Image: "registry.example/boot@sha256:" + strings.Repeat("b", 64),
+	}
+	var stdout, stderr bytes.Buffer
+	if code := dispatchKubeVirt(context.Background(), host, "create", spec, repeatedFlag{"8080:80"}, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if len(stub.calls) != 1 {
+		t.Fatalf("calls=%v", stub.calls)
 	}
 }
 
 // The main module never renders a KubeVirt manifest or validates
 // KubeVirt-specific fields itself - both live in the plugins/kubevirt
-// module, which cmd/platform-factory only ever drives as a subprocess (see
-// runKubeVirt). This test verifies the forwarding shape; manifest
-// rendering and validation are covered by
+// module, dispatched by capability through internal/plugin, not driven
+// as a hardcoded subprocess. This proves dispatchKubeVirt reflects the
+// plugin's own response (manifest text, applied flag) back to the caller;
+// manifest rendering and validation are covered by
 // plugins/kubevirt/cmd/platform-factory-kubevirt's own tests.
-func TestRunMicroVMKubeVirtCreateForwardsToPlugin(t *testing.T) {
-	var command string
-	var args []string
-	execute := func(name string, commandArgs, _ []string, _ io.Reader, _, _ io.Writer) error {
-		command, args = name, commandArgs
-		return nil
+func TestDispatchKubeVirtReflectsPluginResult(t *testing.T) {
+	stub := &stubKubeVirtPlugin{
+		capabilities: allKubeVirtCapabilities(),
+		result:       kubevirtResult{Manifest: `{"kind": "VirtualMachine"}`},
 	}
+	host := &pluginHost{clients: []pluginClient{stub}}
+	spec := microvm.Spec{Name: "demo", Namespace: "default"}
 	var stdout, stderr bytes.Buffer
-	code := runMicroVM([]string{
-		"create", "--backend=kubevirt", "--name=demo",
-		"--image=registry.example/boot@sha256:" + strings.Repeat("b", 64),
-	}, &stdout, &stderr, execute)
-	if code != 0 {
+	if code := dispatchKubeVirt(context.Background(), host, "create", spec, nil, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	if command != "platform-factory-kubevirt" || args[0] != "create" {
-		t.Fatalf("command=%s args=%v", command, args)
-	}
-	for _, arg := range args {
-		if arg == "--apply" {
-			t.Fatalf("--apply forwarded without being requested: args=%v", args)
-		}
+	if !strings.Contains(stdout.String(), `"kind": "VirtualMachine"`) {
+		t.Fatalf("stdout=%s", stdout.String())
 	}
 }
 
-func TestRunMicroVMKubeVirtCreateForwardsApplyAndPublish(t *testing.T) {
-	var args []string
-	execute := func(_ string, commandArgs, _ []string, _ io.Reader, _, _ io.Writer) error {
-		args = commandArgs
-		return nil
-	}
+func TestDispatchKubeVirtPropagatesPluginRejection(t *testing.T) {
+	stub := &stubKubeVirtPlugin{capabilities: allKubeVirtCapabilities(), err: errors.New("plugin refused")}
+	host := &pluginHost{clients: []pluginClient{stub}}
+	spec := microvm.Spec{Name: "demo", Namespace: "default"}
 	var stdout, stderr bytes.Buffer
-	code := runMicroVM([]string{
-		"create", "--backend=kubevirt", "--name=demo", "--apply",
-		"--image=registry.example/boot@sha256:" + strings.Repeat("b", 64),
-		"-p", "8080:80",
-	}, &stdout, &stderr, execute)
-	if code != 0 {
+	code := dispatchKubeVirt(context.Background(), host, "create", spec, nil, false, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "plugin refused") {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "--apply") || !strings.Contains(joined, "--publish 8080:80") {
-		t.Fatalf("args=%v", args)
+}
+
+func TestRunMicroVMKubeVirtFailsClosedWithoutAnInstalledPlugin(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runMicroVM([]string{
+		"create", "--backend=kubevirt", "--name=demo", "--namespace=default",
+		"--image=registry.example/boot@sha256:" + strings.Repeat("b", 64),
+	}, &stdout, &stderr, nil)
+	if code == 0 {
+		t.Fatal("kubevirt backend succeeded with no --plugin-dir configured")
+	}
+	if !strings.Contains(stderr.String(), "runtime.create") || !strings.Contains(stderr.String(), "--plugin-dir") {
+		t.Fatalf("stderr does not explain the missing plugin: %s", stderr.String())
 	}
 }
 
@@ -554,27 +715,38 @@ func TestRunMicroVMRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
-// A kubevirt spec platform-factory-kubevirt would itself reject (an unpinned
-// image, here) is no longer caught by cmd/platform-factory - that validation now
-// lives entirely in the plugin. This verifies the plugin's non-zero exit
-// still propagates end-to-end.
-func TestRunMicroVMKubeVirtPropagatesPluginRejection(t *testing.T) {
+func TestRunMicroVMHelpShowsMicroVMUsageNotGlobalUsage(t *testing.T) {
 	execute := func(string, []string, []string, io.Reader, io.Writer, io.Writer) error {
-		return microvmExitError{code: 2}
+		t.Fatal("executor called for --help")
+		return nil
 	}
+	for _, args := range [][]string{{"-h"}, {"--help"}, {"help"}} {
+		var stdout, stderr bytes.Buffer
+		if code := runMicroVM(args, &stdout, &stderr, execute); code != 0 {
+			t.Fatalf("args=%v code=%d stderr=%s", args, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "platform-factory microvm <") {
+			t.Fatalf("args=%v did not print microvm-specific usage: %s", args, stdout.String())
+		}
+		if strings.Contains(stdout.String(), "Common commands:") {
+			t.Fatalf("args=%v printed the global top-level usage instead of microvm's own: %s", args, stdout.String())
+		}
+	}
+
+	// The same must hold reached through the real top-level dispatcher,
+	// which previously intercepted "microvm --help" before runMicroVM ever
+	// saw it and printed the global usage instead.
 	var stdout, stderr bytes.Buffer
-	code := runMicroVM([]string{
-		"create", "--backend=kubevirt", "--name=demo", "--image=latest",
-	}, &stdout, &stderr, execute)
-	if code != 2 {
+	if code := run([]string{"microvm", "--help"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
+	if !strings.Contains(stdout.String(), "platform-factory microvm <") {
+		t.Fatalf("run() did not print microvm-specific usage: %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Common commands:") {
+		t.Fatalf("run() printed the global top-level usage instead of microvm's own: %s", stdout.String())
+	}
 }
-
-type microvmExitError struct{ code int }
-
-func (e microvmExitError) Error() string { return "exit error" }
-func (e microvmExitError) ExitCode() int { return e.code }
 
 func TestRunRejectsUsageAndMissingInput(t *testing.T) {
 	for _, args := range [][]string{{"unknown"}, {"detect"}, {"detect", "--bad"}, {"detect", "/missing"}} {
@@ -620,18 +792,16 @@ func TestRunHelpVersionAndAliases(t *testing.T) {
 	}
 }
 
-func TestRunRequiresExplicitAmbiguityAcceptance(t *testing.T) {
+func TestRunDetectUsesLoadedLanguagePlugins(t *testing.T) {
 	root := t.TempDir()
 	_ = os.WriteFile(filepath.Join(root, "package-lock.json"), []byte("{}"), 0o644)
 	_ = os.WriteFile(filepath.Join(root, "requirements.lock"), []byte(""), 0o644)
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"detect", root}, &stdout, &stderr); code != 2 {
+	if code := run([]string{"detect", root}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d", code)
 	}
-	stdout.Reset()
-	stderr.Reset()
-	if code := run([]string{"detect", "--accept-ambiguous", root}, &stdout, &stderr); code != 0 {
-		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	if !strings.Contains(stdout.String(), `"kind": "node"`) || !strings.Contains(stdout.String(), "package-lock.json") {
+		t.Fatalf("loaded node plugin did not classify its own marker: %s", stdout.String())
 	}
 }
 
@@ -663,6 +833,112 @@ func TestRunInspectAndVerifyValidLayout(t *testing.T) {
 	}
 }
 
+func TestRunInspectAndVerifyOCIArchive(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	_ = os.WriteFile(binary, []byte("payload"), 0o755)
+	layoutDir := filepath.Join(root, "layout")
+	if _, err := oci.Build(oci.Options{Binary: binary, Output: layoutDir}); err != nil {
+		t.Fatal(err)
+	}
+	archiveName := filepath.Join(root, "layout.tar.gz")
+	archive, err := os.Create(archiveName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(archive)
+	tw := tar.NewWriter(gz)
+	if err := filepath.Walk(layoutDir, func(name string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || name == layoutDir {
+			return walkErr
+		}
+		relative, _ := filepath.Rel(layoutDir, name)
+		header, _ := tar.FileInfoHeader(info, "")
+		header.Name = filepath.ToSlash(relative)
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			file, err := os.Open(name)
+			if err != nil {
+				return err
+			}
+			_, copyErr := io.Copy(tw, file)
+			closeErr := file.Close()
+			return errors.Join(copyErr, closeErr)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(tw.Close(), gz.Close(), archive.Close()); err != nil {
+		t.Fatal(err)
+	}
+	archiveBytes, err := os.ReadFile(archiveName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(archiveBytes)
+	for _, command := range []string{"inspect", "verify"} {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{command, "--archive-format", "oci-layout.tar.gz", "--sha256", "sha256:" + hex.EncodeToString(digest[:]), archiveName}, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s code=%d stderr=%s", command, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), `"valid": true`) || !strings.Contains(stdout.String(), `"manifests": 1`) {
+			t.Fatalf("%s output=%s", command, stdout.String())
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"verify", "--archive-format", "tar", archiveName}, &stdout, &stderr); code != 2 {
+		t.Fatalf("unsupported format code=%d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"verify", "--archive-format", "oci-layout.tar.gz", "--sha256", strings.Repeat("0", 64), archiveName}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "SHA-256 mismatch") {
+		t.Fatalf("digest mismatch code=%d stderr=%s", code, stderr.String())
+	}
+	for _, invalid := range []string{"short", strings.Repeat("A", 64)} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := run([]string{"verify", "--archive-format", "oci-layout.tar.gz", "--sha256", invalid, archiveName}, &stdout, &stderr); code != 2 {
+			t.Fatalf("invalid digest %q code=%d stderr=%s", invalid, code, stderr.String())
+		}
+	}
+}
+
+func TestRunVerifyDockerSaveArchive(t *testing.T) {
+	root := t.TempDir()
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	archiveName := filepath.Join(root, "docker-save.tar")
+	file, err := os.Create(archiveName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, writer := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- writeDockerArchive(writer, layoutName, "example/service:v1") }()
+	_, copyErr := io.Copy(file, reader)
+	writeErr := <-done
+	if err := errors.Join(copyErr, writeErr, file.Close()); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"verify", "--archive-format", "docker-save.tar", archiveName}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"images": 1`) || !strings.Contains(stdout.String(), `"example/service:v1"`) {
+		t.Fatalf("output=%s", stdout.String())
+	}
+	if err := os.WriteFile(archiveName, []byte("not a tar"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"verify", "--archive-format", "docker-save.tar", archiveName}, &stdout, &stderr); code != 1 {
+		t.Fatalf("malformed archive code=%d stderr=%s", code, stderr.String())
+	}
+}
+
 func TestRunBuildThenVerify(t *testing.T) {
 	root := t.TempDir()
 	binary := filepath.Join(root, "service")
@@ -682,6 +958,41 @@ func TestRunBuildThenVerify(t *testing.T) {
 	stderr.Reset()
 	if code := run([]string{"verify", output}, &stdout, &stderr); code != 0 {
 		t.Fatalf("verify code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunBuildEnforcesCLIResourceBudgetAndLeavesNoLayout(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, bytes.Repeat([]byte("x"), 1<<20), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "layout")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"build", "--max-wall-clock", "1ns", "--output", output, binary}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "budget exceeded") {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(output); !os.IsNotExist(err) {
+		t.Fatalf("budget failure left output behind: %v", err)
+	}
+}
+
+func TestRunBuildRejectsInvalidResourceBudgets(t *testing.T) {
+	for _, args := range [][]string{
+		{"--max-memory", "12MB", "app"},
+		{"--max-memory", "-1", "app"},
+		{"--max-wall-clock", "-1s", "app"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := runBuild(context.Background(), args, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "invalid resource budget") {
+			t.Fatalf("args=%v code=%d stdout=%s stderr=%s", args, code, stdout.String(), stderr.String())
+		}
+	}
+	for input, want := range map[string]int64{"0": 0, "512MiB": 512 << 20, "2GiB": 2 << 30, "4096": 4096} {
+		got, err := parseByteLimit(input)
+		if err != nil || got != want {
+			t.Fatalf("parseByteLimit(%q)=%d,%v want=%d", input, got, err, want)
+		}
 	}
 }
 
@@ -754,16 +1065,71 @@ func TestRunBuildDryRunWritesNothing(t *testing.T) {
 	}
 	output := filepath.Join(root, "layout")
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"build", "--dry-run", "--output", output, binary}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"build", "--dry-run", "--max-wall-clock", "30s", "--max-cpu", "10s", "--max-memory", "512MiB", "--output", output, binary}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	for _, want := range []string{`"dry_run": true`, `"profile": "static"`, `"valid": true`} {
+	for _, want := range []string{`"dry_run": true`, `"profile": "static"`, `"max_wall_clock": "30s"`, `"max_cpu": "10s"`, `"max_memory_bytes": 536870912`, `"valid": true`} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout missing %s: %s", want, stdout.String())
 		}
 	}
 	if _, err := os.Stat(output); !os.IsNotExist(err) {
 		t.Fatalf("dry-run created the layout: %v", err)
+	}
+}
+
+func TestRunBuildDistRespectsExplicitOutput(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dist := filepath.Join(root, "dist")
+	explicitOutput := filepath.Join(root, "explicit-layout")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"build", "--dist", dist, "--output", explicitOutput, binary}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := layout.Verify(explicitOutput); err != nil {
+		t.Fatalf("--output was not honored alongside --dist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dist, "oci-layout")); !os.IsNotExist(err) {
+		t.Fatalf("--dist wrote oci-layout/ despite explicit --output: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dist, "sbom.json")); err != nil {
+		t.Fatalf("dist/sbom.json still expected alongside explicit --output: %v", err)
+	}
+}
+
+func TestRunBuildRebuildWritesDistSBOMAlongsideReproducibilityReport(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("reproducible dist payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dist := filepath.Join(root, "dist")
+	reports := filepath.Join(root, "reports")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"build", "--rebuild=2", "--require-identical",
+		"--dist", dist, "--reports", reports, binary,
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+
+	reproBytes, err := os.ReadFile(filepath.Join(reports, "reproducibility.json"))
+	if err != nil {
+		t.Fatalf("read reports/reproducibility.json: %v", err)
+	}
+	var repro map[string]any
+	if err := json.Unmarshal(reproBytes, &repro); err != nil {
+		t.Fatalf("decode reports/reproducibility.json: %v", err)
+	}
+	if repro["reproducible"] != true {
+		t.Fatalf("reports/reproducibility.json reproducible=%v, want true", repro["reproducible"])
+	}
+	if _, err := os.Stat(filepath.Join(dist, "sbom.json")); err != nil {
+		t.Fatalf("dist/sbom.json expected on the rebuild success path: %v", err)
 	}
 }
 
@@ -926,7 +1292,7 @@ func TestEmitRebuildResultDivergence(t *testing.T) {
 		divergences: []layout.DiffReport{report}, requireIdentical: true,
 	}
 	var stdout, stderr bytes.Buffer
-	if code := emitRebuildResult(outcome, "json", &stdout, &stderr); code != 1 {
+	if code := emitRebuildResult(outcome, "json", "", &stdout, &stderr); code != 1 {
 		t.Fatalf("require-identical divergence code=%d", code)
 	}
 	if !strings.Contains(stdout.String(), `"reproducible": false`) || !strings.Contains(stdout.String(), `"divergences"`) {
@@ -935,7 +1301,7 @@ func TestEmitRebuildResultDivergence(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	outcome.requireIdentical = false
-	if code := emitRebuildResult(outcome, "text", &stdout, &stderr); code != 0 {
+	if code := emitRebuildResult(outcome, "text", "", &stdout, &stderr); code != 0 {
 		t.Fatalf("report-only divergence code=%d", code)
 	}
 	if !strings.Contains(stdout.String(), "NOT reproducible") {
@@ -953,6 +1319,128 @@ func TestRunBuildRebuildSurfacesBuildError(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "out")); !os.IsNotExist(err) {
 		t.Fatalf("failed rebuild left an output: %v", err)
+	}
+}
+
+func TestRunBuildWritesDistAndReports(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dist := filepath.Join(root, "dist")
+	reports := filepath.Join(root, "reports")
+	keys := filepath.Join(root, "keys")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"build", "--dist", dist, "--reports", reports, "--sign-key-dir", keys, binary}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := layout.Verify(filepath.Join(dist, "oci-layout")); err != nil {
+		t.Fatalf("verify dist layout: %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(dist, "sbom.json"), filepath.Join(dist, "provenance.json"),
+		filepath.Join(dist, "attestations", "provenance.dsse.json"),
+		filepath.Join(dist, "signatures", "subject.dsse.json"),
+		filepath.Join(reports, "build.json"), filepath.Join(reports, "policy.json"), filepath.Join(reports, "metrics.json"),
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		var document any
+		if err := json.Unmarshal(data, &document); err != nil {
+			t.Fatalf("invalid JSON in %s: %v", path, err)
+		}
+	}
+	buildReport, err := os.ReadFile(filepath.Join(reports, "build.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(buildReport), filepath.Join(dist, "oci-layout")) || !strings.Contains(string(buildReport), `"valid": true`) {
+		t.Fatalf("build report=%s", buildReport)
+	}
+	sbomReport, err := os.ReadFile(filepath.Join(dist, "sbom.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(sbomReport), `"name":"/app/service"`) {
+		t.Fatalf("sbom report=%s", sbomReport)
+	}
+	provenanceReport, err := os.ReadFile(filepath.Join(dist, "provenance.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(provenanceReport), `"subject_digest": "sha256:`) {
+		t.Fatalf("provenance report=%s", provenanceReport)
+	}
+	policyReport, err := os.ReadFile(filepath.Join(reports, "policy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(policyReport), `"allowed": true`) {
+		t.Fatalf("policy report=%s", policyReport)
+	}
+	metricsReport, err := os.ReadFile(filepath.Join(reports, "metrics.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"api_version": "platform-factory.dev/metrics/v1"`, `"operation": "build"`, `"success": true`, `"platforms": 1`} {
+		if !strings.Contains(string(metricsReport), want) {
+			t.Fatalf("metrics report missing %s: %s", want, metricsReport)
+		}
+	}
+	envelopeData, err := os.ReadFile(filepath.Join(dist, "signatures", "subject.dsse.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope attestation.Envelope
+	if err := json.Unmarshal(envelopeData, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	store, err := signing.NewFileKeyStore(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, err := store.PublicKey("release")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := attestation.Verify(envelope, map[string]ed25519.PublicKey{envelope.Signatures[0].KeyID: publicKey}); err != nil {
+		t.Fatalf("verify subject envelope: %v", err)
+	}
+	summary, err := os.ReadFile(filepath.Join(reports, "summary.txt"))
+	if err != nil || !strings.Contains(string(summary), "Policy: allowed=true") {
+		t.Fatalf("summary=%s err=%v", summary, err)
+	}
+}
+
+func TestRunBuildRebuildWritesReproducibilityReport(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reports := filepath.Join(root, "reports")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{
+		"build", "--rebuild=2", "--output", filepath.Join(root, "layout"), "--reports", reports, binary,
+	}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(reports, "reproducibility.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		Rebuilds     int  `json:"rebuilds"`
+		Reproducible bool `json:"reproducible"`
+	}
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Rebuilds != 2 || !report.Reproducible {
+		t.Fatalf("report=%s", data)
 	}
 }
 
@@ -1293,6 +1781,175 @@ func TestRunMicroVMRunLegacyDiskMultiDiskAmbiguousWithoutOverride(t *testing.T) 
 	}
 }
 
+func TestRunMicroVMInspectLegacyDiskRequiresDiskFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runMicroVM([]string{"inspect-legacy-disk"}, &stdout, &stderr, nil)
+	if code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--disk is required") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestRunMicroVMInspectLegacyDiskWritesReportsAndNeverInvokesARunner(t *testing.T) {
+	osDisk := filepath.Join(t.TempDir(), "os.raw")
+	header := make([]byte, 4096)
+	header[446] = 0x80 // active/bootable
+	header[446+4] = 0x83
+	header[510], header[511] = 0x55, 0xaa
+	if err := os.WriteFile(osDisk, header, 0o644); err != nil {
+		t.Fatalf("write disk: %v", err)
+	}
+	execute := func(name string, args, environment []string, _ io.Reader, _, _ io.Writer) error {
+		t.Fatalf("inspect-legacy-disk must never invoke a runner; name=%s args=%v", name, args)
+		return nil
+	}
+	reportDir := filepath.Join(t.TempDir(), "reports")
+	var stdout, stderr bytes.Buffer
+	code := runMicroVM([]string{
+		"inspect-legacy-disk", "--disk=" + osDisk, "--report-dir=" + reportDir,
+	}, &stdout, &stderr, execute)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	jsonBytes, err := os.ReadFile(filepath.Join(reportDir, "discovery.json"))
+	if err != nil {
+		t.Fatalf("read discovery.json: %v", err)
+	}
+	var report vmdisk.DiscoveryReport
+	if err := json.Unmarshal(jsonBytes, &report); err != nil {
+		t.Fatalf("unmarshal discovery.json: %v", err)
+	}
+	if !report.BootDiskResolved || len(report.Disks) != 1 || report.Disks[0].Path != osDisk {
+		t.Fatalf("report=%+v", report)
+	}
+	if report.Disks[0].SHA256 == "" || !strings.HasPrefix(report.Disks[0].SHA256, "sha256:") {
+		t.Fatalf("SHA256=%q", report.Disks[0].SHA256)
+	}
+	textBytes, err := os.ReadFile(filepath.Join(reportDir, "discovery.txt"))
+	if err != nil {
+		t.Fatalf("read discovery.txt: %v", err)
+	}
+	if !strings.Contains(string(textBytes), osDisk) {
+		t.Fatalf("discovery.txt missing disk path:\n%s", textBytes)
+	}
+	if !strings.Contains(stdout.String(), osDisk) {
+		t.Fatalf("stdout=%s", stdout.String())
+	}
+	compatibilityBytes, err := os.ReadFile(filepath.Join(reportDir, "compatibility.json"))
+	if err != nil {
+		t.Fatalf("read compatibility.json: %v", err)
+	}
+	var compatibility vmdisk.CompatibilityReport
+	if err := json.Unmarshal(compatibilityBytes, &compatibility); err != nil {
+		t.Fatalf("unmarshal compatibility.json: %v", err)
+	}
+	if compatibility.RecommendedMode != vmdisk.ModeUnsupported || !compatibility.DeploymentBlocked || compatibility.DiscoveryDigest == "" {
+		t.Fatalf("compatibility=%+v", compatibility)
+	}
+	if text, err := os.ReadFile(filepath.Join(reportDir, "compatibility.txt")); err != nil || !strings.Contains(string(text), "Conditions preventing deployment") {
+		t.Fatalf("compatibility.txt=%q err=%v", text, err)
+	}
+}
+
+func TestRunMicroVMInspectLegacyDiskExplicitEncapsulationAndInvalidStrategy(t *testing.T) {
+	osDisk := filepath.Join(t.TempDir(), "os.raw")
+	header := make([]byte, 4096)
+	header[446], header[450], header[510], header[511] = 0x80, 0x83, 0x55, 0xaa
+	if err := os.WriteFile(osDisk, header, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reportDir := filepath.Join(t.TempDir(), "reports")
+	var stdout, stderr bytes.Buffer
+	if code := runMicroVM([]string{"inspect-legacy-disk", "--disk=" + osDisk, "--strategy=vm-encapsulation", "--report-dir=" + reportDir}, &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(reportDir, "compatibility.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report vmdisk.CompatibilityReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.RecommendedMode != vmdisk.ModeVMEncapsulation || report.DeploymentBlocked || report.AutomaticDecision {
+		t.Fatalf("report=%+v", report)
+	}
+
+	invalidDir := filepath.Join(t.TempDir(), "must-not-exist")
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMicroVM([]string{"inspect-legacy-disk", "--disk=" + osDisk, "--strategy=magic", "--report-dir=" + invalidDir}, &stdout, &stderr, nil); code != 2 || !strings.Contains(stderr.String(), "unknown compatibility strategy") {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(invalidDir); !os.IsNotExist(err) {
+		t.Fatalf("invalid strategy wrote reports: %v", err)
+	}
+}
+
+func TestRunMicroVMInspectLegacyDiskAmbiguousBootDiskStillWritesAReport(t *testing.T) {
+	first := filepath.Join(t.TempDir(), "first.raw")
+	second := filepath.Join(t.TempDir(), "second.raw")
+	for _, path := range []string{first, second} {
+		header := make([]byte, 4096)
+		header[510], header[511] = 0x55, 0xaa
+		if err := os.WriteFile(path, header, 0o644); err != nil {
+			t.Fatalf("write disk: %v", err)
+		}
+	}
+	reportDir := filepath.Join(t.TempDir(), "reports")
+	var stdout, stderr bytes.Buffer
+	code := runMicroVM([]string{
+		"inspect-legacy-disk", "--disk=" + first, "--disk=" + second, "--report-dir=" + reportDir,
+	}, &stdout, &stderr, nil)
+	// Unlike run-legacy-disk, an inconclusive boot-disk decision must not
+	// fail the whole command - the report itself records the ambiguity.
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	jsonBytes, err := os.ReadFile(filepath.Join(reportDir, "discovery.json"))
+	if err != nil {
+		t.Fatalf("read discovery.json: %v", err)
+	}
+	var report vmdisk.DiscoveryReport
+	if err := json.Unmarshal(jsonBytes, &report); err != nil {
+		t.Fatalf("unmarshal discovery.json: %v", err)
+	}
+	if report.BootDiskResolved {
+		t.Fatal("BootDiskResolved=true, want false for an ambiguous pair")
+	}
+	if len(report.Disks) != 2 {
+		t.Fatalf("Disks=%+v", report.Disks)
+	}
+	foundAmbiguity := false
+	for _, item := range report.HumanReviewItems {
+		if strings.Contains(item, "--boot-disk") {
+			foundAmbiguity = true
+		}
+	}
+	if !foundAmbiguity {
+		t.Fatalf("HumanReviewItems=%+v", report.HumanReviewItems)
+	}
+}
+
+func TestRunMicroVMInspectLegacyDiskFailsClosedOnUnrecognizedFormat(t *testing.T) {
+	disk := filepath.Join(t.TempDir(), "not-a-disk.bin")
+	if err := os.WriteFile(disk, bytes.Repeat([]byte{0x42}, 512), 0o644); err != nil {
+		t.Fatalf("write disk: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runMicroVM([]string{
+		"inspect-legacy-disk", "--disk=" + disk, "--report-dir=" + filepath.Join(t.TempDir(), "reports"),
+	}, &stdout, &stderr, nil)
+	if code != 1 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "unrecognized or unsupported disk image format") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
 func TestCommandAliasHandlesEmptyInput(t *testing.T) {
 	got, warning := commandAlias(nil)
 	if len(got) != 0 || warning != "" {
@@ -1347,7 +2004,12 @@ func TestTopLevelDispatchCoversRemainingCommands(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := run([]string{"run"}, &stdout, &stderr); code != 2 {
+	// A bare `pf run` with no positional IMAGE/layout now falls back to
+	// project mode (the same "just works" shorthand `pf launch` already
+	// gives bare invocations) - with no project here either, it reports
+	// the friendly `pf init` pointer rather than runContainer's old
+	// generic usage error.
+	if code := run([]string{"run"}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "pf init") {
 		t.Fatalf("run with no arguments code=%d stderr=%s", code, stderr.String())
 	}
 	stdout.Reset()
@@ -1383,6 +2045,37 @@ func TestRunContainerHandlesHelpAndDashPrefixedImage(t *testing.T) {
 	if code := runContainer([]string{"--network=bridge", "--", "-badimage"}, &stdout, &stderr, execute); code != 2 ||
 		!strings.Contains(stderr.String(), "invalid image reference") {
 		t.Fatalf("dash-prefixed image code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunContainerRequiresATargetWithAClearError(t *testing.T) {
+	execute := func(string, []string, io.Reader, io.Writer, io.Writer) error {
+		t.Fatal("executor called with no target")
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runContainer(nil, &stdout, &stderr, execute); code != 2 ||
+		!strings.Contains(stderr.String(), "an IMAGE or local OCI layout is required") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunContainerRejectsAPathShapedTargetThatDoesNotExist(t *testing.T) {
+	execute := func(string, []string, io.Reader, io.Writer, io.Writer) error {
+		t.Fatal("docker/podman must never be invoked for a nonexistent local-looking target")
+		return nil
+	}
+	dir := t.TempDir()
+	for _, target := range []string{
+		filepath.Join(dir, "does-not-exist"), // absolute path
+		"./relative-does-not-exist",          // "./" prefix
+		".platform-factory/image",            // "." prefix without a slash - pf.yaml's own default build output
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := runContainer([]string{target}, &stdout, &stderr, execute); code != 1 ||
+			!strings.Contains(stderr.String(), "looks like a local path") {
+			t.Fatalf("target=%q code=%d stderr=%s", target, code, stderr.String())
+		}
 	}
 }
 

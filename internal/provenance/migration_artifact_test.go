@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	appmigration "github.com/CYPT71/secure-oci-base/internal/app/migration"
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	appmigration "github.com/CYPT71/platform-factory/internal/app/migration"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 func verifiedArtifactEvidence(operation core.OperationID) appmigration.ArtifactEvidence {

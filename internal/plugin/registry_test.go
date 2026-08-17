@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	appmigration "github.com/CYPT71/secure-oci-base/internal/app/migration"
+	appmigration "github.com/CYPT71/platform-factory/internal/app/migration"
 )
 
 func publishTestPlugin(t *testing.T, r *Registry, manifest Manifest) *Client {

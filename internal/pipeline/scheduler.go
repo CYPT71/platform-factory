@@ -1,9 +1,9 @@
 // Package pipeline re-exports scheduler types for backward compatibility.
-// New code should import "github.com/CYPT71/secure-oci-base/internal/scheduler" directly.
+// New code should import "github.com/CYPT71/platform-factory/internal/scheduler" directly.
 package pipeline
 
 import (
-	"github.com/CYPT71/secure-oci-base/internal/scheduler"
+	"github.com/CYPT71/platform-factory/internal/scheduler"
 )
 
 // Re-export types from scheduler package for backward compatibility

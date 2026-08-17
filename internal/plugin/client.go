@@ -15,13 +15,14 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/observability"
 )
 
 // HelloResult is the host-owned representation of the v1 handshake.
@@ -36,7 +37,7 @@ type HelloResult struct {
 // solely so tests can substitute a stub that reports the sandbox as
 // unavailable - the real unavailable case (namespace creation refused by
 // the kernel) is not something a portable test can force.
-var pluginSandboxWrapper = wrapWithPluginSandbox
+var pluginSandboxWrapper func(cmd *exec.Cmd, family PluginFamily, permissions PluginPermissions) error = wrapWithPluginSandbox
 
 // Client talks to one plugin subprocess.
 type Client struct {
@@ -69,23 +70,60 @@ type Client struct {
 // no host network access (see wrapWithPluginSandbox). If that isolation cannot
 // be applied, Start refuses to launch. The explicitly named degradation entry
 // point is StartAllowingUnsandboxed.
+//
+// Start applies defaultPermissionProfile's resource ceilings (see
+// permission_profile.go) because it has no manifest to resolve a family
+// from; VerifyAndStart, which does, uses StartWithFamily instead.
 func Start(ctx context.Context, executable string, args, env []string) (*Client, error) {
-	return start(ctx, executable, args, env, false)
+	return start(ctx, executable, args, env, false, "", PluginPermissions{})
 }
 
 // StartAllowingUnsandboxed launches a plugin even when the host cannot apply
 // the process sandbox. This is an explicit security degradation intended only
 // for a policy that has deliberately accepted the loss of isolation.
 func StartAllowingUnsandboxed(ctx context.Context, executable string, args, env []string) (*Client, error) {
-	return start(ctx, executable, args, env, true)
+	return start(ctx, executable, args, env, true, "", PluginPermissions{})
 }
 
-func start(ctx context.Context, executable string, args, env []string, allowUnsandboxed bool) (*Client, error) {
+// StartWithFamily is Start, but resolves resource ceilings from family's
+// PermissionProfile (permission_profile.go) instead of the family-less
+// default - the entry point VerifyAndStart uses once it has a manifest's
+// declared Family available.
+func StartWithFamily(ctx context.Context, executable string, args, env []string, family PluginFamily) (*Client, error) {
+	return start(ctx, executable, args, env, false, family, PluginPermissions{})
+}
+
+// StartAllowingUnsandboxedWithFamily combines StartAllowingUnsandboxed and
+// StartWithFamily.
+func StartAllowingUnsandboxedWithFamily(ctx context.Context, executable string, args, env []string, family PluginFamily) (*Client, error) {
+	return start(ctx, executable, args, env, true, family, PluginPermissions{})
+}
+
+// StartWithManifest is StartWithFamily, but additionally threads the
+// manifest's declared Permissions into the sandbox: a non-language-family
+// plugin that declares Permissions.Network gets the host's real network
+// namespace instead of the isolated, connectivity-less one every other
+// plugin gets (see wrapWithPluginSandbox), and one that declares
+// "kubeconfig" in Permissions.Secrets gets KUBECONFIG/HOME passed through
+// so it can actually find cluster credentials. VerifyAndStart uses this
+// once it has a manifest's declared Permissions available, the same way it
+// already uses StartWithFamily for Family.
+func StartWithManifest(ctx context.Context, executable string, args, env []string, family PluginFamily, permissions PluginPermissions) (*Client, error) {
+	return start(ctx, executable, args, env, false, family, permissions)
+}
+
+// StartAllowingUnsandboxedWithManifest combines StartAllowingUnsandboxed and
+// StartWithManifest.
+func StartAllowingUnsandboxedWithManifest(ctx context.Context, executable string, args, env []string, family PluginFamily, permissions PluginPermissions) (*Client, error) {
+	return start(ctx, executable, args, env, true, family, permissions)
+}
+
+func start(ctx context.Context, executable string, args, env []string, allowUnsandboxed bool, family PluginFamily, permissions PluginPermissions) (*Client, error) {
 	cmd, stdin, stdout, err := newPluginCommand(ctx, executable, args, env)
 	if err != nil {
 		return nil, err
 	}
-	if wrapErr := pluginSandboxWrapper(cmd); wrapErr == nil {
+	if wrapErr := pluginSandboxWrapper(cmd, family, permissions); wrapErr == nil {
 		if startErr := cmd.Start(); startErr == nil {
 			// Starting in namespaces is not evidence that the operation-specific
 			// filesystem, network, and credential grants were actually enforced.
@@ -123,6 +161,15 @@ func newPluginCommand(ctx context.Context, executable string, args, env []string
 	} else {
 		cmd.Env = []string{"PATH=/usr/bin:/bin"}
 	}
+	// The RPC protocol only uses stdin/stdout; leaving Stderr at its zero
+	// value sends it to /dev/null (see os/exec's docs for a nil Stderr),
+	// silently discarding every "plugin sandbox: ..." degradation
+	// warning this package's own sandbox helper prints when isolation
+	// partially fails (see sandbox_linux.go's isolateTempDirectory and
+	// applyResourceLimits, both intentionally best-effort). Forwarding it
+	// to the host's own stderr turns a silent security degradation into
+	// a visible one.
+	cmd.Stderr = os.Stderr
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("plugin: stdin pipe: %w", err)
@@ -168,12 +215,7 @@ func (c *Client) Hello() HelloResult { return c.hello }
 // HasCapability reports whether the plugin declared capability at the
 // handshake.
 func (c *Client) HasCapability(capability string) bool {
-	for _, declared := range c.hello.Capabilities {
-		if declared == capability {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(c.hello.Capabilities, capability)
 }
 
 // Call issues one read-only RPC and decodes its result into result, if non-nil.
@@ -199,7 +241,6 @@ func (c *Client) Call(ctx context.Context, method string, params, result any) er
 		rawParams = data
 	}
 
-	// Extract trace_id from context for end-to-end correlation (Sanetizer-todo item 18)
 	traceID := observability.TraceIDFromContext(ctx)
 
 	c.mu.Lock()
@@ -243,7 +284,9 @@ func isReadOnlyMethod(method string) bool {
 		"v1.migration.discover", "v1.migration.inspect", "v1.migration.observe", "v1.migration.artifact-observe", "v1.migration.export", "v1.migration.verify",
 		"v1.deployment.plan", "v1.deployment.observe",
 		"v1.runtime.logs", "v1.runtime.status",
-		"v1.analyzer.scan", "v1.analyzer.verify", "v1.registry.list":
+		"v1.analyzer.scan", "v1.analyzer.verify", "v1.registry.list",
+		"v1.observe.net-probe", "v1.observe.priv-probe", "v1.observe.isolation-probe", "v1.observe.tmp-probe", "v1.observe.netns-probe",
+		"v1.observe.memory-bomb", "v1.observe.fork-bomb":
 		return true
 	default:
 		return false
@@ -262,7 +305,6 @@ func isReadOnlyMethod(method string) bool {
 //
 // For non-mutating methods, this behaves identically to Call.
 //
-// This implements Sanetizer-todo item 13: "chaque opération mutante doit accepter
 // un OperationID, relancer la même opération après un crash ne doit pas créer
 // un deuxième workload."
 func (c *Client) CallWithIdempotency(ctx context.Context, operationID core.OperationID, method string, params, result any) error {
@@ -387,7 +429,6 @@ func (c *Client) callWithOperationID(ctx context.Context, method string, params,
 		rawParams = data
 	}
 
-	// Extract trace_id from context for end-to-end correlation (Sanetizer-todo item 18)
 	traceID := observability.TraceIDFromContext(ctx)
 
 	c.mu.Lock()

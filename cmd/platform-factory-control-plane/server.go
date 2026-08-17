@@ -14,11 +14,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/control"
-	"github.com/CYPT71/secure-oci-base/internal/mtls"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
-	"github.com/CYPT71/secure-oci-base/internal/provenance"
-	"github.com/CYPT71/secure-oci-base/internal/quota"
+	"github.com/CYPT71/platform-factory/internal/cache"
+	"github.com/CYPT71/platform-factory/internal/control"
+	"github.com/CYPT71/platform-factory/internal/mtls"
+	"github.com/CYPT71/platform-factory/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/provenance"
+	"github.com/CYPT71/platform-factory/internal/quota"
 )
 
 const maxRequestBodyBytes = 1 << 20
@@ -33,6 +34,7 @@ type Server struct {
 	Plane     *control.ControlPlane
 	StatePath string
 	Audit     *control.AuditJournal
+	CAS       *cache.Store
 
 	// Provenance, if non-nil, stores verified signed completion records
 	// (see verifyCompletionProvenance). Nil disables both storage and, by
@@ -57,6 +59,23 @@ type Server struct {
 	// promise.
 	tenantMu    sync.Mutex
 	leaseTenant map[string]quota.TenantID
+}
+
+// RestoreQuotaUsage rebuilds ephemeral counters from durable open leases.
+func (s *Server) RestoreQuotaUsage() error {
+	if s.Scheduler == nil {
+		return nil
+	}
+	for _, lease := range s.Plane.Leases() {
+		if lease.Tenant == "" || (lease.State != control.LeasePending && lease.State != control.LeaseAssigned) {
+			continue
+		}
+		if err := s.Scheduler.Schedule(quota.TenantID(lease.Tenant), quota.ResourceTypeParallel, 1); err != nil {
+			return fmt.Errorf("restore quota usage for lease %s: %w", lease.ID, err)
+		}
+		s.rememberTenantSlot(lease.ID, lease.Tenant)
+	}
+	return nil
 }
 
 // reserveTenantSlot checks and reserves one concurrent-lease slot for
@@ -173,6 +192,9 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /lease/submit", s.handleSubmitLease)
 	mux.HandleFunc("GET /lease/status", s.handleLeaseStatus)
 	mux.HandleFunc("GET /workers", s.handleWorkers)
+	if s.CAS != nil {
+		mux.Handle("/cas/blobs/", http.StripPrefix("/cas/blobs/", cache.BlobHandler(s.CAS, cache.DefaultRemoteBlobLimit)))
+	}
 	return mux
 }
 

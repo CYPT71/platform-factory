@@ -3,12 +3,12 @@ package policy
 import (
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	typederrors "github.com/CYPT71/secure-oci-base/internal/errors"
+	"github.com/CYPT71/platform-factory/internal/core"
+	typederrors "github.com/CYPT71/platform-factory/internal/errors"
 )
 
 func TestEvaluateRejectsUnsupportedAPIVersionAsTypedError(t *testing.T) {
-	_, err := Evaluate(Rules{APIVersion: "secure-oci.dev/policy/v0"}, Evidence{SubjectDigest: "sha256:abc"})
+	_, err := Evaluate(Rules{APIVersion: "platform-factory.dev/policy/v0"}, Evidence{SubjectDigest: "sha256:abc"})
 	if err == nil {
 		t.Fatal("expected an error for an unsupported api_version")
 	}

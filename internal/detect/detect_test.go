@@ -1,7 +1,6 @@
 package detect
 
 import (
-	"archive/zip"
 	"debug/elf"
 	"encoding/binary"
 	"os"
@@ -54,26 +53,18 @@ func writeFile(t *testing.T, name, content string) string {
 }
 
 func TestDetectScripts(t *testing.T) {
-	for _, test := range []struct {
-		shebang, kind, profile string
-	}{
-		{"#!/usr/bin/env python3\n", "python", "python"},
-		{"#!/usr/bin/env node\n", "node", "node"},
-		{"#!/usr/bin/env ruby\n", "ruby", "ruby"},
-		{"#!/usr/bin/env php\n", "php", "php"},
-		{"#!/bin/sh\n", "script", "unknown"},
-	} {
-		result, err := Path(writeFile(t, "app", test.shebang))
+	for _, shebang := range []string{"#!/usr/bin/env python3\n", "#!/usr/bin/env node\n", "#!/usr/bin/env ruby\n", "#!/usr/bin/env php\n", "#!/bin/sh\n"} {
+		result, err := Path(writeFile(t, "app", shebang))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Kind != test.kind || result.Profile != test.profile {
+		if result.Kind != "script" || result.Profile != "unknown" {
 			t.Fatalf("result = %+v", result)
 		}
 	}
 }
 
-func TestDetectDirectoryAndRequireAmbiguity(t *testing.T) {
+func TestDirectoryLanguageDetectionIsDelegatedToPlugins(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"package-lock.json", "requirements.lock"} {
 		if err := os.WriteFile(filepath.Join(root, name), []byte("{}"), 0o644); err != nil {
@@ -84,74 +75,37 @@ func TestDetectDirectoryAndRequireAmbiguity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Ambiguous || strings.Join(result.Candidates, ",") != "node,python" {
+	if result.Kind != "unknown" || result.Profile != "unknown" || result.Ambiguous || len(result.Candidates) != 0 {
 		t.Fatalf("result = %+v", result)
 	}
 	data, err := JSON(result)
-	if err != nil || !strings.Contains(string(data), `"ambiguous": true`) {
+	if err != nil || !strings.Contains(string(data), `delegated to language plugins`) {
 		t.Fatalf("json=%s err=%v", data, err)
 	}
 }
 
-func TestDetectCompiledAndInterpretedEcosystemMarkers(t *testing.T) {
-	for _, test := range []struct {
-		marker, kind, profile string
-	}{
-		{"go.mod", "go", "static"},
-		{"Cargo.toml", "rust", "static"},
-		{"Cargo.lock", "rust", "static"},
-		{"Gemfile", "ruby", "ruby"},
-		{"composer.json", "php", "php"},
-	} {
+func TestDetectDoesNotOwnEcosystemMarkers(t *testing.T) {
+	for _, marker := range []string{"go.mod", "Cargo.toml", "Cargo.lock", "Gemfile", "composer.json"} {
 		root := t.TempDir()
-		if err := os.WriteFile(filepath.Join(root, test.marker), []byte("x"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(root, marker), []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		result, err := Path(root)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Kind != test.kind || result.Profile != test.profile || result.Ambiguous {
-			t.Fatalf("marker %s: result=%+v", test.marker, result)
+		if result.Kind != "unknown" || result.Profile != "unknown" || result.Ambiguous {
+			t.Fatalf("marker %s: result=%+v", marker, result)
 		}
-	}
-	root := t.TempDir()
-	for _, name := range []string{"go.mod", "package-lock.json"} {
-		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	result, err := Path(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.Ambiguous || strings.Join(result.Candidates, ",") != "go,node" {
-		t.Fatalf("result=%+v", result)
 	}
 }
 
-func TestDetectJavaDotnetAndUnknown(t *testing.T) {
-	jar := filepath.Join(t.TempDir(), "app.jar")
-	file, err := os.Create(jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	writer := zip.NewWriter(file)
-	entry, err := writer.Create("META-INF/MANIFEST.MF")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _ = entry.Write([]byte("Manifest-Version: 1.0\n"))
-	_ = writer.Close()
-	_ = file.Close()
-	for _, test := range []struct{ path, kind string }{
-		{jar, "java"},
-		{writeFile(t, "app.dll", "MZ"), "dotnet"},
-		{writeFile(t, "blob", "unknown"), "unknown"},
-	} {
-		result, err := Path(test.path)
-		if err != nil || result.Kind != test.kind {
-			t.Fatalf("path=%s result=%+v err=%v", test.path, result, err)
+func TestDetectUnknownRegularFilesWithoutLanguagePlugins(t *testing.T) {
+	for _, name := range []string{"app.jar", "app.dll", "blob"} {
+		path := writeFile(t, name, "unknown")
+		result, err := Path(path)
+		if err != nil || result.Kind != "unknown" {
+			t.Fatalf("path=%s result=%+v err=%v", path, result, err)
 		}
 	}
 }

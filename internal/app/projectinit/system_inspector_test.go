@@ -8,12 +8,10 @@ import (
 	"testing"
 )
 
-func TestInspectSystemFindsMultipleProvenComponentsDeterministically(t *testing.T) {
+func TestInspectSystemDoesNotClassifyLanguageOwnedMarkers(t *testing.T) {
 	dir := t.TempDir()
 	writeMarker(t, dir, "worker", "Cargo.toml")
 	writeMarker(t, dir, "api", "go.mod")
-
-	before := treeNames(t, dir)
 	first, err := InspectSystem(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -22,121 +20,41 @@ func TestInspectSystemFindsMultipleProvenComponentsDeterministically(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(first, second) {
-		t.Fatalf("inspection is nondeterministic:\n%#v\n%#v", first, second)
-	}
-	if got := []string{first.Components[0].Name, first.Components[1].Name}; !reflect.DeepEqual(got, []string{"api", "worker"}) {
-		t.Fatalf("components = %v", got)
-	}
-	for _, component := range first.Components {
-		if component.Runtime.Recommended != RuntimeContainer || component.Runtime.Selected != "" {
-			t.Fatalf("runtime choice was invented: %#v", component.Runtime)
-		}
-		if len(component.Runtime.Unknowns) == 0 || component.Runtime.Unknowns[0].Subject != "runtime.selected" {
-			t.Fatalf("selection uncertainty missing: %#v", component.Runtime)
-		}
-	}
-	if len(first.Connections) != 0 || len(first.Resources) != 0 || len(first.Unknowns) != 2 {
-		t.Fatalf("unproved topology was invented: %#v", first)
-	}
-	if after := treeNames(t, dir); !reflect.DeepEqual(before, after) {
-		t.Fatalf("inspection mutated tree: before=%v after=%v", before, after)
-	}
-}
-
-func TestInspectSystemPreservesAmbiguityAndIgnoresUnprovedDirectories(t *testing.T) {
-	dir := t.TempDir()
-	writeMarker(t, dir, "mixed", "go.mod")
-	writeMarker(t, dir, "mixed", "Cargo.toml")
-	if err := os.Mkdir(filepath.Join(dir, "notes"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	proposal, err := InspectSystem(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(proposal.Components) != 1 || proposal.Components[0].Name != "mixed" {
-		t.Fatalf("components = %#v", proposal.Components)
-	}
-	unknowns := proposal.Components[0].Runtime.Unknowns
-	if len(unknowns) != 2 || unknowns[0].Subject != "language" || !strings.Contains(unknowns[0].Reason, "go, rust") {
-		t.Fatalf("ambiguity not preserved: %#v", unknowns)
-	}
-	if got := proposal.Unknowns[0]; got.Subject != "component.mixed.language" || !strings.Contains(got.Reason, "go, rust") {
-		t.Fatalf("system ambiguity not explicit: %#v", proposal.Unknowns)
-	}
-	for _, unknown := range proposal.Unknowns {
-		if unknown.Subject == "component.notes" {
-			t.Fatalf("ordinary directory became a component: %#v", proposal.Unknowns)
-		}
-	}
-}
-
-func TestInspectSystemMarksUnrecognizedApplicationScopeUnknown(t *testing.T) {
-	dir := t.TempDir()
-	app := filepath.Join(dir, "custom-app")
-	if err := os.Mkdir(app, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(app, "main.py"), []byte("print('hello')\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(dir, "documentation"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	proposal, err := InspectSystem(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(proposal.Components) != 0 {
-		t.Fatalf("unrecognized source became a component: %#v", proposal.Components)
-	}
-	if got := proposal.Unknowns[0]; got.Subject != "component.custom-app" || !strings.Contains(got.Reason, "main.py") {
-		t.Fatalf("application scope was hidden: %#v", proposal.Unknowns)
-	}
-	for _, unknown := range proposal.Unknowns {
-		if unknown.Subject == "component.documentation" {
-			t.Fatalf("ordinary directory became unknown: %#v", proposal.Unknowns)
-		}
+	if !reflect.DeepEqual(first, second) || len(first.Components) != 0 {
+		t.Fatalf("host classified plugin-owned project markers: %#v", first)
 	}
 }
 
 func TestInspectSystemDoesNotTraverseSymlinkedApplicationDirectory(t *testing.T) {
 	dir := t.TempDir()
 	target := t.TempDir()
-	if err := os.WriteFile(filepath.Join(target, "go.mod"), []byte("module example/linked\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(target, "project.marker"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, filepath.Join(dir, "linked-app")); err != nil {
 		t.Fatal(err)
 	}
-
 	proposal, err := InspectSystem(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(proposal.Components) != 0 {
-		t.Fatalf("symlink target was trusted as a component: %#v", proposal.Components)
-	}
-	if got := proposal.Unknowns[0]; got.Subject != "component.linked-app" || !strings.Contains(got.Reason, "symlinked") {
-		t.Fatalf("symlinked application scope was hidden: %#v", proposal.Unknowns)
+	if len(proposal.Components) != 0 || len(proposal.Unknowns) != 1 || !strings.Contains(proposal.Unknowns[0].Reason, "symlinked") {
+		t.Fatalf("proposal=%#v", proposal)
 	}
 }
 
-func TestBuildPlanAttachesSystemProposalWithoutChangingConfigV1(t *testing.T) {
+func TestBuildPlanRemainsLanguageNeutralWithoutPluginProposal(t *testing.T) {
 	dir := t.TempDir()
 	writeMarker(t, dir, "api", "go.mod")
 	plan, err := BuildPlan(dir, Ecosystem{}, nil, testObservations())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.System == nil || len(plan.System.Components) != 1 {
-		t.Fatalf("proposal not attached: %#v", plan.System)
+	if plan.System == nil || len(plan.System.Components) != 0 {
+		t.Fatalf("proposal=%#v", plan.System)
 	}
-	if content := string(plan.Actions[0].content); content != "# Generated by `platform-factory init` (`pf init`) on 2026-08-08.\nversion: 1\n" {
-		t.Fatalf("v1 config changed unexpectedly: %q", content)
+	if content := string(plan.Actions[0].content); !strings.Contains(content, "version: 1") || strings.Contains(content, "language:") {
+		t.Fatalf("unexpected config: %q", content)
 	}
 }
 
@@ -149,23 +67,4 @@ func writeMarker(t *testing.T, root, component, marker string) {
 	if err := os.WriteFile(filepath.Join(dir, marker), []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func treeNames(t *testing.T, root string) []string {
-	t.Helper()
-	var names []string
-	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		names = append(names, relative)
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return names
 }

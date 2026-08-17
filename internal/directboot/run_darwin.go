@@ -5,7 +5,7 @@ package directboot
 import (
 	"context"
 
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor/hvf"
+	"github.com/CYPT71/platform-factory/internal/hypervisor/hvf"
 )
 
 func Run(ctx context.Context, config Config) (Result, error) {

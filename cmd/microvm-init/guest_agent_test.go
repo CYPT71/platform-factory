@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/guesttransport"
+	"github.com/CYPT71/platform-factory/internal/guesttransport"
 )
 
 func TestGuestEndpointServesAuthenticatedLifecycle(t *testing.T) {

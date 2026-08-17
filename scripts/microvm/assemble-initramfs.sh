@@ -19,7 +19,7 @@ init_binary=$2
 output=$3
 shift 3
 
-rootfs=$(mktemp -d "${TMPDIR:-/tmp}/secure-oci-base-initramfs.XXXXXX")
+rootfs=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-base-initramfs.XXXXXX")
 trap 'rm -rf "$rootfs"' EXIT
 
 # --delay-directory-restore: without it, GNU tar restores a directory's

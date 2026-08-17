@@ -2,7 +2,7 @@
 // microvm command: it turns a microvm.Spec into a KubeVirt VirtualMachine
 // manifest and validates the KubeVirt-specific parts of that Spec. The
 // runtime-independent contract itself (Spec, its common validation) lives
-// in the public github.com/CYPT71/secure-oci-base/sdk/microvm package -
+// in the public github.com/CYPT71/platform-factory/sdk/microvm package -
 // this plugin, like every other out-of-module runtime-engine integration,
 // never imports an internal/ package from the main module.
 package kubevirt
@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"strings"
 
-	microvm "github.com/CYPT71/secure-oci-base/sdk/microvm"
+	microvm "github.com/CYPT71/platform-factory/sdk/microvm"
 )
 
 // Validate validates a Spec for a new KubeVirt VirtualMachine, in addition
@@ -131,4 +131,68 @@ func VirtualMachine(s microvm.Spec) ([]byte, error) {
 		},
 	}
 	return json.MarshalIndent(vm, "", "  ")
+}
+
+// rbacResourceName is the ServiceAccount/Role/RoleBinding name every RBAC
+// object for a given VM shares, so the three-object List RBAC produces is
+// trivially attributable back to the VM it was generated for.
+func rbacResourceName(s microvm.Spec) string {
+	return "platform-factory-microvm-" + s.Name
+}
+
+// RBAC renders the minimal ServiceAccount, Role and RoleBinding a KubeVirt
+// microVM needs, scoped to exactly s.Namespace (never a ClusterRole: RBAC
+// bound to a Role, not a ClusterRole, cannot reach any other namespace no
+// matter what verbs or resources it lists) and to exactly the KubeVirt
+// resources this package's own actions touch - never "*" for verbs,
+// resources or apiGroups, so this can never become a cluster-admin-
+// equivalent grant regardless of what a future caller passes in. This is
+// deliberately static (no caller-supplied verb/resource list): the whole
+// point is that the RBAC this plugin asks for is exactly and only what
+// VirtualMachine/ValidateTarget's own actions (create/start/stop/restart/
+// status/logs/delete) require, not a general-purpose policy generator.
+func RBAC(s microvm.Spec) ([]byte, error) {
+	if err := ValidateTarget(s); err != nil {
+		return nil, err
+	}
+	name := rbacResourceName(s)
+	labels := map[string]string{
+		"app.kubernetes.io/managed-by": "platform-factory",
+		"platform-factory.dev/backend": "kubevirt",
+	}
+	serviceAccount := map[string]any{
+		"apiVersion": "v1", "kind": "ServiceAccount",
+		"metadata": map[string]any{"name": name, "namespace": s.Namespace, "labels": labels},
+	}
+	role := map[string]any{
+		"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+		"metadata": map[string]any{"name": name, "namespace": s.Namespace, "labels": labels},
+		"rules": []any{
+			map[string]any{
+				"apiGroups": []string{"kubevirt.io"},
+				"resources": []string{"virtualmachines", "virtualmachineinstances"},
+				"verbs":     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
+			},
+			map[string]any{
+				"apiGroups": []string{"subresources.kubevirt.io"},
+				"resources": []string{"virtualmachines/start", "virtualmachines/stop", "virtualmachines/restart", "virtualmachineinstances/console"},
+				"verbs":     []string{"update", "get"},
+			},
+		},
+	}
+	roleBinding := map[string]any{
+		"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+		"metadata": map[string]any{"name": name, "namespace": s.Namespace, "labels": labels},
+		"subjects": []any{
+			map[string]any{"kind": "ServiceAccount", "name": name, "namespace": s.Namespace},
+		},
+		"roleRef": map[string]any{
+			"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name,
+		},
+	}
+	list := map[string]any{
+		"apiVersion": "v1", "kind": "List",
+		"items": []any{serviceAccount, role, roleBinding},
+	}
+	return json.MarshalIndent(list, "", "  ")
 }

@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
 # Build context must contain an OCI layout at ./oci-image (for example, a
-# downloaded secure-oci-layout Actions artifact).
+# downloaded platform-factory-layout Actions artifact).
 FROM --platform=$BUILDPLATFORM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc AS verify
 WORKDIR /layout
 RUN apk add --no-cache python3

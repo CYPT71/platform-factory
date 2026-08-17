@@ -49,6 +49,13 @@ type migrationDiscoverResult struct {
 	Gaps       []migrationWireGap      `json:"gaps,omitempty"`
 	NextCursor string                  `json:"next_cursor,omitempty"`
 }
+type migrationInspectParams struct {
+	ResourceID string `json:"resource_id"`
+}
+type migrationInspectResult struct {
+	Found    bool                   `json:"found"`
+	Resource *migrationWireResource `json:"resource,omitempty"`
+}
 type migrationObserveParams struct {
 	Resource migrationWireResource `json:"resource"`
 }

@@ -1,26 +1,62 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
 
+func TestInspectRecognizesTypeScriptEntrypoint(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "tsconfig.json"), []byte(`{"compilerOptions":{"target":"ES2022"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "index.ts"), []byte("const message: string = 'hello';\nconsole.log(message);\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := os.CreateTemp(t.TempDir(), "inspection-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = output
+	err = runInspect([]string{"--root", root})
+	os.Stdout = old
+	if closeErr := output.Close(); err != nil || closeErr != nil {
+		t.Fatalf("inspect=%v close=%v", err, closeErr)
+	}
+	raw, err := os.ReadFile(output.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inspection langplugin.Inspection
+	if err := json.Unmarshal(raw, &inspection); err != nil {
+		t.Fatal(err)
+	}
+	if !inspection.Match || inspection.Language != "node" || inspection.Artifact != "index.ts" || inspection.Entrypoint != "index.ts" {
+		t.Fatalf("inspection=%+v", inspection)
+	}
+}
+
 func TestParseRootFlagRequiresRoot(t *testing.T) {
-	if _, err := parseRootFlag("freeze", nil); err == nil {
+	if _, err := langplugin.ParseRootFlag("freeze", nil); err == nil {
 		t.Fatal("expected an error when --root is missing")
 	}
-	root, err := parseRootFlag("freeze", []string{"--root", "/tmp/project"})
+	root, err := langplugin.ParseRootFlag("freeze", []string{"--root", "/tmp/project"})
 	if err != nil || root != "/tmp/project" {
 		t.Fatalf("root=%q err=%v", root, err)
 	}
 }
 
 func TestParseBuildLayerFlagsRequiresAllThree(t *testing.T) {
-	if _, _, _, err := parseBuildLayerFlags(nil); err == nil {
+	if _, _, _, err := langplugin.ParseBuildLayerFlags(nil); err == nil {
 		t.Fatal("expected an error")
 	}
-	root, output, dest, err := parseBuildLayerFlags([]string{
+	root, output, dest, err := langplugin.ParseBuildLayerFlags([]string{
 		"--root", "/tmp/project", "--output", "/tmp/out.tar", "--dest", "app/deps/node",
 	})
 	if err != nil || root != "/tmp/project" || output != "/tmp/out.tar" || dest != "app/deps/node" {

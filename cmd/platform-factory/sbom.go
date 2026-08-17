@@ -6,11 +6,10 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/CYPT71/secure-oci-base/internal/app/sbom"
+	"github.com/CYPT71/platform-factory/internal/app/sbom"
 )
 
 // runSBOM is the CLI facade over internal/app/sbom.Service - per
-// Sanetizer-todo.md item 8, it only parses arguments, calls the
 // service, formats the result, and picks an exit code. Path collection
 // and SBOM generation live in the service, where they're tested
 // without going through the CLI at all.

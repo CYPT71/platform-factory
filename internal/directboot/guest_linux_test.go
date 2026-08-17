@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 func TestRunWithGuestAgentRequiresProvisionedPinnedInitramfsBeforeKVM(t *testing.T) {

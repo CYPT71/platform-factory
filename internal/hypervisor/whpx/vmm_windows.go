@@ -24,7 +24,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 var (
@@ -44,12 +44,8 @@ const whvCapabilityCodeHypervisorPresent = 0
 // union's total size.
 const whvCapabilitySize = 24
 
-// ProbeNative reports whether the Windows Hypervisor Platform is present
-// on this host via a real WHvGetCapability syscall - not a stub. It does
-// not create a partition or virtual processor yet; that is a separate,
-// larger, not-yet-implemented item (see the roadmap's "Windows — API
-// native" section) that this development environment cannot verify at
-// all without a real Windows host.
+// ProbeNative reports Windows Hypervisor Platform availability through
+// WHvGetCapability. It does not create a partition or virtual processor.
 func ProbeNative(ctx context.Context) (api.Capabilities, error) {
 	result := api.Capabilities{
 		Architecture: runtime.GOARCH, Features: map[string]bool{},

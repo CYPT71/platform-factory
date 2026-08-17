@@ -159,26 +159,35 @@ const (
 	SeccompActionTrap  SeccompAction = "SCMP_ACT_TRAP"
 )
 
-// DefaultSeccompProfile returns the seccomp profile applied to the OS
-// thread that runs a native KVM VMM (internal/ociruntime's ServeSupervisor
-// locks that thread for the same reason its AppArmor confinement does - see
-// that package's own comment on why - and installs this filter on it right
-// alongside the AppArmor transition). Every name below was verified against
+// DefaultSeccompProfile returns the seccomp profile for a native KVM VMM
+// thread. Every name below was verified against
 // a real /dev/kvm boot and a real internal/rootfs.Convert initramfs build
 // under strace on linux/amd64, plus direct inspection of the syscalls those
 // two call paths can reach for branches the traced runs didn't happen to
 // exercise (FIFOs, hardlinks, symlinks, atomic renames) - not guessed. See
 // syscallNumberX8664 in syscalls_linux.go for the syscall-number source and
 // per-entry notes, including why execve is deliberately absent.
+//
+// openat2 and fchmodat2 were added separately: buildGuestInitramfs's
+// Podman-rootfs confinement (rootfs_linux.go) opens the container's root
+// via os.Root/os.OpenRoot and copies its tree with os.Root.Mkdir/Chmod/
+// OpenFile/Symlink, all confined against escaping the root. Go's runtime
+// implements that confinement on Linux with openat2's RESOLVE_BENEATH for
+// opens, and os.Root.Chmod specifically needs fchmodat2 - plain fchmodat
+// has no AT_SYMLINK_NOFOLLOW support at all, so there is no old-syscall
+// fallback for a confined, symlink-safe chmod. That call path postdates
+// the strace verification above and both syscalls were missing here, so
+// this thread was SIGSYS-killed the instant Create/Start reached it
+// (silently: SeccompActionKill leaves no Go-level error or log output).
 func DefaultSeccompProfile() SeccompProfile {
 	return SeccompProfile{
 		AllowedSyscalls: []string{
 			// File I/O
 			"read", "write", "pread64", "pwrite64", "readv", "writev",
-			"lseek", "close", "fcntl", "openat", "newfstatat", "fstat",
+			"lseek", "close", "fcntl", "openat", "openat2", "newfstatat", "fstat",
 			"access", "getdents64", "mkdirat", "mknodat", "renameat",
 			"unlinkat", "symlinkat", "linkat", "readlinkat", "fchmodat",
-			"fchmod", "fsync", "flock",
+			"fchmod", "fchmodat2", "fsync", "flock",
 			"utimensat", "chdir", "dup3", "copy_file_range",
 			// Memory management
 			"brk", "mmap", "mprotect", "munmap", "madvise",
@@ -187,7 +196,7 @@ func DefaultSeccompProfile() SeccompProfile {
 			"rt_sigprocmask", "rt_sigreturn", "sigaltstack",
 			"set_robust_list", "set_tid_address", "gettid", "getpid",
 			"sched_getaffinity", "arch_prctl", "prctl", "prlimit64",
-			"clone3", "rseq", "kill", "nanosleep", "sched_yield",
+			"clone", "clone3", "rseq", "kill", "nanosleep", "sched_yield",
 			// KVM control - every KVM_* ioctl is this one syscall
 			"ioctl",
 			// Entropy for the guest RNG seed and session key
@@ -445,10 +454,11 @@ func (s *Sandbox) ApplyCgroups() error { return s.applyCgroups() }
 func (s *Sandbox) ApplyStrictSeccomp() error { return s.applyStrictSeccomp() }
 
 // DropBoundingCapabilities drops each of the sandbox's configured
-// DropCapabilities from the process's capability bounding set,
+// DropCapabilities from both the process's bounding set and its current
+// effective, permitted, and inheritable sets,
 // without dropPrivileges' accompanying setuid-to-nobody step. It is
 // exported for callers - like the VMM host process - that want
-// bounding-set hardening without also changing UID: setuid does not
+// capability hardening without also changing UID: setuid does not
 // touch supplementary group membership by itself, but a caller that
 // cannot verify locally whether its deployment's DAC access to a
 // privileged device file (for example /dev/kvm) depends on UID rather

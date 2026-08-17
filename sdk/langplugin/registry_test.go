@@ -75,6 +75,20 @@ func TestLoadRejectsEmptyName(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsUnsafePluginNames(t *testing.T) {
+	withPluginDir(t)
+	source := filepath.Join(t.TempDir(), "plugin")
+	writeFakeBinary(t, source)
+	for _, name := range []string{"../escape", "Uppercase", "has space", ".hidden", "a/b"} {
+		if _, err := Load(name, source); err == nil {
+			t.Fatalf("unsafe name %q was accepted", name)
+		}
+		if err := Unload(name); err == nil {
+			t.Fatalf("unsafe unload name %q was accepted", name)
+		}
+	}
+}
+
 func TestUnloadRemovesALoadedPlugin(t *testing.T) {
 	withPluginDir(t)
 	source := filepath.Join(t.TempDir(), "plugin")

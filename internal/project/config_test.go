@@ -102,6 +102,53 @@ func TestDiscoverMissingConfig(t *testing.T) {
 	}
 }
 
+func TestDiscoverValidatesAdjacentLock(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "pf.yaml"), "version: 1\nlanguage: go\nartifact: app\n", 0o600)
+	writeTestFile(t, filepath.Join(dir, "pf.lock"), `{"version":2}`, 0o600)
+	if _, err := Discover(dir, ""); err == nil || !strings.Contains(err.Error(), "lock version 2") {
+		t.Fatalf("err=%v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "pf.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing", filepath.Join(dir, "pf.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Discover(dir, ""); err == nil || !strings.Contains(err.Error(), "not a symlink") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestDiscoverLongConfigValidatesOnlyLongAdjacentLock(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "platform-factory.yaml"), "version: 1\nlanguage: go\nartifact: app\n", 0o600)
+	writeTestFile(t, filepath.Join(dir, "pf.lock"), `{"version":2}`, 0o600)
+	writeTestFile(t, filepath.Join(dir, "platform-factory.lock"), `{"version":1}`, 0o600)
+	if _, err := Discover(dir, ""); err == nil || !strings.Contains(err.Error(), "ambiguous project locks") {
+		t.Fatalf("conflicting alias lock accepted: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "pf.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Discover(dir, ""); err != nil {
+		t.Fatalf("long project was not discovered: %v", err)
+	}
+	writeTestFile(t, filepath.Join(dir, "platform-factory.lock"), `{"version":2}`, 0o600)
+	if _, err := Discover(dir, ""); err == nil || !strings.Contains(err.Error(), "lock version 2") {
+		t.Fatalf("long lock was not validated: %v", err)
+	}
+}
+
+func TestDiscoverRejectsMultipleProjectConfigurations(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "pf.yaml"), "version: 1\nlanguage: go\nartifact: app\n", 0o600)
+	writeTestFile(t, filepath.Join(dir, "platform-factory.yaml"), "version: 1\nlanguage: python\nartifact: app.py\n", 0o600)
+	if _, err := Discover(dir, ""); err == nil || !strings.Contains(err.Error(), "multiple project configurations") {
+		t.Fatalf("ambiguous configurations accepted: %v", err)
+	}
+}
+
 func TestImageFilesIncludesProjectAndSharedDependencies(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, ".config_image.yaml"),
@@ -147,6 +194,33 @@ func TestImageFilesIncludesProjectAndSharedDependencies(t *testing.T) {
 	after, _ := os.ReadFile(first)
 	if string(before) != string(after) {
 		t.Fatal("freeze inventory is not stable")
+	}
+	if err := loaded.VerifyFreezeInventory(); err != nil {
+		t.Fatalf("fresh inventory did not verify: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "app.py"), []byte("print('changed')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := loaded.VerifyFreezeInventory(); err == nil || !strings.Contains(err.Error(), "changed after") {
+		t.Fatalf("changed input was accepted: %v", err)
+	}
+}
+
+func TestVerifyFreezeInventoryRejectsTraversalAndUnknownFields(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pf.yaml"), "version: 1\nlanguage: go\nartifact: app\n", 0o644)
+	loaded, err := Load(filepath.Join(root, "pf.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(root, ".platform-factory", "freeze.lock.json")
+	writeTestFile(t, lock, `{"version":1,"language":"go","config":"pf.yaml","files":[{"path":"../outside","size":0,"sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}]}`, 0o644)
+	if err := loaded.VerifyFreezeInventory(); err == nil || !strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("traversal accepted: %v", err)
+	}
+	writeTestFile(t, lock, `{"version":1,"language":"go","config":"pf.yaml","files":[],"unknown":true}`, 0o644)
+	if err := loaded.VerifyFreezeInventory(); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unknown field accepted: %v", err)
 	}
 }
 

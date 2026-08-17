@@ -12,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/CYPT71/secure-oci-base/internal/rootfs"
+	"github.com/CYPT71/platform-factory/internal/rootfs"
 )
 
 const (
@@ -61,7 +61,7 @@ func buildGuestInitramfs(bundle string, config Config, sessionKey []byte) (strin
 		return "", nil, err
 	}
 	initPath := config.Annotations[annotationInitPath]
-	initData, err := readPinnedFile(initPath, config.Annotations[annotationInitDigest], "microvm-init")
+	initData, err := readPinnedFile(initPath, config.Annotations[annotationInitDigest], "microvm-init", maxInitBytes)
 	if err != nil {
 		cleanup()
 		return "", nil, err

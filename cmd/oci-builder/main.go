@@ -11,8 +11,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/layout"
-	"github.com/CYPT71/secure-oci-base/internal/oci"
+	"github.com/CYPT71/platform-factory/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/oci"
 )
 
 func Run(args []string) int { return run(args, os.Stdout, os.Stderr) }

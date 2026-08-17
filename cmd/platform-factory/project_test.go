@@ -2,16 +2,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/layout"
-	"github.com/CYPT71/secure-oci-base/internal/project"
+	"github.com/CYPT71/platform-factory/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/project"
 )
 
 func writeProjectTestFile(t *testing.T, name, content string, mode os.FileMode) {
@@ -61,6 +64,25 @@ func TestFreezeStepsCoverBuiltInAndCustomLanguages(t *testing.T) {
 	steps, err := freezeSteps(loaded)
 	if err != nil || len(steps) != 1 || strings.Join(steps[0].args, " ") != "tool lock" {
 		t.Fatalf("steps=%+v err=%v", steps, err)
+	}
+}
+
+func TestProjectBuildRejectsChangedFrozenInputsBeforeRunningBuildCommand(t *testing.T) {
+	loaded := loadProjectTest(t, "language: go\nartifact: app\ndependency_management:\n  mode: manifest\n  file: go.mod\ninclude:\n  - source: go.mod\n    destination: /src/go.mod\nbuild_command: [tool, build]\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "go.mod"), "module example.test/app\n", 0o644)
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	if _, err := loaded.WriteFreezeInventory(); err != nil {
+		t.Fatal(err)
+	}
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "go.mod"), "module example.test/changed\n", 0o644)
+	called := false
+	execute := func(string, []string, string, io.Writer, io.Writer) error { called = true; return nil }
+	var stdout, stderr bytes.Buffer
+	if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 1 || !strings.Contains(stderr.String(), "run `pf freeze`") {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if called {
+		t.Fatal("build command ran before frozen inputs were verified")
 	}
 }
 
@@ -147,6 +169,19 @@ func TestRunProjectBuildCreatesVerifiableLayout(t *testing.T) {
 	if len(report.Platforms) != 1 || report.Platforms[0].Architecture != "arm64" {
 		t.Fatalf("report=%+v", report)
 	}
+	releaseDir := filepath.Join(loaded.Root, ".platform-factory", "release")
+	for _, relative := range []string{
+		"sbom.json", "provenance.json", "reports/build.json", "reports/policy.json",
+		"reports/policy-rules.json", "reports/evidence.json", "reports/summary.txt", "reports/metrics.json",
+	} {
+		if info, err := os.Stat(filepath.Join(releaseDir, relative)); err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("release output %s: info=%v err=%v", relative, info, err)
+		}
+	}
+	provenanceData, err := os.ReadFile(filepath.Join(releaseDir, "provenance.json"))
+	if err != nil || !strings.Contains(string(provenanceData), report.Platforms[0].Digest) {
+		t.Fatalf("provenance is not bound to layout digest %s: %s err=%v", report.Platforms[0].Digest, provenanceData, err)
+	}
 }
 
 func TestRunProjectBuildMissingArtifactGivesPlainLanguageError(t *testing.T) {
@@ -177,6 +212,29 @@ func TestRunProjectBuildCommandRanButArtifactStillMissing(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "build_command above ran, but didn't produce that file") {
 		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+func TestRunProjectBuildEnforcesResourceBudget(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nplatform: linux/amd64\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), strings.Repeat("x", 1<<20), 0o755)
+	var stdout, stderr bytes.Buffer
+	code := runProject([]string{"build", "--max-wall-clock", "1ns", "--config", loaded.File}, &stdout, &stderr,
+		func(string, []string, string, io.Writer, io.Writer) error { return nil }, nil, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "budget exceeded") {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(loaded.Output()); !os.IsNotExist(err) {
+		t.Fatalf("budget failure left layout behind: %v", err)
+	}
+}
+
+func TestRunProjectBuildDryRunRejectsInvalidResourceBudgetBeforeDiscovery(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runProject([]string{"build", "--dry-run", "--max-memory", "12MB", t.TempDir()}, &stdout, &stderr,
+		func(string, []string, string, io.Writer, io.Writer) error { return nil }, nil, nil)
+	if code != 2 || !strings.Contains(stderr.String(), "invalid resource budget") {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -217,10 +275,10 @@ func TestProjectFreezeAndBuildDryRunAreReadOnly(t *testing.T) {
 		t.Fatalf("stdout=%s", stdout.String())
 	}
 	stdout.Reset()
-	if code := runProject([]string{"build", "--dry-run", "--config", loaded.File}, &stdout, &stderr, execute, nil, nil); code != 0 {
+	if code := runProject([]string{"build", "--dry-run", "--max-memory", "64MiB", "--config", loaded.File}, &stdout, &stderr, execute, nil, nil); code != 0 {
 		t.Fatalf("build dry-run code=%d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "make") {
+	if !strings.Contains(stdout.String(), "make") || !strings.Contains(stdout.String(), `"max_memory_bytes": 67108864`) {
 		t.Fatalf("stdout=%s", stdout.String())
 	}
 	if executed {
@@ -240,8 +298,12 @@ func TestProjectLaunchFreezesBuildsAndRuns(t *testing.T) {
 		return nil
 	}
 	var runtimeCalls [][]string
-	containerExecute := func(name string, args []string, _ io.Reader, _, _ io.Writer) error {
+	containerExecute := func(name string, args []string, stdin io.Reader, _, _ io.Writer) error {
 		runtimeCalls = append(runtimeCalls, append([]string{name}, args...))
+		if len(args) > 0 && args[0] == "load" {
+			_, err := io.Copy(io.Discard, stdin)
+			return err
+		}
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
@@ -317,7 +379,7 @@ func TestRunProjectMigrateDryRunAndWrite(t *testing.T) {
 	}
 }
 
-func TestRunProjectSuggestsConfigFromDetection(t *testing.T) {
+func TestRunProjectDoesNotSuggestConfigFromCoreLanguageDetection(t *testing.T) {
 	root := t.TempDir()
 	writeProjectTestFile(t, filepath.Join(root, "go.mod"), "module example.test/app\n", 0o644)
 	var stdout, stderr bytes.Buffer
@@ -326,10 +388,8 @@ func TestRunProjectSuggestsConfigFromDetection(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	for _, want := range []string{"detected a go project", "language: go", ".config_image.yaml"} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Fatalf("stderr missing %q: %s", want, stderr.String())
-		}
+	if strings.Contains(stderr.String(), "detected") || !strings.Contains(stderr.String(), "no project image config found") {
+		t.Fatalf("core attempted language detection: %s", stderr.String())
 	}
 	ambiguous := t.TempDir()
 	writeProjectTestFile(t, filepath.Join(ambiguous, "go.mod"), "module example.test/app\n", 0o644)
@@ -337,7 +397,7 @@ func TestRunProjectSuggestsConfigFromDetection(t *testing.T) {
 	stderr.Reset()
 	code = runProject([]string{"show", ambiguous}, &stdout, &stderr,
 		func(string, []string, string, io.Writer, io.Writer) error { return nil }, nil, nil)
-	if code != 2 || !strings.Contains(stderr.String(), "go, node") {
+	if code != 1 || strings.Contains(stderr.String(), "go, node") {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 	empty := t.TempDir()
@@ -349,7 +409,7 @@ func TestRunProjectSuggestsConfigFromDetection(t *testing.T) {
 	}
 }
 
-func TestProjectPlanReportsDetectionMismatch(t *testing.T) {
+func TestProjectPlanRemainsLanguageNeutral(t *testing.T) {
 	loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
 	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
 	writeProjectTestFile(t, filepath.Join(loaded.Root, "go.mod"), "module example.test/app\n", 0o644)
@@ -357,10 +417,8 @@ func TestProjectPlanReportsDetectionMismatch(t *testing.T) {
 	if code := planProject(loaded, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	for _, want := range []string{`"detected"`, `"kind": "go"`, `"matches_language": false`} {
-		if !strings.Contains(stdout.String(), want) {
-			t.Fatalf("stdout missing %q: %s", want, stdout.String())
-		}
+	if strings.Contains(stdout.String(), `"detected"`) || !strings.Contains(stdout.String(), `"valid": true`) {
+		t.Fatalf("plan should validate config without core language detection: %s", stdout.String())
 	}
 }
 
@@ -401,6 +459,9 @@ include:
 `)
 	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
 	writeProjectTestFile(t, filepath.Join(loaded.Root, "runtime-tree", "interpreter"), "runtime", 0o755)
+	if _, err := loaded.WriteFreezeInventory(); err != nil {
+		t.Fatal(err)
+	}
 	var stdout, stderr bytes.Buffer
 	code := runProject([]string{"build", "--config", loaded.File}, &stdout, &stderr,
 		func(string, []string, string, io.Writer, io.Writer) error { return nil }, nil, nil)
@@ -429,24 +490,141 @@ func TestRunProjectShowAndContainerRun(t *testing.T) {
 		t.Fatalf("build code=%d stderr=%s", code, stderr.String())
 	}
 	var calls [][]string
-	containerExecute := func(name string, args []string, _ io.Reader, _, _ io.Writer) error {
+	containerExecute := func(name string, args []string, stdin io.Reader, _, _ io.Writer) error {
 		if name != "podman" {
 			t.Fatalf("runtime=%s", name)
 		}
 		calls = append(calls, append([]string(nil), args...))
+		if len(args) > 0 && args[0] == "load" {
+			_, err := io.Copy(io.Discard, stdin)
+			return err
+		}
 		return nil
 	}
 	if code := runProject([]string{"run", "--config", loaded.File}, &stdout, &stderr, projectExecute, containerExecute, nil); code != 0 {
 		t.Fatalf("run code=%d stderr=%s", code, stderr.String())
 	}
-	if len(calls) != 2 || calls[0][0] != "image" {
+	// prepareContainerImage always (re)loads now, rather than skipping
+	// when a tag already exists - see cmd/platform-factory/import.go -
+	// so the sequence is load, then the post-load presence check, then
+	// the actual run.
+	if len(calls) != 3 || calls[0][0] != "load" || calls[1][0] != "image" {
 		t.Fatalf("calls=%v", calls)
 	}
-	joined := strings.Join(calls[1], " ")
+	joined := strings.Join(calls[2], " ")
 	for _, want := range []string{"--network=bridge", "--publish=8080:80", "--publish=8443:443"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %s in %s", want, joined)
 		}
+	}
+}
+
+func TestRunProjectRunAcceptsARuntimeOverride(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nimage: example/project\ntag: run\nruntime_engine: podman\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	projectExecute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if code := runProject([]string{"build", "--config", loaded.File}, &stdout, &stderr, projectExecute, nil, nil); code != 0 {
+		t.Fatalf("build code=%d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+
+	var runtimesSeen []string
+	containerExecute := func(name string, args []string, stdin io.Reader, _, _ io.Writer) error {
+		runtimesSeen = append(runtimesSeen, name)
+		if len(args) > 0 && args[0] == "load" {
+			_, err := io.Copy(io.Discard, stdin)
+			return err
+		}
+		return nil
+	}
+	// A junior who just says "use docker" should get docker, even
+	// though the project config itself says podman.
+	if code := runProject([]string{"run", "--config", loaded.File, "--runtime", "docker"}, &stdout, &stderr, projectExecute, containerExecute, nil); code != 0 {
+		t.Fatalf("run code=%d stderr=%s", code, stderr.String())
+	}
+	for _, name := range runtimesSeen {
+		if name != "docker" {
+			t.Fatalf("runtimesSeen=%v, want every call to use docker", runtimesSeen)
+		}
+	}
+
+	if code := runProject([]string{"run", "--config", loaded.File, "--runtime", "bogus"}, &stdout, &stderr, projectExecute, containerExecute, nil); code != 2 {
+		t.Fatalf("expected an invalid --runtime value to be rejected, code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunHasExplicitTargetDistinguishesFlagsFromAPositionalTarget(t *testing.T) {
+	if runHasExplicitTarget(nil) {
+		t.Fatal("expected no arguments to report no explicit target")
+	}
+	if runHasExplicitTarget([]string{"--runtime", "docker"}) {
+		t.Fatal("expected --runtime alone (no positional arg) to report no explicit target")
+	}
+	if runHasExplicitTarget([]string{"--memory", "128m"}) {
+		t.Fatal("expected a value-taking flag given as two args not to be mistaken for the target")
+	}
+	if !runHasExplicitTarget([]string{"--runtime", "docker", "myimage:latest"}) {
+		t.Fatal("expected a positional image reference to report an explicit target")
+	}
+	if !runHasExplicitTarget([]string{"./oci-layout"}) {
+		t.Fatal("expected a bare positional layout path to report an explicit target")
+	}
+	if runHasExplicitTarget([]string{"--watch", "--runtime", "docker"}) {
+		t.Fatal("expected --watch alone (no positional arg) to report no explicit target")
+	}
+}
+
+func TestRunRejectsWatchWithAnExplicitTarget(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run", "--watch", "myimage:latest"}, &stdout, &stderr); code != 2 ||
+		!strings.Contains(stderr.String(), "--watch is not valid with an explicit IMAGE/layout") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestBareRunWatchDispatchesToProjectModeWithoutARealContainerRuntime(t *testing.T) {
+	// Same reasoning as TestBareRunDispatchesToProjectModeWithoutARealContainerRuntime:
+	// this only proves the dispatch decision (a target-less `run --watch`
+	// takes the project-mode branch, with --watch recognized as a flag
+	// rather than tripping runContainer's own unknown-flag error) since
+	// a real watch loop needs a real container runtime.
+	oldDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldDirectory) })
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run", "--watch", "--runtime", "docker"}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "pf init") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestBareRunDispatchesToProjectModeWithoutARealContainerRuntime(t *testing.T) {
+	// The top-level run() dispatch always uses the real docker/podman-
+	// shelling executors, so this only exercises the decision itself
+	// (does the dispatch route a target-less `run` into project mode)
+	// rather than a full build+run, which would need a real container
+	// runtime installed. With no project in a fresh temp directory, the
+	// dispatch should reach project.Discover's own "no project" error -
+	// proving it took the project-mode branch, not runContainer's old
+	// generic usage error - without ever touching docker/podman.
+	oldDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldDirectory) })
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"run", "--runtime", "docker"}, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "pf init") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 }
 
@@ -682,8 +860,12 @@ func TestRunConfiguredProjectUpgradesNoneNetworkWhenPortsArePublished(t *testing
 	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
 	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
 	var containerArgs []string
-	containerExecute := func(name string, args []string, _ io.Reader, _, _ io.Writer) error {
+	containerExecute := func(name string, args []string, stdin io.Reader, _, _ io.Writer) error {
 		containerArgs = append([]string(nil), args...)
+		if len(args) > 0 && args[0] == "load" {
+			_, err := io.Copy(io.Discard, stdin)
+			return err
+		}
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
@@ -809,6 +991,96 @@ include:
 	}
 }
 
+func TestBuildProjectRequiresAndVerifiesFreezeForAdditionalSources(t *testing.T) {
+	loaded := loadProjectTest(t, `language: compiled
+artifact: app
+include:
+  - {source: assets/config.json, destination: /app/config.json}
+shared_deps:
+  - {source: shared/model.dat, destination: /opt/model.dat}
+`)
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "assets", "config.json"), "{}", 0o644)
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "shared", "model.dat"), "model-v1", 0o644)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 1 || !strings.Contains(stderr.String(), "run `pf freeze`") {
+		t.Fatalf("unfrozen sources code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := loaded.WriteFreezeInventory(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(loaded.Root, "shared", "model.dat"), []byte("model-v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 1 || !strings.Contains(stderr.String(), "changed after") {
+		t.Fatalf("changed source code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := loaded.WriteFreezeInventory(); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 0 {
+		t.Fatalf("frozen build code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := layout.Verify(loaded.Output()); err != nil {
+		t.Fatalf("multi-source layout invalid: %v", err)
+	}
+}
+
+func TestBuildProjectValidatesPersistedDAGBeforeExecuting(t *testing.T) {
+	for name, dag := range map[string]string{
+		"cycle":         `{"api_version":"platform-factory.dev/v1","name":"project-build","stages":[{"id":"a","depends_on":["b"],"command":{"executable":"true"}},{"id":"b","depends_on":["a"],"command":{"executable":"true"}}]}`,
+		"unknown field": `{"api_version":"platform-factory.dev/v1","name":"project-build","unknown":true,"stages":[{"id":"build","command":{"executable":"true"}}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			loaded := loadProjectTest(t, "language: compiled\nartifact: app\nbuild_command: [tool, build]\n")
+			writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+			writeProjectTestFile(t, filepath.Join(loaded.Root, ".pf", "build.pipeline.json"), dag, 0o600)
+			executed := false
+			execute := func(string, []string, string, io.Writer, io.Writer) error { executed = true; return nil }
+			var stdout, stderr bytes.Buffer
+			if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 1 || !strings.Contains(stderr.String(), "invalid build DAG") {
+				t.Fatalf("code=%d stderr=%s", code, stderr.String())
+			}
+			if executed {
+				t.Fatal("build command ran before DAG validation")
+			}
+			if _, err := os.Stat(loaded.Output()); !os.IsNotExist(err) {
+				t.Fatalf("invalid DAG produced output: %v", err)
+			}
+		})
+	}
+}
+
+func TestBuildProjectRejectsSymlinkDAGAndSupportsLegacyAbsence(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	outside := filepath.Join(t.TempDir(), "pipeline.json")
+	writeProjectTestFile(t, outside, `{"api_version":"platform-factory.dev/v1","name":"project-build","stages":[{"id":"build","command":{"executable":"true"}}]}`, 0o600)
+	if err := os.MkdirAll(filepath.Join(loaded.Root, ".pf"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(loaded.Root, ".pf", "build.pipeline.json")); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if _, code := buildProject(loaded, &stdout, &stderr, func(string, []string, string, io.Writer, io.Writer) error { return nil }); code != 1 || !strings.Contains(stderr.String(), "symlink") {
+		t.Fatalf("symlink code=%d stderr=%s", code, stderr.String())
+	}
+	if err := os.Remove(filepath.Join(loaded.Root, ".pf", "build.pipeline.json")); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if _, code := buildProject(loaded, &stdout, &stderr, func(string, []string, string, io.Writer, io.Writer) error { return nil }); code != 0 {
+		t.Fatalf("legacy project without persisted DAG code=%d stderr=%s", code, stderr.String())
+	}
+}
+
 // TestBuildProjectUsesRuntimeEntrypointDefault proves that when the
 // project config sets Runtime (not Entrypoint), the default entrypoint is
 // derived under /runtime/ rather than /app/.
@@ -837,6 +1109,243 @@ func TestBuildProjectUsesRuntimeEntrypointDefault(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected the runtime-derived entrypoint /runtime/python in the built config")
+	}
+}
+
+func TestRunAutoFreezesWhenAFrozenInputChangesInsteadOfFailing(t *testing.T) {
+	// language: custom with an explicit include (rather than
+	// dependency_management) is enough to make projectRequiresFrozenInputs
+	// true, the same shape a real python project's runtime include list
+	// triggers - editing dep.txt here is standing in for a developer
+	// editing their own source file while `pf run`/--watch is in use.
+	loaded := loadProjectTest(t, "language: custom\nartifact: app\nfreeze_command: [true]\ninclude:\n  - {source: dep.txt, destination: /app/dep.txt}\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "dep.txt"), "v1", 0o644)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	containerExecute := func(_ string, args []string, stdin io.Reader, _, _ io.Writer) error {
+		if len(args) > 0 && args[0] == "load" {
+			_, err := io.Copy(io.Discard, stdin)
+			return err
+		}
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runProject([]string{"run", "--config", loaded.File}, &stdout, &stderr, execute, containerExecute, nil); code != 0 {
+		t.Fatalf("first run code=%d stderr=%s", code, stderr.String())
+	}
+	if err := loaded.VerifyFreezeInventory(); err != nil {
+		t.Fatalf("expected the first run to have frozen automatically: %v", err)
+	}
+
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "dep.txt"), "v2", 0o644)
+	if err := loaded.VerifyFreezeInventory(); err == nil {
+		t.Fatal("expected the freeze to be stale after changing a frozen input")
+	}
+
+	if code := runProject([]string{"run", "--config", loaded.File}, &stdout, &stderr, execute, containerExecute, nil); code != 0 {
+		t.Fatalf("second run (after editing a frozen input) code=%d stderr=%s", code, stderr.String())
+	}
+	if err := loaded.VerifyFreezeInventory(); err != nil {
+		t.Fatalf("expected the freeze to have been refreshed automatically: %v", err)
+	}
+}
+
+func TestProjectNeedsRebuildDetectsMissingAndStaleLayouts(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
+	binary := filepath.Join(loaded.Root, "app")
+	writeProjectTestFile(t, binary, "binary", 0o755)
+
+	if rebuild, err := projectNeedsRebuild(loaded); err != nil || !rebuild {
+		t.Fatalf("expected a missing layout to need a rebuild: rebuild=%v err=%v", rebuild, err)
+	}
+
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if code := runProject([]string{"build", "--config", loaded.File}, &stdout, &stderr, execute, nil, nil); code != 0 {
+		t.Fatalf("build code=%d stderr=%s", code, stderr.String())
+	}
+	if rebuild, err := projectNeedsRebuild(loaded); err != nil || rebuild {
+		t.Fatalf("expected a fresh layout not to need a rebuild: rebuild=%v err=%v", rebuild, err)
+	}
+
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(binary, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if rebuild, err := projectNeedsRebuild(loaded); err != nil || !rebuild {
+		t.Fatalf("expected a layout older than its binary to need a rebuild: rebuild=%v err=%v", rebuild, err)
+	}
+}
+
+// watchContainerExecuteStub simulates docker/podman for
+// runConfiguredProjectWatch: "image" always reports present (so
+// prepareContainerImage never needs a real import), "run" blocks until
+// a matching "stop" call arrives (like a real attached `docker run
+// --rm` blocks until the container stops), and every call is recorded
+// for assertions.
+type watchContainerExecuteStub struct {
+	mu      sync.Mutex
+	running map[string]chan struct{}
+	calls   []string
+}
+
+func newWatchContainerExecuteStub() *watchContainerExecuteStub {
+	return &watchContainerExecuteStub{running: map[string]chan struct{}{}}
+}
+
+func (s *watchContainerExecuteStub) execute(_ string, args []string, stdin io.Reader, _, _ io.Writer) error {
+	if len(args) == 0 {
+		return nil
+	}
+	switch args[0] {
+	case "image":
+		return nil
+	case "load":
+		_, err := io.Copy(io.Discard, stdin)
+		return err
+	case "run":
+		name := ""
+		for _, arg := range args {
+			if rest, ok := strings.CutPrefix(arg, "--name="); ok {
+				name = rest
+			}
+		}
+		stop := make(chan struct{})
+		s.mu.Lock()
+		s.running[name] = stop
+		s.calls = append(s.calls, "run:"+name)
+		s.mu.Unlock()
+		<-stop
+		return nil
+	case "stop":
+		name := args[1]
+		s.mu.Lock()
+		if stop, ok := s.running[name]; ok {
+			close(stop)
+			delete(s.running, name)
+		}
+		s.calls = append(s.calls, "stop:"+name)
+		s.mu.Unlock()
+		return nil
+	}
+	return nil
+}
+
+func (s *watchContainerExecuteStub) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...)
+}
+
+// syncBuffer is bytes.Buffer plus a mutex: runConfiguredProjectWatch
+// writes progress lines from its own goroutine while the test
+// concurrently reads them for a failure message, which a plain
+// bytes.Buffer does not allow safely.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+func TestRunConfiguredProjectWatchRebuildsOnChangeAndStopsOnCancel(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nimage: example/watch\ntag: dev\n")
+	binary := filepath.Join(loaded.Root, "app")
+	writeProjectTestFile(t, binary, "binary", 0o755)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+
+	stub := newWatchContainerExecuteStub()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	stdout, stderr := &syncBuffer{}, &syncBuffer{}
+	go func() {
+		done <- runConfiguredProjectWatch(ctx, loaded, nil, stdout, stderr, execute, stub.execute, 10*time.Millisecond)
+	}()
+
+	// Wait for the first container to actually start before mutating the
+	// source - otherwise the change could be picked up by the initial
+	// build instead of the watch loop's own rebuild path.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(stub.snapshot()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the first watched container to start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Touch to the current wall-clock time (not an artificial future
+	// timestamp): the watch loop's own rebuild also updates index.json's
+	// mtime, and a fixed future timestamp would stay newer than every
+	// subsequent rebuild forever, causing an infinite rebuild loop
+	// instead of exactly one. The short sleep gives a filesystem with
+	// coarser mtime resolution room to observe this as strictly later
+	// than the first build.
+	time.Sleep(20 * time.Millisecond)
+	now := time.Now()
+	if err := os.Chtimes(binary, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		calls := stub.snapshot()
+		if len(calls) >= 3 && strings.HasPrefix(calls[0], "run:") && strings.HasPrefix(calls[1], "stop:") && strings.HasPrefix(calls[2], "run:") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for a rebuild+restart cycle, calls=%v stderr=%s", calls, stderr.String())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for runConfiguredProjectWatch to return after cancel")
+	}
+	calls := stub.snapshot()
+	if calls[len(calls)-1] == "" || !strings.HasPrefix(calls[len(calls)-1], "stop:") {
+		t.Fatalf("expected the watch loop to stop its container on cancel, calls=%v", calls)
+	}
+}
+
+func TestWatchContainerNameIsStableAndSafe(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
+	name := watchContainerName(loaded)
+	if !validContainerName(name) {
+		t.Fatalf("watchContainerName produced an invalid container name: %q", name)
+	}
+	if watchContainerName(loaded) != name {
+		t.Fatal("expected watchContainerName to be stable across calls for the same project")
+	}
+}
+
+func TestValidContainerName(t *testing.T) {
+	valid := []string{"a", "app", "pf-watch-app", "app_1.2"}
+	invalid := []string{"", "-app", ".app", "app name", "app!"}
+	for _, name := range valid {
+		if !validContainerName(name) {
+			t.Errorf("expected %q to be valid", name)
+		}
+	}
+	for _, name := range invalid {
+		if validContainerName(name) {
+			t.Errorf("expected %q to be invalid", name)
+		}
 	}
 }
 

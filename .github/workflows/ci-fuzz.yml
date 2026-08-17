@@ -13,7 +13,7 @@ jobs:
     # 10m each (~3h total) for real long-duration coverage per target -
     # closing the "fuzzing longue durée" roadmap item without slowing
     # down every PR to match. FUZZTIME below is read by every step.
-    timeout-minutes: ${{ github.event_name == 'schedule' && 240 || 30 }}
+    timeout-minutes: 240
     env:
       FUZZTIME: ${{ github.event_name == 'schedule' && '10m' || '45s' }}
     steps:

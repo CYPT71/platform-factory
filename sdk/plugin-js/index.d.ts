@@ -1,4 +1,4 @@
-// Type definitions for @secure-oci/plugin-sdk.
+// Type definitions for @platform-factory/plugin-sdk.
 // Mirrors Go's sdk/plugin package's typed capability schemas
 // (DetectParams/Result, FreezeParams/Result, PlanParams/Result), so a
 // TypeScript plugin author gets the same compile-time contract a Go
@@ -9,6 +9,8 @@ import type { Readable, Writable } from "node:stream";
 export const CONTENT_TYPE: string;
 export const LEGACY_CONTENT_TYPE: string;
 export const PROTOCOL_VERSION: string;
+export const CAPABILITY: Readonly<Record<string, string>>;
+export interface RequestContext { readonly traceId: string; readonly operationId: string; }
 
 export class RPCError extends Error {
   code: number;
@@ -48,5 +50,6 @@ export type Handler<Params = unknown, Result = unknown> = (params: Params) => Re
 export class Server {
   constructor(name: string, version: string);
   handle<Params = unknown, Result = unknown>(capability: string, handler: Handler<Params, Result>): this;
+  handleContext<Params = unknown, Result = unknown>(capability: string, handler: (params: Params, context: RequestContext) => Result | Promise<Result>): this;
   serve(input: Readable, output: Writable): Promise<void>;
 }

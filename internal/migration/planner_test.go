@@ -14,9 +14,11 @@ func validAggregate() Aggregate {
 			{ID: "app", Kind: "service", Origin: ResourceOrigin{Source: "source-a", NativeType: "service", NativeID: "native-app"}, Attributes: map[string]string{"region": "eu"}, Requirements: []Requirement{{Capability: "migration.apply", Version: "v1"}, {Capability: "artifact.import", Version: "v1"}}},
 			{ID: "db", Kind: "database", Origin: ResourceOrigin{Source: "source-a", NativeType: "database", NativeID: "native-db"}, Requirements: []Requirement{{Capability: "migration.apply", Version: "v1"}}},
 		},
-		Edges:    []DependencyEdge{{From: "app", To: "db", Relation: "depends_on", Required: true}},
-		Unknowns: []UnknownObservation{{Source: "source-a", Kind: "opaque", Scope: "network", Reason: "not representable"}},
-		Gaps:     []CompatibilityGap{{ResourceID: "app", Requirement: "migration.apply", Compatibility: CompatibilityDegraded, Reason: "manual translation", RequiresApproval: true}},
+		Edges:                []DependencyEdge{{From: "app", To: "db", Relation: "depends_on", Required: true}},
+		Unknowns:             []UnknownObservation{{Source: "source-a", Kind: "opaque", Scope: "network", Reason: "not representable"}},
+		Gaps:                 []CompatibilityGap{{ResourceID: "app", Requirement: "migration.apply", Compatibility: CompatibilityDegraded, Reason: "manual translation", RequiresApproval: true}},
+		ExternalDependencies: []ExternalDependency{{ResourceID: "app", Kind: "dns", Reference: "external://dns/app", Required: true}},
+		Transformations:      []Transformation{{ResourceID: "app", Field: "architecture", From: "x86_64", To: "amd64", Reason: "normalize architecture"}},
 	}
 }
 
@@ -68,6 +70,9 @@ func TestBuildPlanRejectsInvalidGraphsBeforeProducingPlan(t *testing.T) {
 			a.Resources[0].Requirements = append(a.Resources[0].Requirements, a.Resources[0].Requirements[0])
 		},
 		"secret attribute":        func(a *Aggregate) { a.Resources[0].Attributes["access_token"] = "sentinel" },
+		"secret value":            func(a *Aggregate) { a.Resources[0].Attributes["description"] = "password=sentinel" },
+		"bad external dependency": func(a *Aggregate) { a.ExternalDependencies[0].ResourceID = "missing" },
+		"secret transformation":   func(a *Aggregate) { a.Transformations[0].To = "secret=sentinel" },
 		"invalid compatibility":   func(a *Aggregate) { a.Gaps[0].Compatibility = "maybe" },
 		"unknown gap requirement": func(a *Aggregate) { a.Gaps[0].Requirement = "missing.capability" },
 		"duplicate gap":           func(a *Aggregate) { a.Gaps = append(a.Gaps, a.Gaps[0]) },

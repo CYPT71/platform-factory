@@ -1,4 +1,0 @@
-{
-  "steps": [["cargo", "generate-lockfile"], ["cargo", "vendor", "vendor"]],
-  "profile": "rust"
-}

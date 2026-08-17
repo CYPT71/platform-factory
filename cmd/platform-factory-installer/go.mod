@@ -1,4 +1,4 @@
-module github.com/CYPT71/secure-oci-base/cmd/platform-factory-installer
+module github.com/CYPT71/platform-factory/cmd/platform-factory-installer
 
 go 1.25.12
 

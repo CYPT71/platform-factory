@@ -33,6 +33,25 @@ func TestValidateRejectsUnsafeValues(t *testing.T) {
 	}
 }
 
+func TestResourceBoundsAreConsistent(t *testing.T) {
+	base := Spec{Name: "demo", Layout: "/layout", Listen: "127.0.0.1", MemoryMiB: MinMemoryMiB, VCPUs: 1, Port: 8080}
+	if err := Validate(base, "native"); err != nil {
+		t.Fatal(err)
+	}
+	for _, memory := range []int{MinMemoryMiB - 1, MaxMemoryMiB + 1} {
+		candidate := base
+		candidate.MemoryMiB = memory
+		if err := Validate(candidate, "native"); err == nil {
+			t.Fatalf("memory %d accepted", memory)
+		}
+	}
+	candidate := base
+	candidate.VCPUs = MaxVCPUs + 1
+	if err := Validate(candidate, "native"); err == nil {
+		t.Fatalf("vcpus %d accepted", candidate.VCPUs)
+	}
+}
+
 func TestNativeTargetAndEnvironment(t *testing.T) {
 	spec := Spec{
 		Name: "demo", Listen: "127.0.0.1", MemoryMiB: 128, VCPUs: 2, Port: 8080,

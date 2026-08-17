@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/CYPT71/secure-oci-base/internal/detect"
-	plugin "github.com/CYPT71/secure-oci-base/sdk/plugin"
+	"github.com/CYPT71/platform-factory/internal/detect"
+	plugin "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 func main() {

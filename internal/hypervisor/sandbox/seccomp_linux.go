@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && amd64
 
 package sandbox
 
@@ -26,7 +26,8 @@ import (
 // confinement (applyApparmorProfile) already documents and relies on.
 
 const (
-	prSetNoNewPrivs   = 38
+	// prSetNoNewPrivs is defined in sandbox_linux.go (portable across
+	// every Linux architecture, unlike the rest of this block).
 	prSetSeccomp      = 22
 	prGetSeccomp      = 21
 	seccompModeFilter = 2

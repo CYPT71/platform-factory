@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/CYPT71/secure-oci-base/internal/plugin"
-	"github.com/CYPT71/secure-oci-base/internal/policy"
+	"github.com/CYPT71/platform-factory/internal/plugin"
+	"github.com/CYPT71/platform-factory/internal/policy"
 )
 
 func runEvidence(args []string, stdout, stderr io.Writer) int {
@@ -52,7 +52,10 @@ func runEvidence(args []string, stdout, stderr io.Writer) int {
 	}
 	evidence := policy.DerivePipelineEvidence(document.definition, pluginDigests)
 	evidence.Reproducible = *reproducible
-	encoded, _ := json.MarshalIndent(evidence, "", "  ")
+	encoded, _ := json.MarshalIndent(struct {
+		APIVersion string `json:"api_version"`
+		policy.Evidence
+	}{APIVersion: cliOutputAPIVersion, Evidence: evidence}, "", "  ")
 	fmt.Fprintln(stdout, string(encoded))
 	if !evidence.SourcesPinned || !evidence.BasePinned || !evidence.ToolchainPinned ||
 		!evidence.PluginsPinned || !evidence.NonRoot || !evidence.ReadOnlyRootFS {

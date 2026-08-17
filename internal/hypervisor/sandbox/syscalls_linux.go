@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && amd64
 
 package sandbox
 
@@ -11,10 +11,11 @@ import "syscall"
 // approach internal/hypervisor/kvm already uses for KVM ioctl request codes.
 //
 // A handful of syscalls this package's own real allow-list needs
-// (getrandom, copy_file_range, rseq, clone3) were added to the x86_64 ABI
-// after go1.10's syscall.SYS_* table was generated and have no stdlib
-// constant; those four are the raw, long-stable numbers from
-// arch/x86/entry/syscalls/syscall_64.tbl, called out individually below.
+// (getrandom, copy_file_range, rseq, clone3, openat2, fchmodat2) were
+// added to the x86_64 ABI after go1.10's syscall.SYS_* table was
+// generated and have no stdlib constant; those six are the raw,
+// long-stable numbers from arch/x86/entry/syscalls/syscall_64.tbl,
+// called out individually below.
 var syscallNumberX8664 = map[string]uint32{
 	// File I/O. renameat/mknodat/symlinkat/linkat/readlinkat/fchmodat/
 	// utimensat/getdents64 back internal/rootfs.Convert's whiteout,
@@ -31,6 +32,7 @@ var syscallNumberX8664 = map[string]uint32{
 	"close":      uint32(syscall.SYS_CLOSE),
 	"fcntl":      uint32(syscall.SYS_FCNTL),
 	"openat":     uint32(syscall.SYS_OPENAT),
+	"openat2":    437, // arch/x86/entry/syscalls/syscall_64.tbl; os.Root's confined-open path
 	"newfstatat": uint32(syscall.SYS_NEWFSTATAT),
 	"fstat":      uint32(syscall.SYS_FSTAT),
 	"access":     uint32(syscall.SYS_ACCESS),
@@ -47,6 +49,7 @@ var syscallNumberX8664 = map[string]uint32{
 	"chdir":      uint32(syscall.SYS_CHDIR),
 	"dup3":       uint32(syscall.SYS_DUP3),
 	"fchmod":     uint32(syscall.SYS_FCHMOD),
+	"fchmodat2":  452, // arch/x86/entry/syscalls/syscall_64.tbl; os.Root's confined, symlink-safe chmod
 	"fsync":      uint32(syscall.SYS_FSYNC),
 	"flock":      uint32(syscall.SYS_FLOCK),
 
@@ -77,7 +80,15 @@ var syscallNumberX8664 = map[string]uint32{
 	"arch_prctl":        uint32(syscall.SYS_ARCH_PRCTL),
 	"prctl":             uint32(syscall.SYS_PRCTL),
 	"prlimit64":         uint32(syscall.SYS_PRLIMIT64),
-	"clone3":            435, // arch/x86/entry/syscalls/syscall_64.tbl; post-dates syscall.SYS_*
+	// runtime.newosproc (sys_linux_amd64.s) creates every new OS thread
+	// via plain clone(2), not clone3 - GC workers, sysmon, and blocked-
+	// syscall handoff can all trigger this on the confined thread's
+	// process at any time after the filter is installed, so leaving it
+	// out kills the whole process (SeccompActionKill has no exception
+	// for defers) the moment the runtime needs one more thread than it
+	// already has.
+	"clone":  uint32(syscall.SYS_CLONE),
+	"clone3": 435, // arch/x86/entry/syscalls/syscall_64.tbl; post-dates syscall.SYS_*
 
 	// KVM control: every KVM_* ioctl (KVM_RUN, KVM_IRQ_LINE, ...) is
 	// this one syscall with a request-code argument classic BPF cannot

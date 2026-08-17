@@ -1,0 +1,1 @@
+{"api_version":"platform-factory.dev/cli-output/v1","pipeline_api_version":"platform-factory.dev/v1","name":"app","fingerprint":"sha256:fixture","order":["build"],"levels":[["build"]],"required_capabilities":[],"available_capabilities":[]}

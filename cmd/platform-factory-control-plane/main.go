@@ -9,11 +9,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/control"
-	"github.com/CYPT71/secure-oci-base/internal/mtls"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
-	"github.com/CYPT71/secure-oci-base/internal/provenance"
-	"github.com/CYPT71/secure-oci-base/internal/quota"
+	"github.com/CYPT71/platform-factory/internal/control"
+	"github.com/CYPT71/platform-factory/internal/mtls"
+	"github.com/CYPT71/platform-factory/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/provenance"
+	"github.com/CYPT71/platform-factory/internal/quota"
 )
 
 func main() {

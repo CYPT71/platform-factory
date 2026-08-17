@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/policy"
-	"github.com/CYPT71/secure-oci-base/internal/project"
-	"github.com/CYPT71/secure-oci-base/internal/registry"
+	"github.com/CYPT71/platform-factory/internal/policy"
+	"github.com/CYPT71/platform-factory/internal/project"
+	"github.com/CYPT71/platform-factory/internal/registry"
 )
 
 func TestLaunchPublishCompletesNativeProductionLifecycle(t *testing.T) {
@@ -33,9 +33,13 @@ func TestLaunchPublishCompletesNativeProductionLifecycle(t *testing.T) {
 	t.Cleanup(func() { pushOCIArtifact = previousArtifact })
 
 	var runtimeCalls int
-	containerExecute := func(_ string, args []string, _ io.Reader, _, _ io.Writer) error {
+	containerExecute := func(_ string, args []string, stdin io.Reader, _, _ io.Writer) error {
 		if len(args) > 0 && args[0] == "run" {
 			runtimeCalls++
+		}
+		if len(args) > 0 && args[0] == "load" {
+			_, err := io.Copy(io.Discard, stdin)
+			return err
 		}
 		return nil
 	}

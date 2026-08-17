@@ -2,12 +2,29 @@ package langplugin
 
 import (
 	"archive/tar"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestDispatch(t *testing.T) {
+	called := false
+	handlers := map[string]Handler{"inspect": func(args []string) error {
+		called = len(args) == 1 && args[0] == "root"
+		return nil
+	}}
+	if err := Dispatch([]string{"inspect", "root"}, handlers); err != nil || !called {
+		t.Fatalf("called=%t err=%v", called, err)
+	}
+	for _, args := range [][]string{nil, {"unknown"}} {
+		if err := Dispatch(args, handlers); !errors.Is(err, ErrUsage) {
+			t.Fatalf("args=%v err=%v", args, err)
+		}
+	}
+}
 
 func TestWriteDeterministicTarProducesSortedZeroedContent(t *testing.T) {
 	source := t.TempDir()

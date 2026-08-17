@@ -1,0 +1,36 @@
+DÉMO JUNIOR — Go, Python, JavaScript et TypeScript
+==================================================
+
+# 1. Installation depuis la racine du dépôt. Le chemin reste relatif.
+./install.sh --components core --prefix ./demo-bin --yes
+export PATH="$PWD/demo-bin:$PATH"
+pf --version
+
+# 2. Quatre projets réellement vides avant l'ajout de leur unique source.
+DEMO_ROOT="${TMPDIR:-/tmp}/pf-demo-junior"
+mkdir -p "$DEMO_ROOT"/{go,python,javascript,typescript}
+
+printf 'package main\nimport "fmt"\nfunc main(){fmt.Println("Bonjour Go")}\n' \
+  > "$DEMO_ROOT/go/main.go"
+printf 'print("Bonjour Python")\n' > "$DEMO_ROOT/python/app.py"
+printf 'console.log("Bonjour JavaScript");\n' > "$DEMO_ROOT/javascript/index.js"
+printf 'const message: string = "Bonjour TypeScript";\nconsole.log(message);\n' \
+  > "$DEMO_ROOT/typescript/index.ts"
+
+# 3. Même expérience sans plugin load manuel : prévisualisation sans écriture,
+# initialisation, inspection et état pour chaque langage.
+for stack in go python javascript typescript; do
+  echo "===== $stack ====="
+  cd "$DEMO_ROOT/$stack"
+  before=$(find . -mindepth 1 -maxdepth 1 | sort)
+  pf init --dry-run .
+  test "$(find . -mindepth 1 -maxdepth 1 | sort)" = "$before"
+  pf init --yes .
+  pf inspect
+  pf status
+  test -f pf.yaml && test -f pf.lock
+done
+
+# Résultat attendu : Go/Python sont nommés tels quels ; JS/TS utilisent le
+# plugin Node, qui conserve index.js ou index.ts comme point d'entrée.
+

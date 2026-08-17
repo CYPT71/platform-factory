@@ -1,18 +1,10 @@
-// Package core contains the domain types for Platform Factory.
-// This file implements the plugin manifest schema described in
-// Sanetizer-todo.md item 11 for capability-based dispatch.
 package core
 
 import (
 	"fmt"
 )
 
-// PluginFamily is which family of plugin a manifest declares itself as -
-// Sanetizer-todo.md item 11: the core should ask "who can provide
-// deployment.apply?" (a capability, declared in Capabilities below), never
-// "are you KubeVirt?" (a hardcoded identity check). Family exists for
-// discovery/filtering, not for the core to branch behavior on a specific
-// plugin's name.
+// PluginFamily groups plugins for discovery; routing uses capabilities.
 type PluginFamily string
 
 const (
@@ -45,13 +37,7 @@ type PluginPermissions struct {
 	Secrets    []string `json:"secrets,omitempty" yaml:"secrets,omitempty"`
 }
 
-// PluginManifest is the schema every plugin (language, analyzer, build,
-// runtime, deployment, or capability) declares about itself - see
-// Sanetizer-todo.md item 11's example YAML. The host validates a
-// manifest before ever exec'ing or trusting the plugin it describes;
-// nothing about what a plugin claims here is assumed correct without
-// this validation passing first, the same "verify, don't trust" pattern
-// internal/oci/extralayers.go already applies to plugin-supplied layers.
+// PluginManifest declares a plugin's identity, protocol, capabilities, and permissions.
 type PluginManifest struct {
 	ID              PluginID          `json:"id" yaml:"id"`
 	Version         string            `json:"version" yaml:"version"`
@@ -107,10 +93,7 @@ func (m PluginManifest) HasCapability(capability string) bool {
 
 // SupportsProtocol reports whether the manifest's declared protocol
 // version is one the host negotiating against it understands. Hosts
-// should refuse to dispatch to a plugin whose protocol version they
-// don't recognize rather than guess at compatibility - see Sanetizer-todo.md
-// item 12 (capability negotiation): "il refuse explicitement les
-// opérations incompatibles."
+// should refuse a protocol version they do not support.
 func (m PluginManifest) SupportsProtocol(hostSupported ...int) bool {
 	for _, v := range hostSupported {
 		if v == m.ProtocolVersion {
@@ -127,8 +110,7 @@ func validateCapability(capability string) error {
 		return fmt.Errorf("capability must not be empty")
 	}
 	// Allow alphanumeric, dots, hyphens, underscores for flexibility
-	// This is more permissive than api/plugin/manifest.go to support
-	// the examples in Sanetizer-todo.md (e.g., "deployment.apply")
+	// This is more permissive than api/plugin/v1/manifest.go to support
 	for _, c := range capability {
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
 			c == '.' || c == '-' || c == '_') {

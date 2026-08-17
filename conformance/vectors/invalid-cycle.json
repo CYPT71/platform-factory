@@ -1,7 +1,7 @@
 {
   "name": "invalid-cycle",
   "pipeline": {
-    "api_version": "secure-oci.dev/v1alpha1",
+    "api_version": "platform-factory.dev/v1alpha1",
     "name": "cyclic",
     "stages": [
       {

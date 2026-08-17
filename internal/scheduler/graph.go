@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	api "github.com/CYPT71/secure-oci-base/internal/core"
+	api "github.com/CYPT71/platform-factory/internal/core"
 )
 
 // Engine capability names a pipeline may require. Static capabilities
@@ -126,15 +126,12 @@ func Analyze(definition api.Pipeline) (Graph, error) {
 	return graph, nil
 }
 
-// acceptedAPIVersions accepts both the current Platform Factory wire
-// identifiers and the pre-rebrand secure-oci.dev ones, for the
-// documented compatibility overlap window (docs/api-compatibility.md) -
-// not a permanent dual-accept, but removing the legacy entries here is a
-// deprecation with its own release-note requirement, not this rename.
+// acceptedAPIVersions accepts every currently supported Platform Factory
+// wire identifier.
 var acceptedAPIVersions = []string{
-	api.PipelineAlphaAPIVersion, api.PipelineAlphaLegacyAPIVersion,
-	api.PipelineBetaAPIVersion, api.PipelineBetaLegacyAPIVersion,
-	api.PipelineAPIVersion, api.PipelineLegacyAPIVersion,
+	api.PipelineAlphaAPIVersion,
+	api.PipelineBetaAPIVersion,
+	api.PipelineAPIVersion,
 }
 
 func validate(definition api.Pipeline) ([]Issue, map[string]api.Stage) {

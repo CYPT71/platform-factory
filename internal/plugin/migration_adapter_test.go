@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	appmigration "github.com/CYPT71/secure-oci-base/internal/app/migration"
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	"github.com/CYPT71/secure-oci-base/internal/idempotency"
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
+	appmigration "github.com/CYPT71/platform-factory/internal/app/migration"
+	"github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/idempotency"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
+	"github.com/CYPT71/platform-factory/internal/observability"
 )
 
 const migrationTestDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

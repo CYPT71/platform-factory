@@ -76,7 +76,6 @@ func LoadPublicKey(filename string) (ed25519.PublicKey, error) {
 // DiscoverAndRegister scans for plugins and registers them in a registry.
 // This enables capability-based dispatch: instead of asking "Are you KubeVirt?",
 // the core can ask "Who can provide deployment.apply?".
-// Sanetizer-todo item 12: Capability negotiation.
 func DiscoverAndRegister(root string) (*Registry, error) {
 	discovered, err := Discover(root)
 	if err != nil {
@@ -92,7 +91,6 @@ func DiscoverAndRegister(root string) (*Registry, error) {
 
 // DiscoverAndRegisterGlobal is a convenience function that discovers plugins
 // from the given root directory and registers them in the global registry.
-// Sanetizer-todo item 12: Capability negotiation.
 func DiscoverAndRegisterGlobal(root string) error {
 	registry, err := DiscoverAndRegister(root)
 	if err != nil {

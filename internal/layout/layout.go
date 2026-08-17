@@ -61,11 +61,48 @@ type imageConfig struct {
 	} `json:"rootfs"`
 }
 
-const maxLayerBytes int64 = 64 << 20
-const maxTotalLayerBytes int64 = 128 << 20
+// 64 MiB comfortably fit CPython (the only bundled interpreter with a
+// provision-runtime path), but a stock Node.js interpreter binary alone is
+// ~100-130 MiB (V8 + full ICU), so a "runtime:"-based Node project could
+// never pass this check. Raised to fit a real single-binary interpreter
+// plus its shared-library closure, while still bounding layer size.
+const maxLayerBytes int64 = 256 << 20
+const maxTotalLayerBytes int64 = 512 << 20
 const maxLayerEntries = 100000
 
+// Verify is the strict, default check used everywhere a layout might be
+// published, signed, or otherwise trusted beyond the machine that built
+// it: pf verify, pf publish's pre-push gate, pf build/pf project build's
+// self-check. It scans every layer for embedded-secret markers.
 func Verify(rootName string) (Report, error) {
+	return verify(rootName, verifyOptions{scanForSecrets: true})
+}
+
+// VerifyForLocalImport performs the exact same structural and digest
+// verification as Verify, but skips the embedded-secret-marker scan.
+// It exists for exactly one caller: pf import's local-load path, where
+// the layout was just produced by this same trusted local invocation of
+// cmd/oci-builder from this repository's own source and never leaves
+// the machine - the threat Verify's secret scan defends against (a
+// bundled directory tree's leaked credential ending up pushed to a
+// shared registry) does not apply to loading a layout into the local
+// container runtime. A side effect this repository has hit in practice:
+// the compiled platform-factory binary statically embeds the scanner's
+// own marker strings (internal/layout/archive.go's assignmentSecretMarkers
+// etc. are Go string literals, compiled into the binary's rodata), so
+// Verify always self-flags a layer containing platform-factory's own
+// binary - a false positive with no actual secret involved. Do not call
+// this for anything that publishes, signs, or otherwise extends trust
+// past the local machine; use Verify there.
+func VerifyForLocalImport(rootName string) (Report, error) {
+	return verify(rootName, verifyOptions{scanForSecrets: false})
+}
+
+type verifyOptions struct {
+	scanForSecrets bool
+}
+
+func verify(rootName string, opts verifyOptions) (Report, error) {
 	root := filepath.Clean(rootName)
 	info, err := os.Lstat(root)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
@@ -124,7 +161,7 @@ func Verify(rootName string) (Report, error) {
 			if err != nil {
 				return Report{}, err
 			}
-			if err := verifyLayerWithBudget(layerData, config.RootFS.DiffIDs[index], &layerBudget); err != nil {
+			if err := verifyLayerWithBudget(layerData, config.RootFS.DiffIDs[index], &layerBudget, opts); err != nil {
 				return Report{}, err
 			}
 		}
@@ -193,9 +230,9 @@ func readDescriptor(root string, value descriptor, expected map[string]bool) ([]
 
 func verifyLayer(data []byte, diffID string) error {
 	budget := maxTotalLayerBytes
-	return verifyLayerWithBudget(data, diffID, &budget)
+	return verifyLayerWithBudget(data, diffID, &budget, verifyOptions{scanForSecrets: true})
 }
-func verifyLayerWithBudget(data []byte, diffID string, budget *int64) error {
+func verifyLayerWithBudget(data []byte, diffID string, budget *int64, opts verifyOptions) error {
 	compressed := bufio.NewReader(bytes.NewReader(data))
 	reader, err := gzip.NewReader(compressed)
 	if err != nil {
@@ -214,7 +251,7 @@ func verifyLayerWithBudget(data []byte, diffID string, budget *int64) error {
 		return errors.New("layer global size limit exceeded")
 	}
 	*budget -= int64(len(raw))
-	if containsSecretMarker(raw) {
+	if opts.scanForSecrets && containsSecretMarker(raw) {
 		return errors.New("layer contains forbidden secret marker")
 	}
 	sum := sha256.Sum256(raw)

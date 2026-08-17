@@ -1,0 +1,42 @@
+DÉMO SENIOR — audit multi-stack et pipeline observable
+======================================================
+
+# Précondition : pf installé par ./install.sh. On réutilise les quatre projets
+# propres créés par demo-intermediaire.txt ; seul Go possède aujourd'hui une
+# preuve OCI complète, les trois autres gardent leurs preuves d'initialisation.
+DEMO_ROOT="${TMPDIR:-/tmp}/pf-demo-intermediaire"
+
+# 1. Audit homogène Go, Python, JavaScript et TypeScript.
+for stack in go python javascript typescript; do
+  echo "===== audit $stack ====="
+  cd "$DEMO_ROOT/$stack"
+  pf doctor build
+  pf inspect
+  pf explain
+  if test -d dist/oci-layout; then
+    pf verify dist/oci-layout
+    sed -n '1,160p' reports/evidence.json
+  else
+    echo "Pas de layout OCI pour $stack : runtime Linux interprété non assemblé."
+  fi
+done
+
+# 2. Pipeline reproductible depuis un autre répertoire propre. Depuis la racine
+# du dépôt, copier uniquement les entrées versionnées de l'exemple.
+PIPELINE_ROOT="${TMPDIR:-/tmp}/pf-demo-senior-pipeline"
+mkdir -p "$PIPELINE_ROOT"
+cp -R examples/hello-pipeline/app "$PIPELINE_ROOT/app"
+cp examples/pipeline.json "$PIPELINE_ROOT/pipeline.json"
+cd "$PIPELINE_ROOT"
+
+pf pipeline plan --format text pipeline.json
+PLATFORM_FACTORY_TRACE_ID=demo-senior \
+  pf pipeline run --sandbox auto --parallelism 2 --workdir ./run \
+  --format text pipeline.json
+
+sed -n '1,240p' run/journal.json
+./run/out/dist/hello-pipeline
+
+# Résultat attendu : les quatre projets passent la même inspection sans masquer
+# la limite runtime ; le pipeline parallèle produit "hello, world", un journal
+# et la trace demandée.

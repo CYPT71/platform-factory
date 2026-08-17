@@ -9,9 +9,9 @@ import (
 	"sort"
 	"strings"
 
-	appmigration "github.com/CYPT71/secure-oci-base/internal/app/migration"
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
+	appmigration "github.com/CYPT71/platform-factory/internal/app/migration"
+	"github.com/CYPT71/platform-factory/internal/core"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
 )
 
 const migrationImportCapability = "migration.import"

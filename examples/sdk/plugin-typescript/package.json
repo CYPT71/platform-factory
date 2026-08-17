@@ -1,8 +1,8 @@
 {
-  "name": "secure-oci-plugin-typescript-example",
+  "name": "platform-factory-plugin-typescript-example",
   "private": true,
   "version": "1.0.0",
-  "description": "Reference secure-oci v1 language plugin, built on @secure-oci/plugin-sdk's TypeScript types.",
+  "description": "Reference platform-factory v1 language plugin, built on @platform-factory/plugin-sdk's TypeScript types.",
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x plugin.js"
   },

@@ -41,7 +41,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 const maxCapturedBytes = 1 << 20

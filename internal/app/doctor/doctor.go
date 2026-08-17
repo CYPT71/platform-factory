@@ -1,5 +1,4 @@
 // Package doctor is the application-layer service behind `pf doctor` -
-// Sanetizer-todo.md item 8 ("réduire cmd/platform-factory... la CLI doit
 // devenir une façade"). cmd/platform-factory/doctor.go now only parses
 // flags, calls Service.Run, formats the result, and picks an exit code;
 // every actual diagnostic - what to check and how - lives here, where it
@@ -7,16 +6,29 @@
 package doctor
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor"
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor/sandbox"
-	"github.com/CYPT71/secure-oci-base/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/hypervisor"
+	"github.com/CYPT71/platform-factory/internal/hypervisor/sandbox"
+	"github.com/CYPT71/platform-factory/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/policy"
 )
+
+type Options struct {
+	Registry string
+	Policy   string
+}
 
 // Check is one diagnostic result: whether a capability or external tool
 // platform-factory's other commands depend on is actually usable right
@@ -24,6 +36,7 @@ import (
 type Check struct {
 	Name       string `json:"name"`
 	OK         bool   `json:"ok"`
+	Skipped    bool   `json:"skipped,omitempty"`
 	Detail     string `json:"detail,omitempty"`
 	Suggestion string `json:"suggestion,omitempty"`
 }
@@ -57,7 +70,9 @@ type Service struct {
 	ProbeNative func(context.Context) (microvm.Capabilities, error)
 	// ProbeSandbox reports which VMM sandbox primitives this host
 	// supports (namespaces, cgroups, capability bounding-set drop).
-	ProbeSandbox func() sandbox.Support
+	ProbeSandbox  func() sandbox.Support
+	ProbeRegistry func(context.Context, string) error
+	ReadFile      func(string) ([]byte, error)
 }
 
 // toolChecks is every external binary platform-factory's other commands
@@ -67,6 +82,7 @@ var toolChecks = []struct{ name, suggestion string }{
 	{"docker", "install Docker, or ignore this if you only use Podman/containerd"},
 	{"podman", "install Podman, or ignore this if you only use Docker/containerd"},
 	{"containerd", "install containerd, or ignore this if unused"},
+	{"ctr", "install the containerd client (ctr) to verify daemon access"},
 	{"kubectl", "install kubectl, or ignore this if you don't deploy to Kubernetes"},
 }
 
@@ -81,7 +97,7 @@ var runtimeChecks = []struct {
 }{
 	{"docker", "runtime-docker", "start the Docker daemon (`docker info` failed)", []string{"info"}},
 	{"podman", "runtime-podman", "start or initialize the Podman machine (`podman info` failed) - see `podman machine init`/`podman machine start`", []string{"info"}},
-	{"containerd", "runtime-containerd", "start the containerd daemon (`ctr version` failed)", []string{"version"}},
+	{"ctr", "runtime-containerd", "start the containerd daemon (`ctr version` failed)", []string{"version"}},
 	{"kubectl", "runtime-kubernetes", "configure a reachable cluster (`kubectl cluster-info` failed) - check KUBECONFIG", []string{"cluster-info", "--request-timeout=3s"}},
 }
 
@@ -99,9 +115,11 @@ func New() Service {
 			info, err := os.Stat(path)
 			return err == nil && info.Mode().IsRegular()
 		},
-		UserHomeDir:  os.UserHomeDir,
-		ProbeNative:  hypervisor.ProbeNative,
-		ProbeSandbox: sandbox.ProbeSandbox,
+		UserHomeDir:   os.UserHomeDir,
+		ProbeNative:   hypervisor.ProbeNative,
+		ProbeSandbox:  sandbox.ProbeSandbox,
+		ProbeRegistry: probeRegistry,
+		ReadFile:      os.ReadFile,
 	}
 }
 
@@ -110,35 +128,53 @@ func New() Service {
 // there's an obvious one, a suggestion - same contract the CLI had
 // before this extraction.
 func (s Service) Run(ctx context.Context) Report {
+	return s.RunScope(ctx, "all")
+}
+
+// RunScope limits diagnostics to one user task so remediation stays focused.
+func (s Service) RunScope(ctx context.Context, scope string) Report {
+	return s.RunScopeWithOptions(ctx, scope, Options{})
+}
+
+func (s Service) RunScopeWithOptions(ctx context.Context, scope string, options Options) Report {
 	var checks []Check
 
 	toolFound := make(map[string]bool, len(toolChecks))
 	for _, tool := range toolChecks {
+		if !scopeIncludesTool(scope, tool.name) {
+			continue
+		}
 		check := s.checkTool(tool.name, tool.suggestion)
 		toolFound[tool.name] = check.OK
 		checks = append(checks, check)
 	}
 
 	for _, rc := range runtimeChecks {
+		if !scopeIncludesTool(scope, rc.tool) {
+			continue
+		}
 		checks = append(checks, s.checkRuntime(ctx, rc.tool, rc.name, rc.suggestion, toolFound[rc.tool], rc.args))
 	}
 
-	checks = append(checks, s.checkRegistryConfigured())
-
-	if s.ProbeNative != nil {
-		capabilities, err := s.ProbeNative(ctx)
-		if err != nil {
-			checks = append(checks, Check{Name: "native-hypervisor", OK: false, Detail: err.Error()})
+	if scope == "all" || scope == "publish" {
+		if options.Registry != "" {
+			checks = append(checks, s.checkRegistryAccess(ctx, options.Registry))
 		} else {
-			check := Check{Name: "native-hypervisor", OK: capabilities.Available, Detail: capabilities.Architecture}
-			if !capabilities.Available {
-				check.Suggestion = capabilities.Details["unavailable"]
-			}
-			checks = append(checks, check)
+			checks = append(checks, s.checkRegistryConfigured())
+		}
+	}
+	if scope == "all" || scope == "build" || scope == "publish" || scope == "deploy" {
+		if options.Policy != "" {
+			checks = append(checks, s.checkPolicy(options.Policy))
 		}
 	}
 
-	if s.ProbeSandbox != nil {
+	if (scope == "all" || scope == "build") && s.ProbeNative != nil {
+		capabilities, err := s.ProbeNative(ctx)
+		checks = append(checks, hypervisorChecks(capabilities, err)...)
+	}
+
+	if (scope == "all" || scope == "build") && s.ProbeSandbox != nil {
 		support := s.ProbeSandbox()
 		checks = append(checks,
 			Check{Name: "sandbox-namespaces", OK: support.Namespaces, Suggestion: support.Details["namespaces"]},
@@ -149,11 +185,139 @@ func (s Service) Run(ctx context.Context) Report {
 
 	report := Report{OK: true, Checks: checks}
 	for _, c := range checks {
-		if !c.OK {
+		if !c.OK && !c.Skipped {
 			report.OK = false
 		}
 	}
 	return report
+}
+
+func (s Service) checkRegistryAccess(ctx context.Context, registry string) Check {
+	if s.ProbeRegistry == nil {
+		return Check{Name: "registry-access", Suggestion: "registry probe is unavailable in this build"}
+	}
+	if err := s.ProbeRegistry(ctx, registry); err != nil {
+		return Check{Name: "registry-access", Detail: err.Error(), Suggestion: "verify the registry URL, TLS trust, and PLATFORM_FACTORY_REGISTRY_USERNAME/PASSWORD"}
+	}
+	return Check{Name: "registry-access", OK: true, Detail: registry}
+}
+
+func (s Service) checkPolicy(path string) Check {
+	if s.ReadFile == nil {
+		return Check{Name: "policy", Suggestion: "policy reader is unavailable in this build"}
+	}
+	raw, err := s.ReadFile(path)
+	if err != nil {
+		return Check{Name: "policy", Detail: err.Error(), Suggestion: "provide a readable policy JSON file"}
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var rules policy.Rules
+	if err := decoder.Decode(&rules); err != nil {
+		return Check{Name: "policy", Detail: err.Error(), Suggestion: "fix the policy JSON schema and api_version"}
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return Check{Name: "policy", Detail: err.Error(), Suggestion: "remove trailing JSON values"}
+	}
+	evidence := policy.Evidence{SubjectDigest: "sha256:doctor", SourcesPinned: true, BasePinned: true, ToolchainPinned: true, PluginsPinned: true, NonRoot: true, ReadOnlyRootFS: true, CapabilitiesDropped: true, SecretsAbsent: true, SBOM: true, Provenance: true, Signature: true, Reproducible: true}
+	if _, err := policy.Evaluate(rules, evidence); err != nil {
+		return Check{Name: "policy", Detail: err.Error(), Suggestion: "use the supported platform-factory policy api_version"}
+	}
+	return Check{Name: "policy", OK: true, Detail: path}
+}
+
+func ensureJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func probeRegistry(ctx context.Context, address string) error {
+	if !strings.Contains(address, "://") {
+		address = "https://" + address
+	}
+	parsed, err := url.Parse(address)
+	if err != nil || parsed.Host == "" || parsed.User != nil {
+		return fmt.Errorf("invalid registry URL")
+	}
+	parsed.Path = "/v2/"
+	parsed.RawQuery, parsed.Fragment = "", ""
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return err
+	}
+	if username := os.Getenv("PLATFORM_FACTORY_REGISTRY_USERNAME"); username != "" {
+		request.SetBasicAuth(username, os.Getenv("PLATFORM_FACTORY_REGISTRY_PASSWORD"))
+	}
+	client := &http.Client{Timeout: runtimeCheckTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("registry /v2/ returned %s", response.Status)
+	}
+	return nil
+}
+
+func scopeIncludesTool(scope, tool string) bool {
+	switch scope {
+	case "build":
+		return tool == "git" || tool == "docker" || tool == "podman" || tool == "containerd" || tool == "ctr"
+	case "publish":
+		return false
+	case "deploy":
+		return tool == "kubectl"
+	default:
+		return true
+	}
+}
+
+func hypervisorChecks(capabilities microvm.Capabilities, probeErr error) []Check {
+	backend := capabilities.Details["backend"]
+	notApplicable := func(name, platform string) Check {
+		return Check{Name: name, Skipped: true, Detail: "not applicable on " + platform}
+	}
+	platform := backend
+	if platform == "" {
+		platform = "this host"
+	}
+	checks := []Check{
+		notApplicable("kvm-device", platform),
+		notApplicable("kvm-extensions", platform),
+		notApplicable("hyper-v", platform),
+		notApplicable("virtualization-framework", platform),
+	}
+	if probeErr != nil {
+		return append(checks, Check{Name: "native-hypervisor", Detail: probeErr.Error(), Suggestion: "inspect host virtualization permissions and platform logs"})
+	}
+	detail := capabilities.Architecture
+	suggestion := capabilities.Details["unavailable"]
+	switch backend {
+	case "linux-kvm-native":
+		checks[0] = Check{Name: "kvm-device", OK: capabilities.Available, Detail: detail, Suggestion: suggestion}
+		checks[1] = Check{Name: "kvm-extensions", OK: capabilities.Available, Detail: capabilityFeatureSummary(capabilities), Suggestion: suggestion}
+	case "windows-native-whp":
+		checks[2] = Check{Name: "hyper-v", OK: capabilities.Available, Detail: detail, Suggestion: suggestion}
+	case "darwin-native-virtualization":
+		checks[3] = Check{Name: "virtualization-framework", OK: capabilities.Available, Detail: detail, Suggestion: suggestion}
+	default:
+		checks = append(checks, Check{Name: "native-hypervisor", OK: capabilities.Available, Detail: detail, Suggestion: suggestion})
+	}
+	return checks
+}
+
+func capabilityFeatureSummary(capabilities microvm.Capabilities) string {
+	if capabilities.Available {
+		return "required KVM API and extensions negotiated"
+	}
+	return capabilities.Details["unavailable"]
 }
 
 func (s Service) checkTool(name, suggestion string) Check {

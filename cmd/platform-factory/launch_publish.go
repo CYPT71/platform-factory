@@ -12,9 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/CYPT71/secure-oci-base/internal/observability"
-	"github.com/CYPT71/secure-oci-base/internal/policy"
-	"github.com/CYPT71/secure-oci-base/internal/project"
+	"github.com/CYPT71/platform-factory/internal/policy"
+	"github.com/CYPT71/platform-factory/internal/project"
 )
 
 // hasLaunchPublishFlag keeps the established launch parser unchanged while
@@ -40,8 +39,7 @@ func runLaunchPublish(
 	containerExecute containerExecutor,
 	microVMExecute microVMExecutor,
 ) int {
-	// Sanetizer-todo item 18: Create context with trace_id for end-to-end correlation
-	ctx := observability.ContextWithTraceID(context.Background(), observability.NewTraceID("cli", "launch-publish").String())
+	ctx := commandContext(context.Background(), "launch-publish")
 
 	flags := flag.NewFlagSet("launch", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -85,7 +83,7 @@ func runLaunchPublish(
 	var lifecycleOutput bytes.Buffer
 	freezeLock := filepath.Join(loaded.Root, ".platform-factory", "freeze.lock.json")
 	if _, err := os.Stat(freezeLock); errors.Is(err, os.ErrNotExist) {
-		if code := runProject([]string{"freeze", "--config", loaded.File}, &lifecycleOutput, stderr,
+		if code := runProjectContext(ctx, []string{"freeze", "--config", loaded.File}, &lifecycleOutput, stderr,
 			execute, containerExecute, microVMExecute); code != 0 {
 			return code
 		}
@@ -94,7 +92,7 @@ func runLaunchPublish(
 		return 1
 	}
 
-	first, second, code := reproducibleProjectBuild(loaded, &lifecycleOutput, stderr, execute)
+	first, second, code := reproducibleProjectBuildContext(ctx, loaded, &lifecycleOutput, stderr, execute)
 	if code != 0 {
 		return code
 	}
@@ -132,11 +130,18 @@ func runLaunchPublish(
 		return code
 	}
 
-	if code := runConfiguredProject(loaded, &lifecycleOutput, stderr, execute,
+	// plugins is nil here: this path's freeze inventory was already
+	// verified fresh earlier in this same function (see "inspect freeze
+	// inventory" above), so rebuildProjectLayout's auto-freeze fallback
+	// is not expected to trigger - resolveFreezeSteps tolerates a nil
+	// plugin host and reports a clear error instead of panicking if it
+	// somehow does.
+	if code := runConfiguredProject(ctx, loaded, nil, &lifecycleOutput, stderr, execute,
 		containerExecute, microVMExecute); code != 0 {
 		return code
 	}
 	result := map[string]any{
+		"api_version":  cliOutputAPIVersion,
 		"config":       loaded.File,
 		"digest":       second,
 		"image":        target,
@@ -154,6 +159,10 @@ func runLaunchPublish(
 }
 
 func reproducibleProjectBuild(loaded project.Loaded, stdout, stderr io.Writer, execute projectExecutor) (string, string, int) {
+	return reproducibleProjectBuildContext(context.Background(), loaded, stdout, stderr, execute)
+}
+
+func reproducibleProjectBuildContext(ctx context.Context, loaded project.Loaded, stdout, stderr io.Writer, execute projectExecutor) (string, string, int) {
 	output := loaded.Output()
 	parent := filepath.Dir(output)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -181,7 +190,7 @@ func reproducibleProjectBuild(loaded project.Loaded, stdout, stderr io.Writer, e
 			_ = os.Rename(candidate, output)
 		}
 	}
-	first, code := buildProject(loaded, stdout, stderr, execute)
+	first, code := buildProjectContext(ctx, loaded, stdout, stderr, execute)
 	if code != 0 {
 		restore(previous)
 		return "", "", code
@@ -192,7 +201,7 @@ func reproducibleProjectBuild(loaded project.Loaded, stdout, stderr io.Writer, e
 		restore(previous)
 		return "", "", 1
 	}
-	second, code := buildProject(loaded, stdout, stderr, execute)
+	second, code := buildProjectContext(ctx, loaded, stdout, stderr, execute)
 	if code != 0 {
 		restore(firstLayout)
 		return first, "", code

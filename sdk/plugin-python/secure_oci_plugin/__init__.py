@@ -1,4 +1,4 @@
-"""SDK for out-of-process secure-oci language plugins.
+"""SDK for out-of-process platform-factory language plugins.
 
 Defines the versioned, length-prefixed JSON-RPC protocol plugins speak
 over stdin/stdout (an LSP/DAP-style header-framed message on the wire)
@@ -6,7 +6,7 @@ and the plugin-side Server. Mirrors Go's sdk/plugin package: the same
 wire protocol, the same v1.hello handshake, the same capability
 dispatch (method "v1."+capability). A plugin written against either
 SDK passes the exact same conformance suite
-(secure-oci-conformance plugin).
+(platform-factory-conformance plugin).
 
 Standard library only.
 """
@@ -14,17 +14,36 @@ Standard library only.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any, BinaryIO, Callable, Dict
 
 CONTENT_TYPE = "application/vnd.platform-factory.rpc.v1+json"
 # LEGACY_CONTENT_TYPE is the pre-rebrand Content-Type: still accepted from
 # a peer for the documented compatibility overlap window (see
 # docs/api-compatibility.md), never written by write_message.
-LEGACY_CONTENT_TYPE = "application/vnd.secure-oci.rpc.v1+json"
+LEGACY_CONTENT_TYPE = "application/vnd.platform-factory.rpc.v1+json"
 PROTOCOL_VERSION = "v1"
 _MAX_MESSAGE_BYTES = 1 << 20
 
 Handler = Callable[[Dict[str, Any]], Dict[str, Any]]
+ContextHandler = Callable[[Dict[str, Any], "RequestContext"], Dict[str, Any]]
+
+CAPABILITY = {
+    "runtime_status": "runtime.status", "runtime_logs": "runtime.logs",
+    "runtime_create": "runtime.create", "runtime_start": "runtime.start",
+    "runtime_stop": "runtime.stop", "runtime_restart": "runtime.restart",
+    "runtime_delete": "runtime.delete", "runtime_exec": "runtime.exec",
+    "deployment_plan": "deployment.plan", "deployment_apply": "deployment.apply",
+    "deployment_observe": "deployment.observe", "deployment_rollback": "deployment.rollback",
+    "deployment_delete": "deployment.delete", "builder_build": "builder.build",
+    "analyzer_scan": "analyzer.scan", "registry_push": "registry.push",
+    "migration_discover": "migration.discover", "migration_apply": "migration.apply",
+}
+
+@dataclass(frozen=True)
+class RequestContext:
+    trace_id: str = ""
+    operation_id: str = ""
 
 
 class RPCError(Exception):
@@ -109,6 +128,7 @@ class Server:
         self._version = version
         self._capabilities: list[str] = []
         self._handlers: Dict[str, Handler] = {}
+        self._context_handlers: Dict[str, ContextHandler] = {}
 
     def handle(self, capability: str, handler: Handler | None = None):
         """Register handler for capability (e.g. "detect"), dispatched
@@ -127,6 +147,14 @@ class Server:
 
         return decorator
 
+    def handle_context(self, capability: str, handler: ContextHandler | None = None):
+        """Register a native handler receiving params and RequestContext."""
+        def register(fn: ContextHandler) -> ContextHandler:
+            self._capabilities.append(capability)
+            self._context_handlers["v1." + capability] = fn
+            return fn
+        return register(handler) if handler is not None else register
+
     def serve(self, input_stream: BinaryIO, output: BinaryIO) -> None:
         """Read framed requests from input_stream and write framed
         responses to output until input_stream is exhausted (the host
@@ -141,6 +169,8 @@ class Server:
         request_id = request.get("id", "")
         method = request.get("method")
         params = request.get("params") or {}
+        correlation = {"trace_id": request.get("trace_id", ""),
+                       "operation_id": request.get("operation_id", "")}
 
         if method == "v1.hello":
             return {
@@ -150,19 +180,21 @@ class Server:
                     "name": self._name,
                     "version": self._version,
                     "capabilities": self._capabilities,
-                },
+                }, **correlation,
             }
 
         handler = self._handlers.get(method)
-        if handler is None:
-            return {"id": request_id, "error": {"code": 404, "message": f"unknown method {method!r}"}}
+        context_handler = self._context_handlers.get(method)
+        if handler is None and context_handler is None:
+            return {"id": request_id, "error": {"code": 404, "message": f"unknown method {method!r}"}, **correlation}
         try:
-            result = handler(params)
+            context = RequestContext(str(request.get("trace_id", "")), str(request.get("operation_id", "")))
+            result = context_handler(params, context) if context_handler is not None else handler(params)
         except RPCError as exc:
-            return {"id": request_id, "error": {"code": exc.code, "message": exc.message}}
+            return {"id": request_id, "error": {"code": exc.code, "message": exc.message}, **correlation}
         except Exception as exc:  # noqa: BLE001 - reported to the host, not swallowed
-            return {"id": request_id, "error": {"code": 500, "message": str(exc)}}
-        return {"id": request_id, "result": result}
+            return {"id": request_id, "error": {"code": 500, "message": str(exc)}, **correlation}
+        return {"id": request_id, "result": result, **correlation}
 
 
-__all__ = ["Server", "RPCError", "ProtocolError", "CONTENT_TYPE", "LEGACY_CONTENT_TYPE", "PROTOCOL_VERSION", "write_message", "read_message"]
+__all__ = ["Server", "RequestContext", "CAPABILITY", "RPCError", "ProtocolError", "CONTENT_TYPE", "LEGACY_CONTENT_TYPE", "PROTOCOL_VERSION", "write_message", "read_message"]

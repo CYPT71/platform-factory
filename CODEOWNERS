@@ -15,62 +15,62 @@ Owners are responsible for:
 ## Critical Components (Require 2+ Reviews)
 
 # Core security-critical components
-/api/* @secure-oci-maintainers
-/cmd/secure-oci @secure-oci-maintainers
-/internal/pipeline @secure-oci-maintainers
-/internal/executor @secure-oci-maintainers
-/internal/sandbox @secure-oci-maintainers
-/internal/signing @secure-oci-crypto-team
-/internal/mtls @secure-oci-crypto-team
+/api/* @platform-factory-maintainers
+/cmd/platform-factory @platform-factory-maintainers
+/internal/pipeline @platform-factory-maintainers
+/internal/executor @platform-factory-maintainers
+/internal/sandbox @platform-factory-maintainers
+/internal/signing @platform-factory-crypto-team
+/internal/mtls @platform-factory-crypto-team
 
 # Cryptography
-/internal/signing/* @secure-oci-crypto-team
-/internal/mtls/* @secure-oci-crypto-team
+/internal/signing/* @platform-factory-crypto-team
+/internal/mtls/* @platform-factory-crypto-team
 
 # Registry
-/internal/registry/* @secure-oci-registry-team
+/internal/registry/* @platform-factory-registry-team
 
 # Publication
-/internal/oci/* @secure-oci-publish-team
-/cmd/secure-oci/* @secure-oci-maintainers
+/internal/oci/* @platform-factory-publish-team
+/cmd/platform-factory/* @platform-factory-maintainers
 
 # Plugins
-/internal/plugin/* @secure-oci-plugin-team
-/cmd/secure-oci-plugin-* @secure-oci-plugin-team
+/internal/plugin/* @platform-factory-plugin-team
+/cmd/platform-factory-plugin-* @platform-factory-plugin-team
 
 # MicroVM
-/internal/microvm/* @secure-oci-microvm-team
-/internal/hypervisor/* @secure-oci-microvm-team
-/cmd/microvm-* @secure-oci-microvm-team
+/internal/microvm/* @platform-factory-microvm-team
+/internal/hypervisor/* @platform-factory-microvm-team
+/cmd/microvm-* @platform-factory-microvm-team
 
 # CI/CD
-.github/workflows/* @secure-oci-devops-team
-scripts/ci/* @secure-oci-devops-team
+.github/workflows/* @platform-factory-devops-team
+scripts/ci/* @platform-factory-devops-team
 
 ## Standard Components (Require 1+ Review)
 
 # API
-/api/* @secure-oci-maintainers
+/api/* @platform-factory-maintainers
 
 # Internal packages
-/internal/* @secure-oci-maintainers
+/internal/* @platform-factory-maintainers
 
 # Commands
-/cmd/* @secure-oci-maintainers
+/cmd/* @platform-factory-maintainers
 
 # SDK
-/sdk/* @secure-oci-maintainers
+/sdk/* @platform-factory-maintainers
 
 # Examples
-examples/* @secure-oci-maintainers
+examples/* @platform-factory-maintainers
 
 # Tests
-tests/* @secure-oci-maintainers
+tests/* @platform-factory-maintainers
 
 # Documentation
-docs/* @secure-oci-maintainers
-.wiki-worktree/* @secure-oci-maintainers
+docs/* @platform-factory-maintainers
+.wiki-worktree/* @platform-factory-maintainers
 
 ## Default
 
-* @secure-oci-maintainers
+* @platform-factory-maintainers

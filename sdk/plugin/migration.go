@@ -1,9 +1,11 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 )
 
 // MigrationResource is the provider-neutral v1 wire representation. It is
@@ -57,6 +59,13 @@ type MigrationDiscoverResult struct {
 	Unknowns   []MigrationUnknownObservation `json:"unknowns,omitempty"`
 	Gaps       []MigrationCompatibilityGap   `json:"gaps,omitempty"`
 	NextCursor string                        `json:"next_cursor,omitempty"`
+}
+type MigrationInspectParams struct {
+	ResourceID string `json:"resource_id"`
+}
+type MigrationInspectResult struct {
+	Found    bool               `json:"found"`
+	Resource *MigrationResource `json:"resource,omitempty"`
 }
 type MigrationObserveParams struct {
 	Resource MigrationResource `json:"resource"`
@@ -133,6 +142,12 @@ func RegisterMigration(server *Server, discover func(context.Context, MigrationD
 	}
 }
 
+func RegisterMigrationInspect(server *Server, inspect func(context.Context, MigrationInspectParams) (MigrationInspectResult, error)) {
+	if server != nil && inspect != nil {
+		server.Handle(CapabilityMigrationInspect, migrationHandler(inspect))
+	}
+}
+
 func RegisterMigrationArtifacts(server *Server, export func(context.Context, MigrationExportParams) (MigrationExportResult, error), importArtifact func(context.Context, MigrationImportParams) (MigrationImportResult, error), observe func(context.Context, MigrationArtifactObserveParams) (MigrationArtifactObserveResult, error)) {
 	if server == nil {
 		return
@@ -154,7 +169,15 @@ func migrationHandler[P, R any](fn func(context.Context, P) (R, error)) Handler 
 		if len(raw) == 0 {
 			return nil, errors.New("migration plugin: parameters are required")
 		}
-		if err := json.Unmarshal(raw, &params); err != nil {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&params); err != nil {
+			return nil, err
+		}
+		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+			if err == nil {
+				return nil, errors.New("migration plugin: multiple parameter documents")
+			}
 			return nil, err
 		}
 		return fn(ctx, params)

@@ -6,8 +6,8 @@ import (
 	"io"
 	"net"
 
-	"github.com/CYPT71/secure-oci-base/internal/guesttransport"
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/guesttransport"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 // GuestAgentOptions enables the authenticated COM2 guest channel for direct

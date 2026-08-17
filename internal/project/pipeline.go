@@ -5,7 +5,7 @@ import (
 	"path"
 	"regexp"
 
-	api "github.com/CYPT71/secure-oci-base/internal/core"
+	api "github.com/CYPT71/platform-factory/internal/core"
 )
 
 var idPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
@@ -19,7 +19,7 @@ var idPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 // validated graph.
 //
 // freezeCommands are the resolved freeze argv lists (the caller derives
-// them the same way secure-oci project freeze does), so this package
+// them the same way platform-factory project freeze does), so this package
 // does not duplicate the language adapter table.
 func (loaded Loaded) Pipeline(freezeCommands [][]string) (api.Pipeline, error) {
 	config := loaded.Config

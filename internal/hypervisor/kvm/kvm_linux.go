@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 const (
@@ -61,6 +61,13 @@ func ProbeNative(ctx context.Context) (api.Capabilities, error) {
 	}
 	result.Available = true
 	result.Features["create-vm"] = true
+	// runNativeKVM (cmd/platform-factory/microvm_native_linux_amd64.go) relays
+	// every forward over its point-to-point TAP link via a host TCP relay
+	// instead of a QEMU SLIRP hostfwd equivalent, but it does relay them -
+	// this capability was simply never advertised here, so
+	// nativeKVMEligible rejected any spec with a forward and fell back to
+	// QEMU even though native KVM handles it.
+	result.Features["port-forwarding"] = true
 	return result, nil
 }
 

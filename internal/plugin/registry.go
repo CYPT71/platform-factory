@@ -1,19 +1,14 @@
-// Package plugin provides the plugin discovery, loading, and capability-based dispatch.
-// This file implements the plugin registry for capability negotiation as specified
-// in Sanetizer-todo.md items 11-12.
 package plugin
 
 import (
 	"errors"
 	"reflect"
+	"slices"
 	"sort"
 	"sync"
 )
 
-// Registry maintains a map of plugin names to their manifests and capabilities.
-// It enables capability-based dispatch: instead of asking "Are you KubeVirt?",
-// the core asks "Who can provide deployment.apply?".
-// Sanetizer-todo item 12: Capability negotiation.
+// Registry indexes plugins by capability and family for verified dispatch.
 type Registry struct {
 	mu       sync.RWMutex
 	plugins  map[string]Manifest // plugin name -> manifest
@@ -52,9 +47,7 @@ func NewRegistry() *Registry {
 	}
 }
 
-// Register adds a plugin manifest to the registry and indexes it by capabilities and family.
-// This is called during plugin discovery to build the capability index.
-// Sanetizer-todo item 12: Capability negotiation.
+// Register indexes a declared plugin manifest.
 func (r *Registry) Register(manifest Manifest) {
 	r.register(manifest, false)
 }
@@ -76,25 +69,16 @@ func (r *Registry) register(manifest Manifest, discovered bool) {
 		}
 		return
 	}
-	// Store the manifest
 	r.plugins[manifest.Name] = manifest
 	state := r.states[manifest.Name]
 	state.declared = true
 	state.discovered = state.discovered || discovered
 	r.states[manifest.Name] = state
 
-	// Index by family
 	family := string(manifest.Family)
-	if _, exists := r.byFamily[family]; !exists {
-		r.byFamily[family] = make([]string, 0)
-	}
 	r.byFamily[family] = append(r.byFamily[family], manifest.Name)
 
-	// Index by each capability
 	for _, cap := range manifest.Capabilities {
-		if _, exists := r.byCap[cap]; !exists {
-			r.byCap[cap] = make([]string, 0)
-		}
 		r.byCap[cap] = append(r.byCap[cap], manifest.Name)
 	}
 }
@@ -110,45 +94,24 @@ func (r *Registry) Unregister(name string) {
 	}
 	client := r.states[name].client
 
-	// Remove from plugin map
 	delete(r.plugins, name)
 	delete(r.states, name)
-
-	// Remove from family index
-	family := string(manifest.Family)
-	if plugins, ok := r.byFamily[family]; ok {
-		newPlugins := make([]string, 0, len(plugins))
-		for _, p := range plugins {
-			if p != name {
-				newPlugins = append(newPlugins, p)
-			}
-		}
-		if len(newPlugins) == 0 {
-			delete(r.byFamily, family)
-		} else {
-			r.byFamily[family] = newPlugins
-		}
-	}
-
-	// Remove from capability index
+	removeIndexEntry(r.byFamily, string(manifest.Family), name)
 	for _, cap := range manifest.Capabilities {
-		if plugins, ok := r.byCap[cap]; ok {
-			newPlugins := make([]string, 0, len(plugins))
-			for _, p := range plugins {
-				if p != name {
-					newPlugins = append(newPlugins, p)
-				}
-			}
-			if len(newPlugins) == 0 {
-				delete(r.byCap, cap)
-			} else {
-				r.byCap[cap] = newPlugins
-			}
-		}
+		removeIndexEntry(r.byCap, cap, name)
 	}
 	r.mu.Unlock()
 	if client != nil {
 		_ = client.Close()
+	}
+}
+
+func removeIndexEntry(index map[string][]string, key, name string) {
+	values := slices.DeleteFunc(index[key], func(value string) bool { return value == name })
+	if len(values) == 0 {
+		delete(index, key)
+	} else {
+		index[key] = values
 	}
 }
 
@@ -160,9 +123,7 @@ func (r *Registry) GetManifest(name string) (Manifest, bool) {
 	return cloneManifest(manifest), ok
 }
 
-// HasCapability returns true if at least one registered plugin supports the given capability.
-// This is the core of capability-based dispatch.
-// Sanetizer-todo item 12: Capability negotiation.
+// HasCapability reports whether an available plugin provides cap.
 func (r *Registry) HasCapability(cap string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -183,9 +144,7 @@ func (r *Registry) DeclaredHasCapability(cap string) bool {
 	return len(r.byCap[cap]) > 0
 }
 
-// GetPluginsWithCapability returns all plugin names that support the given capability.
-// This enables the core to select from multiple plugins that can provide the same capability.
-// Sanetizer-todo item 12: Capability negotiation.
+// GetPluginsWithCapability returns available providers in stable order.
 func (r *Registry) GetPluginsWithCapability(cap string) []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -218,13 +177,8 @@ func (r *Registry) availableLocked(name string) bool {
 func (r *Registry) GetPluginsByFamily(family string) []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	plugins := r.byFamily[family]
-	// Return a copy to avoid race conditions
-	if len(plugins) == 0 {
-		return nil
-	}
-	result := make([]string, len(plugins))
-	copy(result, plugins)
+	result := append([]string(nil), r.byFamily[family]...)
+	sort.Strings(result)
 	return result
 }
 
@@ -236,6 +190,7 @@ func (r *Registry) GetAllCapabilities() []string {
 	for cap := range r.byCap {
 		caps = append(caps, cap)
 	}
+	sort.Strings(caps)
 	return caps
 }
 
@@ -286,9 +241,7 @@ type PluginWithCapability struct {
 	Capabilities []string
 }
 
-// GetPluginWithCapability returns the first plugin that supports the given capability.
-// This is useful when you need the full manifest, not just the name.
-// Sanetizer-todo item 12: Capability negotiation.
+// GetPluginWithCapability returns the first available matching plugin.
 func (r *Registry) GetPluginWithCapability(cap string) (PluginWithCapability, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -313,9 +266,7 @@ func (r *Registry) GetPluginWithCapability(cap string) (PluginWithCapability, bo
 	return PluginWithCapability{}, false
 }
 
-// RequireCapability checks if a plugin has a specific capability and returns an error if not.
-// This is useful for pre-flight checks before attempting an operation.
-// Sanetizer-todo item 12: Capability negotiation.
+// RequireCapability fails when no available plugin provides cap.
 func (r *Registry) RequireCapability(cap string) error {
 	if !r.HasCapability(cap) {
 		return &CapabilityError{
@@ -342,7 +293,6 @@ func IsCapabilityError(err error) bool {
 	return ok
 }
 
-// Global registry instance for convenience.
 var globalRegistry = NewRegistry()
 
 // GlobalRegistry returns the global plugin registry.

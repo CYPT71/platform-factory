@@ -1,7 +1,7 @@
 {
-  "name": "@secure-oci/plugin-sdk",
+  "name": "@platform-factory/plugin-sdk",
   "version": "1.0.0",
-  "description": "SDK for out-of-process secure-oci language plugins: the versioned, length-prefixed JSON-RPC protocol plugins speak over stdin/stdout, and the plugin-side Server.",
+  "description": "SDK for out-of-process platform-factory language plugins: the versioned, length-prefixed JSON-RPC protocol plugins speak over stdin/stdout, and the plugin-side Server.",
   "license": "MIT",
   "type": "commonjs",
   "main": "index.js",

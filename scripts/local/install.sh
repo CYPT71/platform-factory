@@ -49,9 +49,9 @@ component_labels=(
   "Distributed platform"
 )
 component_descriptions=(
-  "platform-factory (pf alias): launch, build, pipeline, sbom, plugins, diff"
+  "platform-factory (pf alias) + official language plugins: ready for init, launch, build, pipeline, sbom and diff"
   "oci-builder: builds an OCI image standalone"
-  "microvm-init + microvm-initramfs + platform-factory-runtime: isolated microVM execution (KVM/HVF), usable as an OCI runtime by Podman/Docker/containerd"
+  "microvm-init + microvm-initramfs; platform-factory-runtime on linux/amd64 only: isolated microVM execution (KVM/HVF)"
   "platform-factory-control-plane + platform-factory-worker: multi-node orchestration"
 )
 component_binaries=(
@@ -280,6 +280,10 @@ fi
 
 # --- build --------------------------------------------------------------
 mkdir -p "$flag_prefix"
+# Builds run from individual module directories. Resolve the user-facing
+# prefix first so a relative path always remains relative to the directory
+# where install.sh was invoked, not to whichever module is being compiled.
+flag_prefix=$(cd "$flag_prefix" && pwd)
 version=$(git -C "$repo_root" describe --tags --always --dirty 2>/dev/null || echo dev)
 suffix=
 [ "$flag_os" = windows ] && suffix=.exe
@@ -319,6 +323,10 @@ build_failed=false
 for key in $final_keys; do
   idx=$(component_index "$key")
   for name in ${component_binaries[$idx]}; do
+    if [ "$name" = platform-factory-runtime ] && { [ "$flag_os" != linux ] || [ "$flag_arch" != amd64 ]; }; then
+      echo "  $(dim "–") platform-factory-runtime skipped: OCI runtime integration requires linux/amd64 (target is $flag_os/$flag_arch)"
+      continue
+    fi
     out="$flag_prefix/$name$suffix"
     ldflags="-s -w"
     [ "$name" = platform-factory ] && ldflags="$ldflags -X main.version=$version"
@@ -339,6 +347,35 @@ for key in $final_keys; do
     rm -f "$log"
   done
 done
+
+if [ "$build_failed" = true ]; then
+  exit 1
+fi
+
+# The official language plugins are part of the core product. Keep them next
+# to platform-factory so discovery works immediately, without a per-user
+# registry, environment variable, or a surprising `pf plugin load` step.
+case " $final_keys " in
+  *" core "*)
+    for language in go python node java dotnet rust ruby php; do
+      name="platform-factory-lang-$language"
+      out="$flag_prefix/$name$suffix"
+      log=$(mktemp)
+      (
+        cd "$repo_root/plugins/lang-$language"
+        CGO_ENABLED=0 GOOS="$flag_os" GOARCH="$flag_arch" \
+          go build -trimpath -ldflags="-s -w" -o "$out" .
+      ) >"$log" 2>&1 &
+      build_pid=$!
+      if ! spin "$build_pid" "$name"; then
+        echo "$(red "build failed:") $name" >&2
+        cat "$log" >&2
+        build_failed=true
+      fi
+      rm -f "$log"
+    done
+    ;;
+esac
 
 if [ "$build_failed" = true ]; then
   exit 1

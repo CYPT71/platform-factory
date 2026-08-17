@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/CYPT71/secure-oci-base/internal/guesttransport"
+	"github.com/CYPT71/platform-factory/internal/guesttransport"
 )
 
 const maxGuestDiagnosticBytes = 256 << 10

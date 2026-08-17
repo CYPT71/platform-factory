@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/microvm"
-	"github.com/CYPT71/secure-oci-base/internal/networking"
+	"github.com/CYPT71/platform-factory/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/networking"
 )
 
 func writeNativeBlob(t *testing.T, layout string, data []byte) string {

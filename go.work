@@ -3,9 +3,11 @@ go 1.25.12
 use (
 	.
 	./cmd/platform-factory-installer
+	./cmd/tui
 	./plugins/containerd
 	./plugins/kubevirt
 	./plugins/lang-dotnet
+	./plugins/lang-go
 	./plugins/lang-java
 	./plugins/lang-node
 	./plugins/lang-php

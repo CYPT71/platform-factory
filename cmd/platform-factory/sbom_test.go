@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/sbom"
+	"github.com/CYPT71/platform-factory/internal/sbom"
 )
 
 func TestRunSBOMGeneratesInventoryJSON(t *testing.T) {

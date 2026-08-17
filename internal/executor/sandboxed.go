@@ -6,7 +6,7 @@ import (
 	"net"
 	"os/exec"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 // This file holds the host-side glue that only runs when the executor is

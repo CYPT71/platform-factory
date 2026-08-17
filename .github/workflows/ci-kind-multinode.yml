@@ -38,14 +38,14 @@ jobs:
         run: |
           set -euo pipefail
           tests/kind/test-kind-distributed-cancellation.sh
-      - name: Prove control-plane recovery after worker loss
-        run: |
-          set -euo pipefail
-          tests/kind/test-kind-worker-loss.sh
       - name: Prove recovery from a real network partition
         run: |
           set -euo pipefail
           tests/kind/test-kind-network-partition.sh
+      - name: Prove control-plane recovery after worker loss
+        run: |
+          set -euo pipefail
+          tests/kind/test-kind-worker-loss.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 func TestNewFileJournalRejectsEmptyRoot(t *testing.T) {

@@ -398,6 +398,47 @@ func TestConvertSupportsSafeLinksAndRejectsEscapes(t *testing.T) {
 	if target, err := os.Readlink(filepath.Join(output, "bin/current")); err != nil || target != "app" {
 		t.Fatalf("symlink target=%q err=%v", target, err)
 	}
+
+	// An absolute symlink target (the real, common Debian
+	// update-alternatives pattern - see cmd/platform-factory's runtime
+	// provisioning, which pulls real Debian-based base images) is
+	// rewritten into an equivalent tree-relative target rather than
+	// rejected: a container/VM booted from this tree resolves an
+	// absolute target against its own root anyway, so the two mean the
+	// same thing on disk, but only the relative form is safe to store
+	// during extraction itself.
+	absoluteLinkLayout := writeTestLayout(t, []testEntry{
+		{name: "usr/", mode: 0o755, kind: tar.TypeDir},
+		{name: "usr/bin/", mode: 0o755, kind: tar.TypeDir},
+		{name: "usr/bin/mawk", body: "payload", mode: 0o755, kind: tar.TypeReg},
+		{name: "etc/", mode: 0o755, kind: tar.TypeDir},
+		{name: "etc/alternatives/", mode: 0o755, kind: tar.TypeDir},
+		{name: "etc/alternatives/awk", link: "/usr/bin/mawk", mode: 0o777, kind: tar.TypeSymlink},
+	})
+	absoluteLinkOutput := filepath.Join(t.TempDir(), "rootfs")
+	if _, err := Convert(Options{Layout: absoluteLinkLayout, Output: absoluteLinkOutput}); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(absoluteLinkOutput, "etc/alternatives/awk")
+	target, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.IsAbs(target) {
+		t.Fatalf("absolute symlink target was stored verbatim instead of rewritten: %q", target)
+	}
+	resolved, err := filepath.EvalSymlinks(linkPath)
+	if err != nil {
+		t.Fatalf("rewritten symlink does not resolve: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(filepath.Join(absoluteLinkOutput, "usr/bin/mawk"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != want {
+		t.Fatalf("resolved=%q want=%q", resolved, want)
+	}
+
 	original, err := os.Stat(filepath.Join(output, "bin/app"))
 	if err != nil {
 		t.Fatal(err)
@@ -408,7 +449,6 @@ func TestConvertSupportsSafeLinksAndRejectsEscapes(t *testing.T) {
 	}
 
 	for index, entry := range []testEntry{
-		{name: "bad", link: "/etc/passwd", kind: tar.TypeSymlink},
 		{name: "dir/bad", link: "../../escape", kind: tar.TypeSymlink},
 		{name: "bad", link: "../escape", kind: tar.TypeLink},
 	} {

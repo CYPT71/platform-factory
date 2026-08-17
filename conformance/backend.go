@@ -12,9 +12,9 @@ import (
 	"sort"
 	"time"
 
-	api "github.com/CYPT71/secure-oci-base/api/v1alpha1"
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	"github.com/CYPT71/secure-oci-base/internal/executor"
+	api "github.com/CYPT71/platform-factory/api/pipeline/v1alpha1"
+	"github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/executor"
 )
 
 //go:embed vectors-backend/*.json

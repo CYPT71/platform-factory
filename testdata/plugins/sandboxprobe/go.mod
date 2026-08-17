@@ -1,7 +1,7 @@
-module example.test/secure-oci-sandboxprobe
+module example.test/platform-factory-sandboxprobe
 
 go 1.25.12
 
-require github.com/CYPT71/secure-oci-base v0.0.0
+require github.com/CYPT71/platform-factory v0.0.0
 
-replace github.com/CYPT71/secure-oci-base => ../../..
+replace github.com/CYPT71/platform-factory => ../../..

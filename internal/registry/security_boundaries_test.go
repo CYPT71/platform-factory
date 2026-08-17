@@ -81,6 +81,22 @@ func TestManifestAndBlobTransportFailuresRemainFailures(t *testing.T) {
 	}
 }
 
+func TestRegistryClientRefusesAutomaticRedirects(t *testing.T) {
+	target := Reference{Registry: "registry.example", Repository: "team/service"}
+	client := &Client{HTTP: &http.Client{Transport: roundTripFunc(func(request *http.Request) *http.Response {
+		result := response(http.StatusTemporaryRedirect, "", strings.NewReader("redirect"))
+		result.Header.Set("Location", "https://other.example/steal")
+		return result
+	})}}
+	if _, _, err := client.GetManifest(context.Background(), target, "latest"); err == nil || !strings.Contains(err.Error(), "HTTP 307") {
+		t.Fatalf("manifest redirect accepted: %v", err)
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	if _, err := client.GetBlob(context.Background(), target, digest); err == nil || !strings.Contains(err.Error(), "HTTP 307") {
+		t.Fatalf("blob redirect accepted: %v", err)
+	}
+}
+
 func TestUploadOffsetRejectsMalformedOrUnprovenState(t *testing.T) {
 	uploadURL, _ := url.Parse("https://registry.example/upload/1")
 	cases := []struct {
@@ -126,6 +142,7 @@ func TestResumeUploadDiscardsInvalidAndStaleSessions(t *testing.T) {
 		contents string
 	}{
 		{name: "malformed", contents: "{"},
+		{name: "unknown field", contents: fmt.Sprintf(`{"digest":%q,"size":7,"url":"https://registry.example/upload/1","token":"must-not-be-accepted"}`, digest)},
 		{name: "wrong digest", contents: `{"digest":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":7,"url":"https://registry.example/upload/1"}`},
 		{name: "wrong size", contents: fmt.Sprintf(`{"digest":%q,"size":8,"url":"https://registry.example/upload/1"}`, digest)},
 	} {

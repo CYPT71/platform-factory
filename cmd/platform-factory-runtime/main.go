@@ -23,7 +23,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/ociruntime"
+	"github.com/CYPT71/platform-factory/internal/ociruntime"
 )
 
 // waitPollInterval is how often `wait` re-reads the store while a
@@ -69,20 +69,18 @@ func runWithIO(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		// This reports what LaunchSupervisor/ServeSupervisor (this
 		// package's __serve child, see internal/ociruntime/supervisor_linux.go)
 		// apply to their own process, not a per-container sandbox
-		// negotiated from the bundle config. "namespaces" lists only
-		// ipc/uts: PID namespace isolation was tried and reverted (see
-		// LaunchSupervisor's Cloneflags comment) - the state store keys
-		// on a raw host PID, and a child that's PID 1 of its own new
-		// namespace always reports os.Getpid()==1, so the two can never
-		// match and every single container launch failed closed. Both
-		// ipc/uts and "cgroup.v2" are still best-effort - both need
+		// negotiated from the bundle config. PID/IPC/UTS are created together
+		// when supported. OCI state retains the host-visible PID while the
+		// child authenticates with its persisted incarnation, so PID 1 inside
+		// the namespace no longer conflicts with lifecycle state. Namespaces
+		// and "cgroup.v2" are still probe-gated - both need
 		// CAP_SYS_ADMIN or a delegated cgroup the caller isn't
 		// guaranteed to have, and are silently skipped rather than
 		// failing guest launch when unavailable (see the probes in
 		// LaunchSupervisor and applyVMMSandbox). "seccomp.enabled" is a
 		// real classic-BPF filter (internal/hypervisor/sandbox's
 		// ApplyStrictSeccomp), not just PR_SET_NO_NEW_PRIVS.
-		_, err := fmt.Fprintln(stdout, `{"ociVersionMin":"1.0.0","ociVersionMax":"1.2.0","hooks":[],"mountOptions":[],"linux":{"namespaces":["ipc","uts"],"capabilities":["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_DAC_READ_SEARCH","CAP_FOWNER","CAP_FSETID","CAP_KILL","CAP_SETGID","CAP_SETUID","CAP_SETPCAP","CAP_LINUX_IMMUTABLE","CAP_NET_BIND_SERVICE","CAP_NET_BROADCAST","CAP_NET_ADMIN","CAP_NET_RAW","CAP_IPC_LOCK","CAP_IPC_OWNER","CAP_SYS_MODULE","CAP_SYS_RAWIO","CAP_SYS_CHROOT","CAP_SYS_PTRACE","CAP_SYS_PACCT","CAP_SYS_ADMIN","CAP_SYS_BOOT","CAP_SYS_NICE","CAP_SYS_RESOURCE","CAP_SYS_TIME","CAP_SYS_TTY_CONFIG","CAP_MKNOD","CAP_LEASE","CAP_AUDIT_WRITE","CAP_AUDIT_CONTROL","CAP_SETFCAP","CAP_MAC_OVERRIDE","CAP_MAC_ADMIN","CAP_SYSLOG","CAP_WAKE_ALARM","CAP_BLOCK_SUSPEND","CAP_AUDIT_READ","CAP_PERFMON","CAP_BPF","CAP_CHECKPOINT_RESTORE"],"cgroup":{"v1":false,"v2":true,"systemd":false},"seccomp":{"enabled":true}},"annotations":{"io.github.platform-factory.runtime":"native-kvm"}}`)
+		_, err := fmt.Fprintln(stdout, `{"ociVersionMin":"1.0.0","ociVersionMax":"1.2.0","hooks":[],"mountOptions":[],"linux":{"namespaces":["pid","ipc","uts"],"capabilities":["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_DAC_READ_SEARCH","CAP_FOWNER","CAP_FSETID","CAP_KILL","CAP_SETGID","CAP_SETUID","CAP_SETPCAP","CAP_LINUX_IMMUTABLE","CAP_NET_BIND_SERVICE","CAP_NET_BROADCAST","CAP_NET_ADMIN","CAP_NET_RAW","CAP_IPC_LOCK","CAP_IPC_OWNER","CAP_SYS_MODULE","CAP_SYS_RAWIO","CAP_SYS_CHROOT","CAP_SYS_PTRACE","CAP_SYS_PACCT","CAP_SYS_ADMIN","CAP_SYS_BOOT","CAP_SYS_NICE","CAP_SYS_RESOURCE","CAP_SYS_TIME","CAP_SYS_TTY_CONFIG","CAP_MKNOD","CAP_LEASE","CAP_AUDIT_WRITE","CAP_AUDIT_CONTROL","CAP_SETFCAP","CAP_MAC_OVERRIDE","CAP_MAC_ADMIN","CAP_SYSLOG","CAP_WAKE_ALARM","CAP_BLOCK_SUSPEND","CAP_AUDIT_READ","CAP_PERFMON","CAP_BPF","CAP_CHECKPOINT_RESTORE"],"cgroup":{"v1":false,"v2":true,"systemd":false},"seccomp":{"enabled":true}},"annotations":{"io.github.platform-factory.runtime":"native-kvm"}}`)
 		return err
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
@@ -208,7 +206,7 @@ func normalizeInvocation(args []string) ([]string, error) {
 			// This runtime never creates a per-container cgroup at all;
 			// internal/hypervisor/sandbox's cgroup primitive confines the
 			// VMM supervisor process itself, gated by the separate
-			// secure-oci.dev/sandbox-cgroups annotation
+			// platform-factory.dev/sandbox-cgroups annotation
 			// (sandboxConfigForSupervisor, supervisor_linux.go), not by
 			// Podman's own cgroup-manager choice. Accepting the flag
 			// keeps Podman's own invocation happy; there is no cgroup

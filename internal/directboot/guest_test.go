@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/guesttransport"
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/guesttransport"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 type guestHandlerFunc func(context.Context, guesttransport.Request) guesttransport.Response

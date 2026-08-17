@@ -6,7 +6,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 // CachingRunner wraps a StageRunner with a content-addressed

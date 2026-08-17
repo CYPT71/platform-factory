@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
 	"regexp"
 	"sync"
 )
@@ -110,29 +112,5 @@ func decodePrivateKey(data []byte) (ed25519.PrivateKey, error) {
 }
 
 func atomicWriteKey(dir, name string, data []byte) error {
-	temporary, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	success := false
-	defer func() {
-		_ = temporary.Close()
-		if !success {
-			_ = os.Remove(temporary.Name())
-		}
-	}()
-	if _, err := temporary.Write(data); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(temporary.Name(), 0600); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary.Name(), filepath.Join(dir, name)); err != nil {
-		return err
-	}
-	success = true
-	return nil
+	return atomicfile.Write(dir, name, data, 0o600, true)
 }

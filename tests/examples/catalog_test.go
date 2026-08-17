@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/policy"
+	"github.com/CYPT71/platform-factory/internal/policy"
 	"go.yaml.in/yaml/v3"
 )
 

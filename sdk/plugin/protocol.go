@@ -1,4 +1,4 @@
-// Package plugin is the public SDK for out-of-process secure-oci
+// Package plugin is the public SDK for out-of-process platform-factory
 // plugins. It defines the versioned, length-prefixed JSON-RPC protocol
 // plugins speak over stdin/stdout (an LSP/DAP-style header-framed
 // message on the wire), the plugin-side Server, the handshake shape and
@@ -7,7 +7,7 @@
 // crosses the plugin boundary.
 //
 // The host side (subprocess management, manifest verification,
-// discovery and trust policy) lives in the secure-oci binary and is not
+// discovery and trust policy) lives in the platform-factory binary and is not
 // part of the SDK surface.
 package plugin
 
@@ -24,11 +24,6 @@ import (
 const (
 	// ContentType identifies protocol version v1 on the wire.
 	ContentType = "application/vnd.platform-factory.rpc.v1+json"
-	// LegacyContentType is the pre-rebrand Content-Type: still accepted
-	// from a plugin process for the documented compatibility overlap
-	// window (see docs/api-compatibility.md), never written by
-	// WriteMessage.
-	LegacyContentType = "application/vnd.secure-oci.rpc.v1+json"
 	// ProtocolVersion is the version a plugin must report during the
 	// handshake for a Client to consider it compatible.
 	ProtocolVersion = "v1"
@@ -40,25 +35,23 @@ const (
 
 // Request is one RPC call frame.
 // TraceID is propagated from the host to the plugin for end-to-end correlation.
-// OperationID uniquely identifies a mutating operation for idempotency (Sanetizer-todo item 13).
 type Request struct {
 	ID          string          `json:"id"`
 	Method      string          `json:"method"`
 	Params      json.RawMessage `json:"params,omitempty"`
-	TraceID     string          `json:"trace_id,omitempty"`     // Sanetizer-todo item 18: end-to-end trace correlation
-	OperationID string          `json:"operation_id,omitempty"` // Sanetizer-todo item 13: idempotency identifier
+	TraceID     string          `json:"trace_id,omitempty"`
+	OperationID string          `json:"operation_id,omitempty"`
 }
 
 // Response is one RPC reply frame. Exactly one of Result or Error is set
 // on a well-formed response.
 // TraceID echoes back the request's TraceID for correlation.
-// OperationID echoes back the request's OperationID for idempotency (Sanetizer-todo item 13).
 type Response struct {
 	ID          string          `json:"id"`
 	Result      json.RawMessage `json:"result,omitempty"`
 	Error       *RPCError       `json:"error,omitempty"`
-	TraceID     string          `json:"trace_id,omitempty"`     // Sanetizer-todo item 18: echoes request trace_id
-	OperationID string          `json:"operation_id,omitempty"` // Sanetizer-todo item 13: echoes request operation_id
+	TraceID     string          `json:"trace_id,omitempty"`
+	OperationID string          `json:"operation_id,omitempty"`
 }
 
 // RPCError is a protocol-level error returned by a plugin handler.
@@ -71,7 +64,7 @@ func (e *RPCError) Error() string { return e.Message }
 
 // WriteMessage frames v (a Request or Response) as
 //
-//	Content-Type: application/vnd.secure-oci.rpc.v1+json
+//	Content-Type: application/vnd.platform-factory.rpc.v1+json
 //	Content-Length: N
 //
 //	{...}
@@ -142,7 +135,7 @@ func ReadMessage(r *bufio.Reader) (json.RawMessage, error) {
 			}
 			contentLength = n
 		case "content-type":
-			if value != ContentType && value != LegacyContentType {
+			if value != ContentType {
 				return nil, fmt.Errorf("plugin: unsupported Content-Type %q, want %q", value, ContentType)
 			}
 			sawContentType = true

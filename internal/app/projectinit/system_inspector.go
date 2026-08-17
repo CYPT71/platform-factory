@@ -3,12 +3,9 @@ package projectinit
 import (
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"strings"
-
-	"github.com/CYPT71/secure-oci-base/internal/detect"
 )
 
 // InspectSystem derives a conservative system proposal from project markers
@@ -25,13 +22,7 @@ func InspectSystem(dir string) (SystemProposal, error) {
 	}
 	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 
-	proposal := SystemProposal{
-		Name: filepath.Base(filepath.Clean(dir)),
-		Unknowns: []Unknown{
-			{Subject: "connections", Reason: "no explicit connection evidence was observed"},
-			{Subject: "resources", Reason: "no explicit external or shared resource evidence was observed"},
-		},
-	}
+	proposal := SystemProposal{Name: filepath.Base(filepath.Clean(dir))}
 	for _, entry := range entries {
 		source := entry.Name()
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -40,64 +31,19 @@ func InspectSystem(dir string) (SystemProposal, error) {
 			}
 			continue
 		}
-		if !entry.IsDir() {
-			continue
-		}
-		result, err := detect.Path(filepath.Join(dir, source))
-		if err != nil {
-			return SystemProposal{}, fmt.Errorf("inspect component %s: %w", source, err)
-		}
-		if result.Kind == "unknown" {
-			appLike, evidence, inspectErr := inspectAppLikeDirectory(filepath.Join(dir, source))
-			if inspectErr != nil {
-				return SystemProposal{}, fmt.Errorf("inspect possible component %s: %w", source, inspectErr)
-			}
-			if appLike {
-				proposal.Unknowns = append(proposal.Unknowns, Unknown{Subject: "component." + source, Reason: "application-like source was observed without a supported project marker: " + evidence})
-			}
-			continue
-		}
-		unknowns := []Unknown{{Subject: "runtime.selected", Reason: "operator confirmation required"}}
-		if result.Ambiguous {
-			unknowns = append(unknowns, Unknown{Subject: "language", Reason: "multiple project markers were observed: " + strings.Join(result.Candidates, ", ")})
-			proposal.Unknowns = append(proposal.Unknowns, Unknown{Subject: "component." + source + ".language", Reason: "multiple project markers were observed: " + strings.Join(result.Candidates, ", ")})
-		}
-		proposal.Components = append(proposal.Components, ComponentProposal{
-			Name:   source,
-			Source: source,
-			Runtime: RuntimeDecision{
-				Recommended: RuntimeContainer,
-				Reasons:     []string{"application project markers observed: " + strings.Join(result.Evidence, ", ")},
-				Unknowns:    unknowns,
-			},
-		})
+		// Ordinary subdirectories are deliberately not classified here.
+		// Component and language recognition belongs to language plugins.
+	}
+	if len(proposal.Components) > 0 {
+		proposal.Unknowns = append(proposal.Unknowns,
+			Unknown{Subject: "connections", Reason: "no explicit connection evidence was observed"},
+			Unknown{Subject: "resources", Reason: "no explicit external or shared resource evidence was observed"})
 	}
 	canonicalizeSystemProposal(&proposal)
 	if err := proposal.Validate(); err != nil {
 		return SystemProposal{}, err
 	}
 	return proposal, nil
-}
-
-// inspectAppLikeDirectory examines only the immediate directory. Source files
-// are evidence that a component scope may exist, but never enough evidence to
-// invent its language, build, or runtime contract.
-func inspectAppLikeDirectory(dir string) (bool, string, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false, "", err
-	}
-	for _, entry := range entries {
-		if entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
-			continue
-		}
-		extension := strings.ToLower(path.Ext(entry.Name()))
-		switch extension {
-		case ".c", ".cc", ".cpp", ".cs", ".go", ".java", ".js", ".kt", ".php", ".py", ".rb", ".rs", ".swift", ".ts":
-			return true, entry.Name(), nil
-		}
-	}
-	return false, "", nil
 }
 
 // Descriptions returns stable, human-readable proposal evidence for dry-run

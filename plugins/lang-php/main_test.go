@@ -4,23 +4,25 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
 
 func TestParseRootFlagRequiresRoot(t *testing.T) {
-	if _, err := parseRootFlag("freeze", nil); err == nil {
+	if _, err := langplugin.ParseRootFlag("freeze", nil); err == nil {
 		t.Fatal("expected an error when --root is missing")
 	}
-	root, err := parseRootFlag("freeze", []string{"--root", "/tmp/project"})
+	root, err := langplugin.ParseRootFlag("freeze", []string{"--root", "/tmp/project"})
 	if err != nil || root != "/tmp/project" {
 		t.Fatalf("root=%q err=%v", root, err)
 	}
 }
 
 func TestParseBuildLayerFlagsRequiresAllThree(t *testing.T) {
-	if _, _, _, err := parseBuildLayerFlags(nil); err == nil {
+	if _, _, _, err := langplugin.ParseBuildLayerFlags(nil); err == nil {
 		t.Fatal("expected an error")
 	}
-	root, output, dest, err := parseBuildLayerFlags([]string{
+	root, output, dest, err := langplugin.ParseBuildLayerFlags([]string{
 		"--root", "/tmp/project", "--output", "/tmp/out.tar", "--dest", "app/deps/php",
 	})
 	if err != nil || root != "/tmp/project" || output != "/tmp/out.tar" || dest != "app/deps/php" {

@@ -1,22 +1,12 @@
-// Package placement decides which pending lease a requesting worker
-// should run next. It is the piece of the distributed control plane's
-// scheduling logic that the roadmap calls out to extract as its own
-// component (Next-Generation-Implementation-Roadmap.md, "Contrôle et
-// workers"): a pure, worker/state-decoupled decision - platform match,
-// capability match, then a cache-locality preference - independent of
-// internal/control's lease bookkeeping (assignment, completion,
-// persistence) and independent of internal/scheduler's unrelated
-// same-process pipeline-stage DAG scheduler.
+// Package placement selects pending leases by platform, capability, cache
+// locality, and priority. It is independent of lease persistence and pipeline
+// DAG scheduling.
 package placement
 
 import "sort"
 
 // Worker is the placement-relevant subset of a worker's advertised
-// state. Capabilities and CachedContent must be sorted (internal/control
-// already keeps both sorted on write; Select does not sort them itself,
-// so a caller with unsorted input will silently get wrong answers rather
-// than an error - this mirrors internal/control's own containsSorted
-// precondition instead of hiding it behind a redundant sort here).
+// state. Capabilities and CachedContent must be sorted.
 type Worker struct {
 	Platform      string
 	Capabilities  []string

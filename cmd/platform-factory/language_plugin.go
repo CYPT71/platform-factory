@@ -1,18 +1,3 @@
-// Host-side dispatch for the separate-module language plugin pattern
-// (plugins/lang-<language>, e.g. plugins/lang-python) - see
-// docs/language-plugin-layers.md. This is deliberately unrelated to the
-// sdk/plugin subprocess-RPC protocol (plugins.go, examples/sdk/plugin-*):
-// a language plugin here is a plain binary, `exec`'d the same simple way
-// plugins/containerd and plugins/kubevirt already are
-// (platform-factory-kubevirt, platform-factory-containerd), not a
-// long-lived process speaking framed JSON-RPC over stdin/stdout.
-//
-// The binary is never looked up on bare $PATH: it's resolved through
-// sdk/langplugin.Resolve, which only ever finds a binary a user
-// explicitly installed via `pf plugin load <language>` (see plugin.go).
-// That's the whole registry - present in
-// sdk/langplugin.Dir() means loaded, absent means not, and Resolve's
-// error message already tells the user the one command that fixes it.
 package main
 
 import (
@@ -21,8 +6,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/CYPT71/secure-oci-base/internal/project"
-	"github.com/CYPT71/secure-oci-base/sdk/langplugin"
+	"github.com/CYPT71/platform-factory/internal/project"
+	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
 
 // pluginResolver locates the absolute path to a loaded language

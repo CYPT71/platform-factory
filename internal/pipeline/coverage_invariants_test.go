@@ -9,7 +9,7 @@ import (
 	"reflect"
 	"testing"
 
-	api "github.com/CYPT71/secure-oci-base/internal/core"
+	api "github.com/CYPT71/platform-factory/internal/core"
 )
 
 func TestCanonicalJSONNormalizesEveryUnorderedCollection(t *testing.T) {

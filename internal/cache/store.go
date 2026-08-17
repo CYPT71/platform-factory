@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
 )
 
 const copyBufferSize = 1 << 20
@@ -411,32 +413,5 @@ func parseKey(key string) (string, error) {
 }
 
 func atomicWrite(dir, name string, data []byte) error {
-	temporary, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	success := false
-	defer func() {
-		_ = temporary.Close()
-		if !success {
-			_ = os.Remove(temporary.Name())
-		}
-	}()
-	if _, err := temporary.Write(data); err != nil {
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(temporary.Name(), 0644); err != nil {
-		return err
-	}
-	if err := os.Rename(temporary.Name(), filepath.Join(dir, name)); err != nil {
-		return err
-	}
-	success = true
-	return nil
+	return atomicfile.Write(dir, name, data, 0o644, false)
 }

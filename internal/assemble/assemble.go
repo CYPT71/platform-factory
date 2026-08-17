@@ -1,7 +1,12 @@
 // Package assemble bridges a pipeline's declared, cached stage outputs
 // to a real OCI image layout. It does not run stages itself and does not
 // depend on internal/executor or internal/pipeline: callers supply an
-// OutputResolver shaped exactly like (*executor.CachingRunner).Output.
+// OutputResolver shaped exactly like (*executor.CachingRunner).Output. It
+// does not depend on internal/oci either, for the same reason: Image takes
+// a Builder callback instead of calling internal/oci.Build directly, so
+// this package stays pure domain logic (resolving declared outputs to local
+// paths) with the actual OCI build left to the infrastructure the caller
+// chooses to inject.
 package assemble
 
 import (
@@ -10,13 +15,30 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	"github.com/CYPT71/secure-oci-base/internal/oci"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 // OutputResolver looks up the content descriptor a stage produced for a
 // named artifact.
 type OutputResolver func(stage, artifact string) (core.Descriptor, bool)
+
+// ExtraFile is a single non-binary file Image copies into the built image,
+// field-for-field identical to internal/oci.ExtraFile so a Builder can
+// convert one into the other with a plain literal - see this package's own
+// doc comment for why assemble does not import internal/oci itself to name
+// that type directly.
+type ExtraFile struct {
+	Dest, Source string
+	Mode         int64
+}
+
+// Builder performs the actual OCI image build once Image has resolved the
+// pipeline's cached outputs into local paths and assembled binaryPath and
+// extraFiles; it returns the built image's manifest digest. Callers close
+// over their own internal/oci.Options (output directory, image name, tag,
+// platform, ...) and typically implement this as a two-line adapter around
+// internal/oci.Build.
+type Builder func(binaryPath string, extraFiles []ExtraFile) (string, error)
 
 // Extract resolves every entry in definition.Outputs via resolve and
 // copies each one's content out of store into dir, named by Output.Name.
@@ -48,11 +70,11 @@ func Extract(store core.CacheStore, definition core.Pipeline, resolve OutputReso
 	return paths, nil
 }
 
-// Image extracts definition's outputs into a scratch directory, wires the
-// output named binaryOutput into opts.Binary (marking it executable), adds
-// an oci.ExtraFile for every (output name -> container destination) pair
-// in extraDests, and calls oci.Build.
-func Image(store core.CacheStore, definition core.Pipeline, resolve OutputResolver, binaryOutput string, extraDests map[string]string, opts oci.Options) (string, error) {
+// Image extracts definition's outputs into a scratch directory, resolves
+// binaryOutput to a local, now-executable path, builds one ExtraFile for
+// every (output name -> container destination) pair in extraDests, and
+// hands both to build.
+func Image(store core.CacheStore, definition core.Pipeline, resolve OutputResolver, binaryOutput string, extraDests map[string]string, build Builder) (string, error) {
 	dir, err := os.MkdirTemp("", "platform-factory-assemble-*")
 	if err != nil {
 		return "", fmt.Errorf("assemble: %w", err)
@@ -71,17 +93,17 @@ func Image(store core.CacheStore, definition core.Pipeline, resolve OutputResolv
 	if err := os.Chmod(binaryPath, 0755); err != nil {
 		return "", fmt.Errorf("assemble: %w", err)
 	}
-	opts.Binary = binaryPath
 
+	var extraFiles []ExtraFile
 	for name, dest := range extraDests {
 		path, ok := paths[name]
 		if !ok {
 			return "", fmt.Errorf("assemble: extra file output %q is not among the pipeline's declared outputs", name)
 		}
-		opts.ExtraFiles = append(opts.ExtraFiles, oci.ExtraFile{Dest: dest, Source: path, Mode: 0555})
+		extraFiles = append(extraFiles, ExtraFile{Dest: dest, Source: path, Mode: 0555})
 	}
 
-	return oci.Build(opts)
+	return build(binaryPath, extraFiles)
 }
 
 func writeFile(path string, r io.Reader) error {

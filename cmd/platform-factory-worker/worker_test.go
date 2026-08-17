@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	typederrors "github.com/CYPT71/secure-oci-base/internal/errors"
-	"github.com/CYPT71/secure-oci-base/internal/provenance"
+	typederrors "github.com/CYPT71/platform-factory/internal/errors"
+	"github.com/CYPT71/platform-factory/internal/provenance"
 )
 
 // fakeControlPlane is a minimal stand-in for cmd/platform-factory-control-plane

@@ -10,7 +10,7 @@ set -euo pipefail
 
 if [ "$(uname -s)" != Linux ]; then
   echo "SKIP: containerd runtime contract executes on Linux; validating cross-build"
-  output=${TMPDIR:-/tmp}/secure-oci-runtime-contract.test
+  output=${TMPDIR:-/tmp}/platform-factory-runtime-contract.test
   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c \
     -o "$output" ./cmd/platform-factory-runtime
   rm -f "$output"
@@ -22,15 +22,15 @@ go test ./cmd/platform-factory-runtime \
   -run '^(TestContainerdRuncV2PreStartContract|TestRunAcceptsContainerdKillAllShape)$' \
   -count=1 -v
 
-temporary=$(mktemp -d "${TMPDIR:-/tmp}/secure-oci-containerd.XXXXXX")
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-containerd.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT
 go build -trimpath -o "$temporary/platform-factory-containerd" ./plugins/containerd/cmd/platform-factory-containerd
-"$temporary/platform-factory-containerd" config >"$temporary/90-secure-oci-runtime.toml"
+"$temporary/platform-factory-containerd" config >"$temporary/90-platform-factory-runtime.toml"
 
 if command -v containerd >/dev/null 2>&1; then
   {
     echo 'version = 2'
-    printf 'imports = ["%s"]\n' "$temporary/90-secure-oci-runtime.toml"
+    printf 'imports = ["%s"]\n' "$temporary/90-platform-factory-runtime.toml"
   } >"$temporary/config.toml"
   containerd --config "$temporary/config.toml" config dump >"$temporary/dump.toml"
   grep -F 'io.containerd.platform-factory.v1' "$temporary/dump.toml"

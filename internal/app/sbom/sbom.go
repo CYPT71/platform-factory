@@ -1,5 +1,4 @@
 // Package sbom is the application-layer service behind `pf sbom` -
-// Sanetizer-todo.md item 8 ("la CLI doit devenir une façade"), the same
 // extraction internal/app/doctor already did for `pf doctor`.
 // cmd/platform-factory/sbom.go now only parses flags, calls Service,
 // and formats the result (text vs JSON is a presentation concern, so it
@@ -14,7 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
-	engine "github.com/CYPT71/secure-oci-base/internal/sbom"
+	engine "github.com/CYPT71/platform-factory/internal/sbom"
 )
 
 // Document is re-exported so callers of this package never need to
@@ -81,9 +80,7 @@ func (s Service) Generate(paths map[string]string) (Document, error) {
 	return engine.Generate(paths)
 }
 
-// WriteJSON writes doc to w in the canonical JSON form - so the CLI
-// layer never needs to import internal/sbom directly just to format
-// output, matching item 9's cmd -> app -> domain import direction.
+// WriteJSON writes doc in canonical JSON form.
 func (s Service) WriteJSON(w io.Writer, doc Document) error {
 	return engine.Write(w, doc)
 }

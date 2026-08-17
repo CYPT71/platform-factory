@@ -12,16 +12,54 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/layout"
-	"github.com/CYPT71/secure-oci-base/internal/oci"
-	"github.com/CYPT71/secure-oci-base/internal/registry"
+	"github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/idempotency"
+	"github.com/CYPT71/platform-factory/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/oci"
+	"github.com/CYPT71/platform-factory/internal/policy"
+	"github.com/CYPT71/platform-factory/internal/registry"
+	"github.com/CYPT71/platform-factory/internal/workloadstate"
 )
+
+// freshOperationJournal points operationJournalFor (and, since runPublish
+// now also drives the state machine, workloadStateStoreFor) at brand new,
+// empty t.TempDir()-backed stores, restored by t.Cleanup. Every test that
+// drives runPublish/runDeploy/runRollback past their --yes/--dry-run gate
+// needs this: without it, they'd share the real default roots
+// (defaultOperationJournalRoot/defaultWorkloadStateRoot, under the
+// developer/CI machine's actual cache directory), so a claim one test run
+// leaves Completed or Failed - or a workload state one test run leaves
+// Published - would make the identical operation identity - the same
+// target/namespace/name/image, which several fixtures here deliberately
+// reuse - look already-done, or already-published-once-and-therefore-
+// illegal-to-re-Publish, on the next `go test` run, or even to a later
+// test in the same run. Call it again mid-test before any call meant to be
+// treated as an independent, unrelated CLI invocation rather than a retry
+// of the one before it.
+func freshOperationJournal(t *testing.T) {
+	t.Helper()
+	journalRoot := t.TempDir()
+	previousJournal := operationJournalFor
+	operationJournalFor = func() (core.OperationJournal, error) {
+		return idempotency.NewFileJournal(journalRoot)
+	}
+	t.Cleanup(func() { operationJournalFor = previousJournal })
+
+	stateRoot := t.TempDir()
+	previousState := workloadStateStoreFor
+	workloadStateStoreFor = func() (workloadstate.Store, error) {
+		return workloadstate.NewFileStore(stateRoot)
+	}
+	t.Cleanup(func() { workloadStateStoreFor = previousState })
+}
 
 func stubRegistryPush(t *testing.T, digest string, failure error) {
 	t.Helper()
+	freshOperationJournal(t)
 	previous := pushOCI
 	previousTag := tagOCI
 	previousArtifact := pushOCIArtifact
+	previousVerify := verifyRemoteDigest
 	pushOCI = func(_ context.Context, _ string, target registry.Reference, _, _, _, _, _, _ string) (registry.Result, error) {
 		if failure != nil {
 			return registry.Result{}, failure
@@ -36,10 +74,12 @@ func stubRegistryPush(t *testing.T, digest string, failure error) {
 	pushOCIArtifact = func(context.Context, registry.Reference, registry.Result, string, string, []byte, string, string, string) (registry.ArtifactResult, error) {
 		return registry.ArtifactResult{Digest: "sha256:" + strings.Repeat("a", 64)}, failure
 	}
+	verifyRemoteDigest = func(context.Context, string, string, string, string, string) error { return failure }
 	t.Cleanup(func() {
 		pushOCI = previous
 		tagOCI = previousTag
 		pushOCIArtifact = previousArtifact
+		verifyRemoteDigest = previousVerify
 	})
 }
 
@@ -63,7 +103,7 @@ func TestRunPublishDryRunIncludesSupplyChainOperations(t *testing.T) {
 	layoutName := buildPublishLayout(t, "example/service", "v1")
 	var stdout, stderr bytes.Buffer
 	code := runPublish(context.Background(), []string{
-		"--dry-run", "--allow-incomplete-evidence", "--sign", "--sbom", "--provenance", "provenance.json",
+		"--dry-run", "--push-only", "--allow-incomplete-evidence", "--sign", "--sbom", "--provenance", "provenance.json",
 		layoutName, "ghcr.io/example/service:v1",
 	}, &stdout, &stderr, func(string, []string, io.Reader, io.Writer, io.Writer) error {
 		t.Fatal("executor called during dry-run")
@@ -72,7 +112,7 @@ func TestRunPublishDryRunIncludesSupplyChainOperations(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	for _, command := range []string{"native OCI Distribution push", "generate native SBOM", "native DSSE/Ed25519 signature", "publish provenance"} {
+	for _, command := range []string{"native OCI Distribution push", "generate native SBOM", "native DSSE/Ed25519 signature", "publish provenance", "move tag v1 only after"} {
 		if !strings.Contains(stdout.String(), command) {
 			t.Fatalf("dry-run missing %q: %s", command, stdout.String())
 		}
@@ -134,9 +174,64 @@ func TestRunPublishExecutesInOrderAndReportsFailure(t *testing.T) {
 	pushOCI = func(context.Context, string, registry.Reference, string, string, string, string, string, string) (registry.Result, error) {
 		return registry.Result{}, errors.New("registry unavailable")
 	}
+	// A fresh journal: this second call is meant to prove pushOCI failure
+	// propagates, independent of the first call already having completed
+	// the exact same operation identity (same layout, same target).
+	freshOperationJournal(t)
 	if code := runPublish(context.Background(), []string{"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/service:v1"}, &stdout, &stderr, execute); code != 1 {
 		t.Fatalf("failure code=%d", code)
 	}
+}
+
+// TestRunPublishTransitionsWorkloadStateThroughStateMachine proves runPublish
+// actually drives internal/core.RuntimeState.TransitionTo (statemachine.go),
+// not just the operation journal - the item mvp.md's own §4 flagged as
+// deferred twice ("Actually wire the state machine in product paths").
+// A successful publish must leave the workload at PhasePublished; a failed
+// one must leave it at PhaseFailed - both reached only through the
+// legal Built -> Publishing -> {Published,Failed} path the transition
+// table (statemachine.go) defines, since transitionPublishWorkload treats
+// an unrecorded workload as starting from PhaseBuilt.
+func TestRunPublishTransitionsWorkloadStateThroughStateMachine(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("f", 64)
+
+	t.Run("success reaches PhasePublished", func(t *testing.T) {
+		layoutName := buildPublishLayout(t, "example/service", "v1")
+		stubRegistryPush(t, digest, nil)
+		var stdout, stderr bytes.Buffer
+		if code := runPublish(context.Background(), []string{
+			"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/success:v1",
+		}, &stdout, &stderr, nil); code != 0 {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+		store, err := workloadStateStoreFor()
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, ok, err := store.Lookup(cliWorkloadID("publish", "registry.example", "success", "v1"))
+		if err != nil || !ok || state.Phase != core.PhasePublished {
+			t.Fatalf("state=%+v ok=%v err=%v, want PhasePublished", state, ok, err)
+		}
+	})
+
+	t.Run("failure reaches PhaseFailed", func(t *testing.T) {
+		layoutName := buildPublishLayout(t, "example/service", "v1")
+		stubRegistryPush(t, digest, errors.New("registry unavailable"))
+		var stdout, stderr bytes.Buffer
+		if code := runPublish(context.Background(), []string{
+			"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/failure:v1",
+		}, &stdout, &stderr, nil); code == 0 {
+			t.Fatalf("expected failure, code=%d stderr=%s", code, stderr.String())
+		}
+		store, err := workloadStateStoreFor()
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, ok, err := store.Lookup(cliWorkloadID("publish", "registry.example", "failure", "v1"))
+		if err != nil || !ok || state.Phase != core.PhaseFailed {
+			t.Fatalf("state=%+v ok=%v err=%v, want PhaseFailed", state, ok, err)
+		}
+	})
 }
 
 func TestRunPublishReferenceOutput(t *testing.T) {
@@ -159,7 +254,7 @@ func TestPublicationPolicyUsesGeneratedEvidenceAndFailsClosed(t *testing.T) {
 	rules := filepath.Join(root, "policy.json")
 	evidence := filepath.Join(root, "evidence.json")
 	if err := os.WriteFile(rules, []byte(`{
-	  "api_version":"secure-oci.dev/policy/v1",
+	  "api_version":"platform-factory.dev/policy/v1",
 	  "require_pins":true,
 	  "require_hardening":true,
 	  "require_sbom":true,
@@ -220,7 +315,7 @@ func TestV3PublicationExitCriteriaFailClosed(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		if code := runPublish(context.Background(), []string{
 			"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/service:v1",
-		}, &stdout, &stderr, nil); code != 1 || !strings.Contains(stderr.String(), "verify layout") {
+		}, &stdout, &stderr, nil); code != 1 || !strings.Contains(stderr.String(), "verify project layout") {
 			t.Fatalf("code=%d stderr=%s", code, stderr.String())
 		}
 		if pushCalled {
@@ -243,7 +338,7 @@ func TestV3PublicationExitCriteriaFailClosed(t *testing.T) {
 		rules := filepath.Join(root, "policy.json")
 		evidence := filepath.Join(root, "evidence.json")
 		if err := os.WriteFile(rules, []byte(`{
-		  "api_version":"secure-oci.dev/policy/v1",
+		  "api_version":"platform-factory.dev/policy/v1",
 		  "require_reproducible":true
 		}`), 0o600); err != nil {
 			t.Fatal(err)
@@ -386,6 +481,7 @@ func TestRunPublishDryRunJournalBranch(t *testing.T) {
 // stubRegistryPush's shared failure flag cannot isolate) and confirms it
 // aborts publication before the tag is ever moved.
 func TestRunPublishSurfacesArtifactPushFailure(t *testing.T) {
+	freshOperationJournal(t)
 	layoutName := buildPublishLayout(t, "example/service", "v1")
 	digest := "sha256:" + strings.Repeat("f", 64)
 	previousPush, previousTag, previousArtifact := pushOCI, tagOCI, pushOCIArtifact
@@ -413,7 +509,7 @@ func TestRunPublishSurfacesArtifactPushFailure(t *testing.T) {
 // handling (not evaluatePublicationPolicy in isolation, which
 // TestPublicationPolicyUsesGeneratedEvidenceAndFailsClosed already
 // covers): a policy evaluation error and a policy denial must both abort
-// before the tag is moved.
+// before any registry upload.
 func TestRunPublishAppliesPolicyDecision(t *testing.T) {
 	layoutName := buildPublishLayout(t, "example/service", "v1")
 	digest := "sha256:" + strings.Repeat("9", 64)
@@ -421,7 +517,7 @@ func TestRunPublishAppliesPolicyDecision(t *testing.T) {
 	root := t.TempDir()
 	policyPath := filepath.Join(root, "policy.json")
 	evidencePath := filepath.Join(root, "evidence.json")
-	if err := os.WriteFile(policyPath, []byte(`{"api_version":"secure-oci.dev/policy/v1","require_signature":true}`), 0o600); err != nil {
+	if err := os.WriteFile(policyPath, []byte(`{"api_version":"platform-factory.dev/policy/v1","require_signature":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(evidencePath, []byte(`{}`), 0o600); err != nil {
@@ -431,16 +527,19 @@ func TestRunPublishAppliesPolicyDecision(t *testing.T) {
 	if code := runPublish(context.Background(), []string{
 		"--yes", "--allow-incomplete-evidence", "--policy", policyPath, "--evidence", evidencePath,
 		layoutName, "registry.example/service:v1",
-	}, &stdout, &stderr, nil); code != 1 || !strings.Contains(stderr.String(), "policy denied tag update") {
+	}, &stdout, &stderr, nil); code != 1 || !strings.Contains(stderr.String(), "policy denied publication before upload") {
 		t.Fatalf("denied code=%d stderr=%s", code, stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()
+	// A fresh journal: this second call exercises a distinct, independent
+	// failure (a policy evaluation error), not a retry of the denial above.
+	freshOperationJournal(t)
 	if code := runPublish(context.Background(), []string{
 		"--yes", "--allow-incomplete-evidence", "--policy", policyPath,
 		"--evidence", filepath.Join(root, "missing.json"),
 		layoutName, "registry.example/service:v1",
-	}, &stdout, &stderr, nil); code != 1 || !strings.Contains(stderr.String(), "platform-factory publish: policy:") {
+	}, &stdout, &stderr, nil); code != 1 || !strings.Contains(stderr.String(), "platform-factory publish: policy preflight:") {
 		t.Fatalf("eval error code=%d stderr=%s", code, stderr.String())
 	}
 }
@@ -464,7 +563,7 @@ func TestEvaluatePublicationPolicyDecodeFailures(t *testing.T) {
 		t.Fatal("expected missing policy file rejection")
 	}
 	trailing := filepath.Join(root, "trailing.json")
-	if err := os.WriteFile(trailing, []byte(`{"api_version":"secure-oci.dev/policy/v1"}{"extra":true}`), 0o600); err != nil {
+	if err := os.WriteFile(trailing, []byte(`{"api_version":"platform-factory.dev/policy/v1"}{"extra":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := evaluatePublicationPolicy(trailing, evidencePath, published, false, false, false); err == nil {
@@ -525,7 +624,7 @@ func TestNativePublicationArtifactsJournalProvenance(t *testing.T) {
 	root := t.TempDir()
 	journalPath := filepath.Join(root, "journal.json")
 	journal := `{
-	  "api_version":"secure-oci.dev/journal/v1",
+	  "api_version":"platform-factory.dev/journal/v1",
 	  "pipeline_fingerprint":"sha256:abc",
 	  "engine_version":"platform-factory/1",
 	  "sandbox":"on",
@@ -537,7 +636,7 @@ func TestNativePublicationArtifactsJournalProvenance(t *testing.T) {
 	}
 	published := registry.Result{Digest: "sha256:" + strings.Repeat("a", 64)}
 	artifacts, err := nativePublicationArtifacts("", published, false, "", journalPath,
-		"https://secure-oci.dev/builder/v1", false, "", "")
+		"https://platform-factory.dev/builder/v1", false, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +674,352 @@ func TestRunDeployDryRunEmitsHardenedManifest(t *testing.T) {
 	}
 }
 
+func TestRunDeployRuntimeClassAddsCompatibleNodeScheduling(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	image := "ghcr.io/example/api@sha256:" + strings.Repeat("e", 64)
+	code := runDeploy(context.Background(), []string{
+		"--dry-run", "--runtime-class", "platform-factory", image,
+	}, &stdout, &stderr, nil)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{`"runtimeClassName": "platform-factory"`, `"platform-factory.dev/runtime-platform-factory": "ready"`, `"effect": "NoSchedule"`} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("manifest missing %s: %s", want, stdout.String())
+		}
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runDeploy(context.Background(), []string{"--dry-run", "--runtime-class", "../host", image}, &stdout, &stderr, nil); code != 2 {
+		t.Fatalf("hostile runtime class accepted: code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunDeployGeneratesAdditionalWorkloads(t *testing.T) {
+	image := "ghcr.io/example/api@sha256:" + strings.Repeat("f", 64)
+	for _, test := range []struct {
+		args []string
+		kind string
+	}{
+		{[]string{"--dry-run", "--workload", "statefulset", image}, `"kind": "StatefulSet"`},
+		{[]string{"--dry-run", "--workload", "daemonset", image}, `"kind": "DaemonSet"`},
+		{[]string{"--dry-run", "--workload", "cronjob", "--schedule", "*/5 * * * *", image}, `"kind": "CronJob"`},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := runDeploy(context.Background(), test.args, &stdout, &stderr, nil); code != 0 {
+			t.Fatalf("args=%v code=%d stderr=%s", test.args, code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), test.kind) {
+			t.Fatalf("args=%v missing %s: %s", test.args, test.kind, stdout.String())
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runDeploy(context.Background(), []string{"--dry-run", "--workload", "cronjob", image}, &stdout, &stderr, nil); code != 2 {
+		t.Fatalf("cronjob without schedule accepted: code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunDeployGeneratesIngressConfigSecretReferencesAndPVCWithoutSecretValues(t *testing.T) {
+	image := "ghcr.io/example/api@sha256:" + strings.Repeat("a", 64)
+	var stdout, stderr bytes.Buffer
+	args := []string{"--dry-run", "--ingress-host", "api.example.com", "--ingress-path", "/v1", "--config", "MODE=production", "--secret-env", "DATABASE_PASSWORD=database/password", "--volume", "/var/lib/api=20Gi", image}
+	if code := runDeploy(context.Background(), args, &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{`"kind": "Ingress"`, `"kind": "ConfigMap"`, `"kind": "PersistentVolumeClaim"`, `"secretKeyRef"`, `"name": "database"`, `"key": "password"`} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("manifest missing %s: %s", want, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String(), "DATABASE_PASSWORD=") {
+		t.Fatalf("manifest exposed secret syntax: %s", stdout.String())
+	}
+}
+
+func TestRunDeployRejectsMalformedKubernetesExtensionsBeforeKubectl(t *testing.T) {
+	image := "ghcr.io/example/api@sha256:" + strings.Repeat("b", 64)
+	for _, args := range [][]string{
+		{"--dry-run", "--config", "MISSING", image},
+		{"--dry-run", "--secret-env", "TOKEN=secret", image},
+		{"--dry-run", "--volume", "relative=1Gi", image},
+		{"--dry-run", "--ingress-host", "Bad_Host", image},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := runDeploy(context.Background(), args, &stdout, &stderr, nil); code != 2 {
+			t.Fatalf("args=%v code=%d stderr=%s", args, code, stderr.String())
+		}
+	}
+}
+
+func TestRunDeployServiceWorkloadIncludesAMatchingService(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runDeploy(context.Background(), []string{
+		"--dry-run", "--workload", "service", "--name", "api", "--port", "8443",
+		"ghcr.io/example/api@sha256:" + strings.Repeat("a", 64),
+	}, &stdout, &stderr, nil)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	var list struct {
+		Kind  string            `json:"kind"`
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.Kind != "List" || len(list.Items) != 2 {
+		t.Fatalf("kind=%s items=%d, want List of 2", list.Kind, len(list.Items))
+	}
+	var deployment, service map[string]any
+	if err := json.Unmarshal(list.Items[0], &deployment); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(list.Items[1], &service); err != nil {
+		t.Fatal(err)
+	}
+	if deployment["kind"] != "Deployment" || service["kind"] != "Service" {
+		t.Fatalf("kinds=%v/%v, want Deployment/Service", deployment["kind"], service["kind"])
+	}
+	spec, _ := service["spec"].(map[string]any)
+	selector, _ := spec["selector"].(map[string]any)
+	if selector["app.kubernetes.io/name"] != "api" {
+		t.Fatalf("service selector=%v, want to match the Deployment's pod label", selector)
+	}
+}
+
+func TestRunDeployDeploymentHasTCPProbesOnTheContainerPort(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runDeploy(context.Background(), []string{
+		"--dry-run", "--workload", "service", "--port", "9090",
+		"ghcr.io/example/api@sha256:" + strings.Repeat("a", 64),
+	}, &stdout, &stderr, nil)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{`"readinessProbe"`, `"livenessProbe"`, `"tcpSocket"`, `"port": 9090`} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("manifest missing %s: %s", want, output)
+		}
+	}
+}
+
+// TestRunDeployAppliesPolicyDecision mirrors
+// TestRunPublishAppliesPolicyDecision: a denied or unevaluable policy must
+// block kubectl apply from ever running.
+func TestRunDeployAppliesPolicyDecision(t *testing.T) {
+	root := t.TempDir()
+	policyPath := filepath.Join(root, "policy.json")
+	evidencePath := filepath.Join(root, "evidence.json")
+	if err := os.WriteFile(policyPath, []byte(`{"api_version":"platform-factory.dev/policy/v1","require_signature":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evidencePath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	image := "ghcr.io/example/api@sha256:" + strings.Repeat("a", 64)
+	execute := func(string, []string, io.Reader, io.Writer, io.Writer) error {
+		t.Fatal("kubectl invoked despite a denied policy")
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runDeploy(context.Background(), []string{
+		"--yes", "--policy", policyPath, "--evidence", evidencePath, image,
+	}, &stdout, &stderr, execute); code != 1 || !strings.Contains(stderr.String(), "policy denied deployment") {
+		t.Fatalf("denied code=%d stderr=%s", code, stderr.String())
+	}
+	stderr.Reset()
+	if code := runDeploy(context.Background(), []string{
+		"--yes", "--policy", policyPath, "--evidence", filepath.Join(root, "missing.json"), image,
+	}, &stdout, &stderr, execute); code != 1 || !strings.Contains(stderr.String(), "platform-factory deploy: policy:") {
+		t.Fatalf("eval error code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunDeployResourceRequests(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runDeploy(context.Background(), []string{
+		"--dry-run", "--workload", "job", "--cpu-request", "250m", "--memory-request", "256Mi",
+		"ghcr.io/example/api@sha256:" + strings.Repeat("a", 64),
+	}, &stdout, &stderr, nil)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{`"requests"`, `"cpu": "250m"`, `"memory": "256Mi"`} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("manifest missing %s: %s", want, output)
+		}
+	}
+	if code := runDeploy(context.Background(), []string{
+		"--dry-run", "--cpu-request", "", "ghcr.io/example/api@sha256:" + strings.Repeat("a", 64),
+	}, &stdout, &stderr, nil); code != 2 {
+		t.Fatalf("empty --cpu-request accepted: code=%d", code)
+	}
+}
+
+func TestRunDeploySelectsJobForInitializedProjectWithoutPorts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "pf.yaml"), []byte("version: 1\nlanguage: python\nprofile: python\nartifact: app.py\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	image := "registry.example/hello@sha256:" + strings.Repeat("d", 64)
+	var stdout, stderr bytes.Buffer
+	if code := runDeploy(context.Background(), []string{"--dry-run", image}, &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"kind": "Job"`) || strings.Contains(stdout.String(), "containerPort") {
+		t.Fatalf("one-shot project got the wrong manifest: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "project declares no listening ports") {
+		t.Fatalf("selection was not explained: %s", stderr.String())
+	}
+}
+
+func TestRunPublishDiscoversInitializedProjectLayout(t *testing.T) {
+	layoutName := buildPublishLayout(t, "example/hello", "v1")
+	root := t.TempDir()
+	relative, err := filepath.Rel(root, layoutName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := "version: 1\nlanguage: compiled\nprofile: static\nartifact: app\noutput: " + relative + "\n"
+	if err := os.WriteFile(filepath.Join(root, "pf.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{"--dry-run", "--allow-incomplete-evidence", "registry.example/hello:v1"}, &stdout, &stderr, nil)
+	if code != 0 || !strings.Contains(stdout.String(), layoutName) {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestRunPublishDiscoversCompleteProjectReleaseBundle(t *testing.T) {
+	layoutName := buildPublishLayout(t, "example/hello", "v1")
+	root := t.TempDir()
+	relative, err := filepath.Rel(root, layoutName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := "version: 1\nlanguage: compiled\nprofile: static\nartifact: app\noutput: " + relative + "\n"
+	if err := os.WriteFile(filepath.Join(root, "pf.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	releaseDir := filepath.Join(root, ".platform-factory", "release")
+	reportsDir := filepath.Join(releaseDir, "reports")
+	if err := os.MkdirAll(reportsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFile(t, filepath.Join(releaseDir, "sbom.json"), map[string]any{"components": []any{}})
+	writeJSONFile(t, filepath.Join(releaseDir, "provenance.json"), map[string]any{"subject_digest": "sha256:" + strings.Repeat("a", 64)})
+	writeJSONFile(t, filepath.Join(reportsDir, "policy-rules.json"), policy.Rules{
+		APIVersion: policy.APIVersion, RequireSBOM: true, RequireProvenance: true,
+		RequireSignature: true, RequireReproducible: true,
+	})
+	writeJSONFile(t, filepath.Join(reportsDir, "evidence.json"), policy.Evidence{
+		SBOM: true, Provenance: true, Signature: true, Reproducible: true,
+	})
+	t.Chdir(root)
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{"--dry-run", "registry.example/hello:v1"}, &stdout, &stderr, nil)
+	if code != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"policy preflight allowed", "generate native SBOM", "DSSE/Ed25519 signature", "publish provenance",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("dry-run missing %q: %s", want, stdout.String())
+		}
+	}
+	report, err := layout.Verify(layoutName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubRegistryPush(t, report.Platforms[0].Digest, nil)
+	stdout.Reset()
+	stderr.Reset()
+	code = runPublish(context.Background(), []string{
+		"--yes", "--key-dir", filepath.Join(root, "keys"), "registry.example/hello:v1",
+	}, &stdout, &stderr, nil)
+	if code != 0 {
+		t.Fatalf("publish code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	publishedData, err := os.ReadFile(filepath.Join(root, ".platform-factory", "published.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published struct {
+		Reference string `json:"reference"`
+		Digest    string `json:"digest"`
+	}
+	if err := json.Unmarshal(publishedData, &published); err != nil {
+		t.Fatal(err)
+	}
+	if published.Digest != report.Platforms[0].Digest || !strings.Contains(published.Reference, "@"+published.Digest) {
+		t.Fatalf("published state=%s", publishedData)
+	}
+	publicationMetrics, err := os.ReadFile(filepath.Join(root, ".platform-factory", "publication", "metrics.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"operation": "publish"`, `"artifacts": 3`, `"tag_moved": true`, published.Digest} {
+		if !strings.Contains(string(publicationMetrics), want) {
+			t.Fatalf("publication metrics missing %s: %s", want, publicationMetrics)
+		}
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runDeploy(context.Background(), []string{"--dry-run"}, &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("deploy from publication code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), published.Reference) {
+		t.Fatalf("deploy did not consume persisted digest: %s", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPublish(context.Background(), []string{"--deploy-only", "--dry-run"}, &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("publish --deploy-only code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), published.Reference) {
+		t.Fatalf("--deploy-only did not consume persisted digest: %s", stdout.String())
+	}
+	workingRemoteVerify := verifyRemoteDigest
+	verifyRemoteDigest = func(context.Context, string, string, string, string, string) error {
+		return errors.New("manifest not found")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPublish(context.Background(), []string{"--deploy-only", "--dry-run"}, &stdout, &stderr, nil); code != 1 ||
+		!strings.Contains(stderr.String(), "published digest is not verifiable") {
+		t.Fatalf("missing remote digest code=%d stderr=%s", code, stderr.String())
+	}
+	verifyRemoteDigest = workingRemoteVerify
+}
+
+func TestRunPublishRejectsIncompleteAutomaticReleaseBundle(t *testing.T) {
+	layoutName := buildPublishLayout(t, "example/hello", "v1")
+	root := t.TempDir()
+	relative, err := filepath.Rel(root, layoutName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pf.yaml"), []byte(
+		"version: 1\nlanguage: compiled\nprofile: static\nartifact: app\noutput: "+relative+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	var stdout, stderr bytes.Buffer
+	if code := runPublish(context.Background(), []string{"--dry-run", "registry.example/hello:v1"}, &stdout, &stderr, nil); code != 1 ||
+		!strings.Contains(stderr.String(), "release bundle is incomplete or unsafe") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
 func TestRunDeployAndRollbackCommands(t *testing.T) {
+	freshOperationJournal(t)
 	var calls [][]string
 	execute := func(name string, args []string, stdin io.Reader, _, _ io.Writer) error {
 		call := append([]string{name}, args...)
@@ -587,7 +1031,8 @@ func TestRunDeployAndRollbackCommands(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	image := "ghcr.io/example/api@sha256:" + strings.Repeat("b", 64)
-	if code := runDeploy(context.Background(), []string{"--yes", "--name", "api", "--namespace", "prod", image}, &stdout, &stderr, execute); code != 0 {
+	reports := filepath.Join(t.TempDir(), "deploy-reports")
+	if code := runDeploy(context.Background(), []string{"--yes", "--reports", reports, "--name", "api", "--namespace", "prod", image}, &stdout, &stderr, execute); code != 0 {
 		t.Fatalf("deploy code=%d stderr=%s", code, stderr.String())
 	}
 	if code := runRollback([]string{"--yes", "--namespace", "prod", "--to-revision", "2", "api"}, &stdout, &stderr, execute); code != 0 {
@@ -601,6 +1046,53 @@ func TestRunDeployAndRollbackCommands(t *testing.T) {
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls=%v want=%v", calls, want)
+	}
+	metrics, err := os.ReadFile(filepath.Join(reports, "metrics.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"operation": "deploy"`, `"operations": 2`, `"namespace": "prod"`, strings.Repeat("b", 64)} {
+		if !strings.Contains(string(metrics), want) {
+			t.Fatalf("deployment metrics missing %s: %s", want, metrics)
+		}
+	}
+}
+
+func TestLifecycleMetricsDryRunsWriteNothing(t *testing.T) {
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	root := t.TempDir()
+	publishReports := filepath.Join(root, "publish")
+	deployReports := filepath.Join(root, "deploy")
+	var stdout, stderr bytes.Buffer
+	if code := runPublish(context.Background(), []string{"--dry-run", "--allow-incomplete-evidence", "--reports", publishReports, layoutName, "registry.example/service:v1"}, &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("publish dry-run code=%d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	image := "registry.example/service@sha256:" + strings.Repeat("c", 64)
+	if code := runDeploy(context.Background(), []string{"--dry-run", "--reports", deployReports, image}, &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("deploy dry-run code=%d stderr=%s", code, stderr.String())
+	}
+	for _, path := range []string{publishReports, deployReports} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("dry-run wrote metrics directory %s: %v", path, err)
+		}
+	}
+}
+
+func TestDeploymentSuccessIsNotReclassifiedWhenMetricsFail(t *testing.T) {
+	freshOperationJournal(t)
+	root := t.TempDir()
+	blocked := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	image := "registry.example/service@sha256:" + strings.Repeat("d", 64)
+	code := runDeploy(context.Background(), []string{"--yes", "--reports", blocked, image}, &stdout, &stderr,
+		func(string, []string, io.Reader, io.Writer, io.Writer) error { return nil })
+	if code != 0 || !strings.Contains(stderr.String(), "deployment succeeded but metrics could not be written") {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -659,6 +1151,7 @@ func (errorValue lifecycleExitError) Error() string { return "command failed" }
 func (errorValue lifecycleExitError) ExitCode() int { return errorValue.code }
 
 func TestLifecycleDryRunsErrorsAndDispatch(t *testing.T) {
+	freshOperationJournal(t)
 	var stdout, stderr bytes.Buffer
 	if code := runRollback([]string{"--dry-run", "--to-revision", "3", "api"}, &stdout, &stderr, nil); code != 0 ||
 		!strings.Contains(stdout.String(), "--to-revision=3") {
@@ -690,11 +1183,16 @@ func TestLifecycleDryRunsErrorsAndDispatch(t *testing.T) {
 	for _, call := range []func() int{
 		func() int { return runPublish(context.Background(), nil, &stdout, &stderr, nil) },
 		func() int { return runDeploy(context.Background(), nil, &stdout, &stderr, nil) },
-		func() int { return runRollback(nil, &stdout, &stderr, nil) },
 	} {
 		if code := call(); code != 2 {
 			t.Fatalf("missing arguments code=%d", code)
 		}
+	}
+	// Rollback without a raw deployment name is now the project-native form;
+	// outside a project it reports the missing deployed identity as a product
+	// precondition rather than a syntax error.
+	if code := runRollback(nil, &stdout, &stderr, nil); code != 1 {
+		t.Fatalf("project rollback without state code=%d", code)
 	}
 }
 

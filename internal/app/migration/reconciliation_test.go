@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	"github.com/CYPT71/secure-oci-base/internal/idempotency"
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
+	"github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/idempotency"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
 )
 
 type reconciliationTarget struct {

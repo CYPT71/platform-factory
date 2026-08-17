@@ -9,7 +9,7 @@ import (
 	"io"
 	"sync"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 // testCacheStore is a consumer-side fake of the core cache port. Concrete

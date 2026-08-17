@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/ociruntime"
+	"github.com/CYPT71/platform-factory/internal/ociruntime"
 )
 
 func TestNormalizeInvocationAndSignals(t *testing.T) {

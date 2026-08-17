@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/layout"
-	"github.com/CYPT71/secure-oci-base/internal/project"
+	"github.com/CYPT71/platform-factory/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/project"
 )
 
 // TestLaunchBuildsAndRunsSupportedProjectEndToEnd is the first v1 exit
@@ -23,8 +23,12 @@ func TestLaunchBuildsAndRunsSupportedProjectEndToEnd(t *testing.T) {
 	writeProjectTestFile(t, filepath.Join(root, "app"), "static executable payload", 0o755)
 	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
 	var runtimeArgs []string
-	containerExecute := func(name string, args []string, _ io.Reader, _, _ io.Writer) error {
+	containerExecute := func(name string, args []string, stdin io.Reader, _, _ io.Writer) error {
 		runtimeArgs = append([]string{name}, args...)
+		if len(args) > 0 && args[0] == "load" {
+			_, err := io.Copy(io.Discard, stdin)
+			return err
+		}
 		return nil
 	}
 	var stdout, stderr bytes.Buffer

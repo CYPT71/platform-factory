@@ -1,19 +1,19 @@
 // The native-HVF run/serve implementation lives here, not in
 // microvm_native.go, for the same reason microvm_native_linux_amd64.go
 // is split out: it needs internal/hypervisor/hvf symbols that only build
-// on darwin (cgo + Virtualization.framework). microvm_native_stub.go
-// provides the non-(linux&&amd64)-non-darwin counterpart to runNativeKVM.
+// on darwin (cgo + Virtualization.framework). The build tag must require
+// cgo explicitly, not just darwin - internal/hypervisor/hvf's own files
+// all carry "darwin && cgo", so a CGO_ENABLED=0 darwin build (a real,
+// supported configuration - see scripts/ci/build-mcp-image-layout.sh's
+// host-side `go build` step) would otherwise resolve that import to zero
+// files and fail with "build constraints exclude all Go files".
+// microvm_native_stub.go provides the non-(linux&&amd64)-non-(darwin&&cgo)
+// counterpart to runNativeKVM, covering exactly that CGO_ENABLED=0-on-
+// darwin case in addition to every other unsupported platform.
 //
-// UNVERIFIED ON REAL HARDWARE as of the commit that added this file - see
-// docs/legacy-vm-disk-boot.md's HVF networking section for exactly what
-// that means and how to verify it on a real Mac: no test kernel image was
-// configured in the environment that wrote it, and actually creating a
-// Virtualization.framework VM needs the com.apple.security.virtualization
-// code-signing entitlement, which a plain `go build`/`go test` binary
-// does not carry. Every piece up to (and explicitly not including) an
-// actual successful boot has been built and, where possible, exercised
-// for real - see internal/hypervisor/hvf's own tests.
-//go:build darwin
+// Real-hardware validation requires the macOS virtualization entitlement;
+// see docs/legacy-vm-disk-boot.md.
+//go:build darwin && cgo
 
 package main
 
@@ -32,10 +32,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor/hvf"
-	"github.com/CYPT71/secure-oci-base/internal/microvm/forward"
-	"github.com/CYPT71/secure-oci-base/internal/networking"
-	"github.com/CYPT71/secure-oci-base/internal/rootfs"
+	"github.com/CYPT71/platform-factory/internal/hypervisor/hvf"
+	"github.com/CYPT71/platform-factory/internal/microvm/forward"
+	"github.com/CYPT71/platform-factory/internal/networking"
+	"github.com/CYPT71/platform-factory/internal/rootfs"
 )
 
 // guestIPReportMarker must match cmd/microvm-init's own copy exactly

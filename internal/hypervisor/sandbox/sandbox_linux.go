@@ -14,6 +14,13 @@ import (
 const (
 	capSysAdmin = 21
 	capSetPCap  = 8
+
+	// prSetNoNewPrivs is portable across every Linux architecture (prctl
+	// operation codes are architecture-independent) - defined here,
+	// rather than in the amd64-only seccomp_linux.go, so applySeccomp
+	// below (the mandatory, always-built stage) does not depend on a
+	// file gated to one architecture.
+	prSetNoNewPrivs = 38
 )
 
 // applyNamespaces, applyCgroups and dropCapability - the real,

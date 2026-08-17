@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	api "github.com/CYPT71/secure-oci-base/internal/core"
-	typederrors "github.com/CYPT71/secure-oci-base/internal/errors"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
+	api "github.com/CYPT71/platform-factory/internal/core"
+	typederrors "github.com/CYPT71/platform-factory/internal/errors"
+	"github.com/CYPT71/platform-factory/internal/observability"
 )
 
 // StageRunner executes one already validated stage. Implementations must honor

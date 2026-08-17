@@ -113,7 +113,13 @@ if [ "$goos" = darwin ]; then
   fi
 fi
 
-commands="platform-factory oci-builder example-service microvm-init platform-factory-control-plane platform-factory-worker"
+commands="platform-factory oci-builder example-service microvm-init microvm-initramfs platform-factory-control-plane platform-factory-worker"
+if [ "$goos/$goarch" = linux/amd64 ]; then
+  commands="$commands platform-factory-runtime"
+else
+  echo "platform-factory-runtime skipped: OCI runtime integration requires linux/amd64 (target is $goos/$goarch)" >&2
+fi
+language_plugins="go python node java dotnet rust ruby php"
 for command_name in $commands; do
   echo "building $command_name for $goos/$goarch..." >&2
   ldflags="-s -w"
@@ -125,6 +131,17 @@ for command_name in $commands; do
   CGO_ENABLED="$command_cgo" GOOS="$goos" GOARCH="$goarch" \
     go build -trimpath -ldflags="$ldflags" \
     -o "$environment/bin/$command_name$suffix" "$repo_root/cmd/$command_name"
+done
+
+for language in $language_plugins; do
+  plugin_name="platform-factory-lang-$language"
+  echo "building $plugin_name for $goos/$goarch..." >&2
+  (
+    cd "$repo_root/plugins/lang-$language"
+    CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+      go build -trimpath -ldflags="-s -w" \
+      -o "$environment/bin/$plugin_name$suffix" .
+  )
 done
 
 cat >"$environment/activate" <<'EOF'
@@ -181,8 +198,17 @@ EOF
 
 json_version=${version//\\/\\\\}
 json_version=${json_version//\"/\\\"}
+json_commands=
+for command_name in $commands; do
+  [ -n "$json_commands" ] && json_commands="$json_commands,"
+  json_commands="$json_commands\"$command_name\""
+done
+for language in $language_plugins; do
+  [ -n "$json_commands" ] && json_commands="$json_commands,"
+  json_commands="$json_commands\"platform-factory-lang-$language\""
+done
 cat >"$environment/environment.json" <<EOF
-{"target_os":"$goos","target_arch":"$goarch","version":"$json_version","native_vmm":$native_vmm,"commands":["platform-factory","oci-builder","example-service","microvm-init","platform-factory-control-plane","platform-factory-worker"]}
+{"target_os":"$goos","target_arch":"$goarch","version":"$json_version","native_vmm":$native_vmm,"commands":[$json_commands]}
 EOF
 
 if [ -n "$install_prefix" ]; then
@@ -190,6 +216,10 @@ if [ -n "$install_prefix" ]; then
   mkdir -p "$install_bin"
   for command_name in $commands; do
     install -m 0755 "$environment/bin/$command_name$suffix" "$install_bin/$command_name$suffix"
+  done
+  for language in $language_plugins; do
+    plugin_name="platform-factory-lang-$language"
+    install -m 0755 "$environment/bin/$plugin_name$suffix" "$install_bin/$plugin_name$suffix"
   done
   echo "installed commands in $install_bin" >&2
 fi

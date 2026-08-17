@@ -16,7 +16,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/CYPT71/secure-oci-base/internal/rootfs"
+	"github.com/CYPT71/platform-factory/internal/rootfs"
 )
 
 type stringList []string

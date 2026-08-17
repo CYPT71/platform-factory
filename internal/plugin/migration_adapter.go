@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 
-	appmigration "github.com/CYPT71/secure-oci-base/internal/app/migration"
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
+	appmigration "github.com/CYPT71/platform-factory/internal/app/migration"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
 )
 
 const (
 	migrationDiscoverCapability = "migration.discover"
+	migrationInspectCapability  = "migration.inspect"
 	migrationObserveCapability  = "migration.observe"
 	migrationApplyCapability    = "migration.apply"
 )
@@ -43,6 +44,15 @@ func NewMigrationDiscoverySource(registry *Registry, id, digest string) *Migrati
 	return &MigrationDiscoverySource{registry: registry, id: id, digest: digest}
 }
 func (s *MigrationDiscoverySource) SourceID() string { return s.id }
+func (s *MigrationDiscoverySource) VerifiedDiscoveryIdentity(ctx context.Context) (appmigration.DiscoveryIdentity, error) {
+	if err := ctx.Err(); err != nil {
+		return appmigration.DiscoveryIdentity{}, err
+	}
+	if _, err := s.registry.verifiedClient(s.id, s.digest, migrationDiscoverCapability); err != nil {
+		return appmigration.DiscoveryIdentity{}, err
+	}
+	return appmigration.DiscoveryIdentity{PluginID: s.id, Digest: s.digest, Capability: migrationDiscoverCapability}, nil
+}
 func (s *MigrationDiscoverySource) DiscoverPage(ctx context.Context, cursor string) (appmigration.DiscoveryPage, error) {
 	client, err := s.registry.verifiedClient(s.id, s.digest, migrationDiscoverCapability)
 	if err != nil {
@@ -70,6 +80,44 @@ func (s *MigrationDiscoverySource) DiscoverPage(ctx context.Context, cursor stri
 		}
 	}
 	return page, nil
+}
+
+func (s *MigrationDiscoverySource) Inspect(ctx context.Context, resourceID string) (domainmigration.Resource, bool, error) {
+	if resourceID == "" {
+		return domainmigration.Resource{}, false, errors.New("migration inspect: resource ID is required")
+	}
+	client, err := s.registry.verifiedClient(s.id, s.digest, migrationInspectCapability)
+	if err != nil {
+		return domainmigration.Resource{}, false, err
+	}
+	var wire migrationInspectResult
+	if err := client.Call(ctx, "v1."+migrationInspectCapability, migrationInspectParams{ResourceID: resourceID}, &wire); err != nil {
+		return domainmigration.Resource{}, false, err
+	}
+	if !wire.Found {
+		if wire.Resource != nil {
+			return domainmigration.Resource{}, false, errors.New("migration inspect: absent result included resource")
+		}
+		return domainmigration.Resource{}, false, nil
+	}
+	if wire.Resource == nil {
+		return domainmigration.Resource{}, false, errors.New("migration inspect: found result omitted resource")
+	}
+	resource := resourceFromWire(*wire.Resource)
+	if resource.ID != resourceID {
+		return domainmigration.Resource{}, false, errors.New("migration inspect: resource identity mismatch")
+	}
+	if resource.Origin.Source == "" {
+		resource.Origin.Source = s.id
+	}
+	if resource.Origin.Source != s.id {
+		return domainmigration.Resource{}, false, errors.New("migration inspect: source identity mismatch")
+	}
+	resource, err = canonicalMigrationResource(resource)
+	if err != nil {
+		return domainmigration.Resource{}, false, err
+	}
+	return resource, true, nil
 }
 
 // MigrationTargetFactory binds every operation to the exact identity and

@@ -5,9 +5,11 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -99,12 +101,187 @@ func TestStartBoundsKernelResources(t *testing.T) {
 	}
 	want := map[string]string{
 		"core": "0", "file_size": "16777216",
-		"open_files": "256", "cpu": "60",
+		"open_files": "256", "cpu": "60", "processes": "64",
+		// Start (no manifest, no family) resolves defaultPermissionProfile,
+		// whose zero-value MemoryMiB means "apply no RLIMIT_AS at all" -
+		// see TestStartWithFamilyAppliesPermissionProfile below for the
+		// contrasting case where a declared family does bound it.
+		"address_space": strconv.FormatUint(math.MaxUint64, 10),
 	}
 	for name, value := range want {
 		if result[name] != value {
 			t.Fatalf("%s=%q, want %q (all=%+v)", name, result[name], value, result)
 		}
+	}
+}
+
+// TestStartWithFamilyAppliesPermissionProfile proves permission_profile.go's
+// per-family resource ceilings actually reach the sandboxed process, and
+// that two different families genuinely produce two different ceilings
+// (not, say, both silently falling back to the same default): PluginFamilyLanguage
+// and PluginFamilyBuild declare different MemoryMiB in permissionProfiles,
+// so their RLIMIT_AS must differ by exactly that ratio.
+func TestStartWithFamilyAppliesPermissionProfile(t *testing.T) {
+	binary, err := sandboxProbePluginPath()
+	if err != nil {
+		t.Fatalf("build sandbox probe plugin: %v", err)
+	}
+
+	observedAddressSpace := func(family PluginFamily) uint64 {
+		t.Helper()
+		client, err := StartWithFamily(context.Background(), binary, nil, nil, family)
+		if err != nil {
+			t.Fatalf("start(%s): %v", family, err)
+		}
+		defer client.Close()
+		var result map[string]string
+		if err := client.Call(context.Background(), "v1.observe.isolation-probe", nil, &result); err != nil {
+			t.Fatalf("call(%s): %v", family, err)
+		}
+		value, err := strconv.ParseUint(result["address_space"], 10, 64)
+		if err != nil {
+			t.Fatalf("parse address_space for %s: %v (all=%+v)", family, err, result)
+		}
+		return value
+	}
+
+	languageLimit := observedAddressSpace(PluginFamilyLanguage)
+	buildLimit := observedAddressSpace(PluginFamilyBuild)
+
+	wantLanguage := permissionProfiles[PluginFamilyLanguage].MemoryMiB << 20
+	wantBuild := permissionProfiles[PluginFamilyBuild].MemoryMiB << 20
+	if languageLimit != wantLanguage {
+		t.Fatalf("language family address_space=%d, want %d", languageLimit, wantLanguage)
+	}
+	if buildLimit != wantBuild {
+		t.Fatalf("build family address_space=%d, want %d", buildLimit, wantBuild)
+	}
+	if languageLimit == buildLimit {
+		t.Fatalf("language and build families produced the same RLIMIT_AS (%d); permission_profile.go is not actually varying by family", languageLimit)
+	}
+}
+
+// TestStartIsolatesPluginTempDirectory proves, from inside a genuinely
+// separate plugin subprocess, two properties of Start's temp-directory
+// isolation at once (see internal/plugin/sandbox_linux.go's
+// isolateTempDirectory for why both, not just the first, matter):
+//  1. the plugin's own $TMPDIR is a private, empty scratch tmpfs, not the
+//     shared /tmp - proving isolation is active at all;
+//  2. a file created directly under the real, shared /tmp is still
+//     reachable from inside the plugin at that same path - proving
+//     isolation did not regress detect/freeze/plan's ability to read a
+//     real, caller-chosen project path that happens to live under /tmp,
+//     the exact regression an earlier version of this change caused
+//     (TestThirdPartyPluginAddsLanguageWithoutRecompilingTheHost, which
+//     passes a t.TempDir() project root over RPC, started failing).
+func TestStartIsolatesPluginTempDirectory(t *testing.T) {
+	binary, err := sandboxProbePluginPath()
+	if err != nil {
+		t.Fatalf("build sandbox probe plugin: %v", err)
+	}
+	canary, err := os.CreateTemp("/tmp", "platform-factory-sandbox-canary-*")
+	if err != nil {
+		t.Fatalf("create host canary file: %v", err)
+	}
+	canaryPath := canary.Name()
+	if err := canary.Close(); err != nil {
+		t.Fatalf("close host canary file: %v", err)
+	}
+	defer os.Remove(canaryPath)
+
+	client, err := Start(context.Background(), binary, nil, nil)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer client.Close()
+
+	var result map[string]string
+	if err := client.Call(context.Background(), "v1.observe.tmp-probe",
+		map[string]string{"host_canary_path": canaryPath}, &result); err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if result["tmpdir"] == "" {
+		// isolateTempDirectory is documented best-effort: a host that
+		// denies "mount namespace private" (observed in CI as "plugin
+		// sandbox: make mount namespace private: permission denied" -
+		// visible now that internal/plugin/client.go forwards the
+		// sandbox helper's stderr instead of discarding it) leaves
+		// TMPDIR unset rather than trusting an unisolated value. That is
+		// the function's documented, accepted degraded-but-safe outcome,
+		// not a defect this test can meaningfully assert against - skip
+		// rather than fail, the same way internal/executor's
+		// TestSandboxFailsClosedWithoutCgroupSupport skips for
+		// unavailable cgroup delegation.
+		t.Skip("mount namespace isolation is unavailable on this host; isolateTempDirectory degraded to its documented fallback")
+	}
+	if result["tmpdir"] == "/tmp" {
+		t.Fatalf("plugin TMPDIR is not a private scratch directory: %+v", result)
+	}
+	if result["scratch_entry_count"] != "0" {
+		t.Fatalf("plugin's private scratch directory is not empty: %+v", result)
+	}
+	if result["shared_tmp_reachable"] != "true" {
+		t.Fatalf("a file under the real, shared /tmp is not reachable from inside the plugin: %+v", result)
+	}
+}
+
+// hostNetnsIdentity reads this test process's own /proc/self/ns/net, the
+// same identifier handleNetnsProbe reports from inside a plugin.
+func hostNetnsIdentity(t *testing.T) string {
+	t.Helper()
+	target, err := os.Readlink("/proc/self/ns/net")
+	if err != nil {
+		t.Fatalf("read host netns: %v", err)
+	}
+	return target
+}
+
+// TestStartWithManifestGrantsHostNetworkOnlyWhenPermissionsDeclareIt proves
+// hostNetworkGranted's effect on a real plugin subprocess in both
+// directions: a plugin with no declared network permission still lands in
+// its own fresh, isolated network namespace (identical to Start's existing
+// behavior - see TestStartDeniesOutboundNetworkToPlugin), while a plugin
+// that declares Permissions.Network under a non-language family actually
+// shares the host's network namespace, proven by comparing
+// /proc/self/ns/net identifiers directly rather than depending on real
+// outbound connectivity being reachable from the test environment.
+func TestStartWithManifestGrantsHostNetworkOnlyWhenPermissionsDeclareIt(t *testing.T) {
+	binary, err := sandboxProbePluginPath()
+	if err != nil {
+		t.Fatalf("build sandbox probe plugin: %v", err)
+	}
+	hostNetns := hostNetnsIdentity(t)
+
+	observedNetns := func(family PluginFamily, permissions PluginPermissions) string {
+		t.Helper()
+		client, err := StartWithManifest(context.Background(), binary, nil, nil, family, permissions)
+		if err != nil {
+			t.Fatalf("start(%s, %+v): %v", family, permissions, err)
+		}
+		defer client.Close()
+		var result map[string]string
+		if err := client.Call(context.Background(), "v1.observe.netns-probe", nil, &result); err != nil {
+			t.Fatalf("call(%s, %+v): %v", family, permissions, err)
+		}
+		return result["netns"]
+	}
+
+	isolated := observedNetns(PluginFamilyRuntime, PluginPermissions{})
+	if isolated == hostNetns {
+		t.Fatalf("plugin with no declared network permission shares the host netns %q; wrapWithPluginSandbox should have isolated it", hostNetns)
+	}
+
+	granted := observedNetns(PluginFamilyRuntime, PluginPermissions{Network: []string{"kubernetes-api"}})
+	if granted != hostNetns {
+		t.Fatalf("plugin with a declared network permission has netns %q, want the host's %q", granted, hostNetns)
+	}
+
+	// Defense in depth: Validate already refuses a language-family manifest
+	// that declares network permissions at all, but hostNetworkGranted must
+	// not honor one anyway if it somehow got this far unvalidated.
+	stillIsolated := observedNetns(PluginFamilyLanguage, PluginPermissions{Network: []string{"kubernetes-api"}})
+	if stillIsolated == hostNetns {
+		t.Fatalf("language-family plugin shares the host netns %q despite the family; hostNetworkGranted must never grant network to language plugins", hostNetns)
 	}
 }
 
@@ -118,7 +295,7 @@ func TestWrapWithPluginSandboxRefusesUnprovenProjectRootIsolation(t *testing.T) 
 	cmd := exec.Command("/bin/true")
 	originalPath := cmd.Path
 	originalArgs := append([]string(nil), cmd.Args...)
-	if err := wrapWithPluginSandbox(cmd); err == nil {
+	if err := wrapWithPluginSandbox(cmd, "", PluginPermissions{}); err == nil {
 		t.Fatal("wrapWithPluginSandbox accepted an unproven project-root isolation requirement")
 	}
 	if cmd.Path != originalPath {
@@ -168,7 +345,7 @@ func TestFilterPluginEnvironment(t *testing.T) {
 		"AWS_SECRET_ACCESS_KEY=secret",
 	}
 
-	filtered := filterPluginEnvironment(env)
+	filtered := filterPluginEnvironment(env, PluginPermissions{})
 
 	// Check that PATH is kept
 	found := false
@@ -220,5 +397,31 @@ func TestFilterPluginEnvironment(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected LANG or LC_ variables to be in filtered environment")
+	}
+}
+
+// TestFilterPluginEnvironmentGrantsKubeconfigOnlyWhenDeclared proves
+// KUBECONFIG/HOME pass through only for a plugin whose own Permissions
+// declares "kubeconfig" as a secret - not for every plugin, and not merely
+// because it happens to also have host network access (a separate,
+// independent grant - see hostNetworkGranted).
+func TestFilterPluginEnvironmentGrantsKubeconfigOnlyWhenDeclared(t *testing.T) {
+	env := []string{"PATH=/usr/bin:/bin", "HOME=/home/user", "KUBECONFIG=/home/user/.kube/config"}
+
+	withoutGrant := filterPluginEnvironment(env, PluginPermissions{Network: []string{"kubernetes-api"}})
+	for _, e := range withoutGrant {
+		if strings.HasPrefix(e, "HOME=") || strings.HasPrefix(e, "KUBECONFIG=") {
+			t.Fatalf("HOME/KUBECONFIG leaked to a plugin that did not declare the kubeconfig secret: %v", withoutGrant)
+		}
+	}
+
+	withGrant := filterPluginEnvironment(env, PluginPermissions{Secrets: []string{"kubeconfig"}})
+	var sawHome, sawKubeconfig bool
+	for _, e := range withGrant {
+		sawHome = sawHome || e == "HOME=/home/user"
+		sawKubeconfig = sawKubeconfig || e == "KUBECONFIG=/home/user/.kube/config"
+	}
+	if !sawHome || !sawKubeconfig {
+		t.Fatalf("HOME/KUBECONFIG not passed through to a plugin that declared the kubeconfig secret: %v", withGrant)
 	}
 }

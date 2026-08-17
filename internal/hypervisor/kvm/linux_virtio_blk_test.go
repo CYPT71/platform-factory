@@ -4,9 +4,24 @@ package kvm
 
 import (
 	"encoding/binary"
+	"errors"
 	"os"
 	"testing"
 )
+
+type recordingBlockBackend struct {
+	data      []byte
+	syncCalls int
+	syncErr   error
+}
+
+func (b *recordingBlockBackend) ReadAt(p []byte, off int64) (int, error) {
+	return copy(p, b.data[off:]), nil
+}
+func (b *recordingBlockBackend) WriteAt(p []byte, off int64) (int, error) {
+	return copy(b.data[off:], p), nil
+}
+func (b *recordingBlockBackend) Sync() error { b.syncCalls++; return b.syncErr }
 
 // testQueueMem is one virtqueue's descriptor table, avail ring and used
 // ring addresses within a testVirtioMem, plus this fake driver's own
@@ -302,5 +317,38 @@ func TestVirtioBlkRejectsBadCapacity(t *testing.T) {
 	defer backingFile.Close()
 	if _, err := newVirtioBlkMMIODevice(BlockDeviceOptions{Backend: backingFile, Capacity: 100}, virtioMMIODeviceBaseAddress(0), virtioFirstDeviceIRQ); err == nil {
 		t.Fatal("expected an error for a capacity that is not a multiple of the 512-byte sector size")
+	}
+}
+
+func TestVirtioBlkFlushReportsBackendResultToGuest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want byte
+	}{{name: "success", want: virtioBlkStatusOK}, {name: "io error", err: errors.New("disk disappeared"), want: virtioBlkStatusIOErr}} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &recordingBlockBackend{data: make([]byte, 4096), syncErr: tc.err}
+			device, err := newVirtioBlkMMIODevice(BlockDeviceOptions{Backend: backend, Capacity: 4096}, virtioMMIODeviceBaseAddress(0), virtioFirstDeviceIRQ)
+			if err != nil {
+				t.Fatal(err)
+			}
+			g := newTestVirtioMem(len(device.queues))
+			device.guestMemory = g.mem
+			device.raiseIRQ = func() {}
+			driveToDriverOK(t, device, g)
+			headerAddr := g.alloc(16)
+			binary.LittleEndian.PutUint32(g.mem[headerAddr:], virtioBlkTypeFlush)
+			statusAddr := g.alloc(1)
+			g.writeDesc(0, 0, headerAddr, 16, virtqDescFlagNext, 1)
+			g.writeDesc(0, 1, statusAddr, 1, virtqDescFlagWrite, 0)
+			slot := g.publish(0, 0)
+			reg32(t, device, virtioRegQueueNotify, true, 0)
+			if backend.syncCalls != 1 || g.mem[statusAddr] != tc.want {
+				t.Fatalf("Sync calls=%d status=%d want=%d", backend.syncCalls, g.mem[statusAddr], tc.want)
+			}
+			if id, length := g.usedEntry(0, slot); id != 0 || length != 1 {
+				t.Fatalf("used entry={id:%d len:%d}", id, length)
+			}
+		})
 	}
 }

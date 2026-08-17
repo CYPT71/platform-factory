@@ -13,7 +13,7 @@ import (
 	"runtime"
 	"sort"
 
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 var machineIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)

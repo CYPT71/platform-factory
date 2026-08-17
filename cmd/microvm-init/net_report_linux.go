@@ -21,8 +21,7 @@ import (
 // this function's entire cost for that, by far the common, established
 // case, is one file read.
 //
-// UNVERIFIED ON REAL HARDWARE as of the commit that added this - see
-// docs/legacy-vm-disk-boot.md's HVF networking section.
+// Hardware validation requirements are documented in docs/legacy-vm-disk-boot.md.
 func reportGuestIPIfDHCP(stdout io.Writer) {
 	cmdline, err := os.ReadFile("/proc/cmdline")
 	if err != nil || !cmdlineRequestsDHCP(string(cmdline)) {

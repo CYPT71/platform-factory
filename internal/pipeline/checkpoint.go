@@ -16,7 +16,8 @@ import (
 	"sync"
 	"time"
 
-	api "github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
+	api "github.com/CYPT71/platform-factory/internal/core"
 )
 
 // Checkpoint represents a persistent checkpoint of pipeline execution state.
@@ -62,9 +63,13 @@ type CheckpointStoreInterface interface {
 
 // CheckpointStore manages persistent checkpoints for pipeline execution.
 type CheckpointStore struct {
+	checkpointIndex
+	basePath string
+}
+
+type checkpointIndex struct {
 	mu          sync.RWMutex
 	checkpoints map[string]*Checkpoint
-	basePath    string
 }
 
 // NewCheckpointStore creates a new CheckpointStore.
@@ -79,8 +84,8 @@ func NewCheckpointStore(basePath string) (*CheckpointStore, error) {
 	}
 
 	store := &CheckpointStore{
-		checkpoints: make(map[string]*Checkpoint),
-		basePath:    basePath,
+		checkpointIndex: checkpointIndex{checkpoints: make(map[string]*Checkpoint)},
+		basePath:        basePath,
 	}
 
 	// Load existing checkpoints
@@ -136,17 +141,8 @@ func (cs *CheckpointStore) Save(cp *Checkpoint) error {
 		return fmt.Errorf("failed to marshal checkpoint: %w", err)
 	}
 
-	// Write atomically
-	filename := filepath.Join(cs.basePath, cp.ID+".json")
-	tmpFile := filename + ".tmp"
-
-	if err := os.WriteFile(tmpFile, data, 0600); err != nil {
-		return fmt.Errorf("failed to write checkpoint: %w", err)
-	}
-
-	if err := os.Rename(tmpFile, filename); err != nil {
-		os.Remove(tmpFile)
-		return fmt.Errorf("failed to rename checkpoint: %w", err)
+	if err := atomicfile.Write(cs.basePath, cp.ID+".json", data, 0o600, true); err != nil {
+		return fmt.Errorf("failed to persist checkpoint: %w", err)
 	}
 
 	cs.mu.Lock()
@@ -157,7 +153,7 @@ func (cs *CheckpointStore) Save(cp *Checkpoint) error {
 }
 
 // Get retrieves a checkpoint by ID.
-func (cs *CheckpointStore) Get(id string) (*Checkpoint, bool) {
+func (cs *checkpointIndex) Get(id string) (*Checkpoint, bool) {
 	cs.mu.RLock()
 	cp, ok := cs.checkpoints[id]
 	cs.mu.RUnlock()
@@ -165,7 +161,7 @@ func (cs *CheckpointStore) Get(id string) (*Checkpoint, bool) {
 }
 
 // GetByStage retrieves the latest checkpoint for a specific stage.
-func (cs *CheckpointStore) GetByStage(pipelineID, stageID string) (*Checkpoint, bool) {
+func (cs *checkpointIndex) GetByStage(pipelineID, stageID string) (*Checkpoint, bool) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 
@@ -216,7 +212,7 @@ func (cs *CheckpointStore) DeleteByPipeline(pipelineID string) error {
 }
 
 // ListByPipeline returns all checkpoints for a specific pipeline.
-func (cs *CheckpointStore) ListByPipeline(pipelineID string) []*Checkpoint {
+func (cs *checkpointIndex) ListByPipeline(pipelineID string) []*Checkpoint {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 
@@ -230,7 +226,7 @@ func (cs *CheckpointStore) ListByPipeline(pipelineID string) []*Checkpoint {
 }
 
 // ListIncomplete returns all checkpoints that are not in a terminal state.
-func (cs *CheckpointStore) ListIncomplete() []*Checkpoint {
+func (cs *checkpointIndex) ListIncomplete() []*Checkpoint {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 
@@ -355,21 +351,22 @@ func (cm *CheckpointManager) CanResume(stageID string) bool {
 	return cp.Retryable && (cp.State == StageCanceled || cp.State == StageBudgetExceeded)
 }
 
-// GetResumePoint returns the stage ID from which to resume execution.
-// Returns empty string if no resume is possible.
+// GetResumePoint returns the first resumable stage ID in lexical order.
 func (cm *CheckpointManager) GetResumePoint() string {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 
-	// Find the first incomplete stage in topological order
-	// In a real implementation, this would query the pipeline DAG
+	var stages []string
 	for _, cp := range cm.checkpoints {
 		if cp.State != StageSucceeded && cp.State != StageFailed {
-			return cp.StageID
+			stages = append(stages, cp.StageID)
 		}
 	}
-
-	return ""
+	sort.Strings(stages)
+	if len(stages) == 0 {
+		return ""
+	}
+	return stages[0]
 }
 
 // Delete deletes all checkpoints for this pipeline.
@@ -476,26 +473,6 @@ type PipelineCheckpointAdapter struct {
 
 // Run runs the pipeline with checkpoint support.
 func (pca *PipelineCheckpointAdapter) Run(ctx context.Context, definition api.Pipeline) (ScheduleResult, error) {
-	// Check if we can resume from a checkpoint
-	resumeInfo := pca.Checkpoints.GetResumeInfo()
-
-	if resumeInfo.StartStage != "" {
-		// Resume from checkpoint
-		return pca.resumeFromCheckpoint(ctx, definition, resumeInfo)
-	}
-
-	// Run normally
-	return pca.Scheduler.Run(ctx, definition)
-}
-
-// resumeFromCheckpoint resumes pipeline execution from a checkpoint.
-func (pca *PipelineCheckpointAdapter) resumeFromCheckpoint(ctx context.Context, definition api.Pipeline, resumeInfo ResumeInfo) (ScheduleResult, error) {
-	// Create a new context that includes resume information
-	// In a real implementation, this would modify the pipeline definition
-	// to skip already-completed stages
-
-	// For now, just run the full pipeline
-	// The CheckpointableRunner will handle skipping completed stages
 	return pca.Scheduler.Run(ctx, definition)
 }
 
@@ -509,14 +486,13 @@ func WithCheckpoints(scheduler Scheduler, manager *CheckpointManager) *PipelineC
 
 // MemoryCheckpointStore is an in-memory checkpoint store for testing.
 type MemoryCheckpointStore struct {
-	mu          sync.RWMutex
-	checkpoints map[string]*Checkpoint
+	checkpointIndex
 }
 
 // NewMemoryCheckpointStore creates a new in-memory checkpoint store.
 func NewMemoryCheckpointStore() *MemoryCheckpointStore {
 	return &MemoryCheckpointStore{
-		checkpoints: make(map[string]*Checkpoint),
+		checkpointIndex: checkpointIndex{checkpoints: make(map[string]*Checkpoint)},
 	}
 }
 
@@ -529,34 +505,6 @@ func (mcs *MemoryCheckpointStore) Save(cp *Checkpoint) error {
 	mcs.checkpoints[cp.ID] = cp
 	mcs.mu.Unlock()
 	return nil
-}
-
-// Get retrieves a checkpoint by ID.
-func (mcs *MemoryCheckpointStore) Get(id string) (*Checkpoint, bool) {
-	mcs.mu.RLock()
-	cp, ok := mcs.checkpoints[id]
-	mcs.mu.RUnlock()
-	return cp, ok
-}
-
-// GetByStage retrieves the latest checkpoint for a specific stage.
-func (mcs *MemoryCheckpointStore) GetByStage(pipelineID, stageID string) (*Checkpoint, bool) {
-	mcs.mu.RLock()
-	defer mcs.mu.RUnlock()
-
-	var latest *Checkpoint
-	for _, cp := range mcs.checkpoints {
-		if cp.PipelineID == pipelineID && cp.StageID == stageID {
-			if latest == nil || cp.EndTime.After(latest.EndTime) {
-				latest = cp
-			}
-		}
-	}
-
-	if latest == nil {
-		return nil, false
-	}
-	return latest, true
 }
 
 // Delete removes a checkpoint from the store.
@@ -580,53 +528,14 @@ func (mcs *MemoryCheckpointStore) DeleteByPipeline(pipelineID string) error {
 	return nil
 }
 
-// ListByPipeline returns all checkpoints for a specific pipeline.
-func (mcs *MemoryCheckpointStore) ListByPipeline(pipelineID string) []*Checkpoint {
-	mcs.mu.RLock()
-	defer mcs.mu.RUnlock()
-
-	var result []*Checkpoint
-	for _, cp := range mcs.checkpoints {
-		if cp.PipelineID == pipelineID {
-			result = append(result, cp)
-		}
-	}
-	return result
-}
-
-// ListIncomplete returns all checkpoints that are not in a terminal state.
-func (mcs *MemoryCheckpointStore) ListIncomplete() []*Checkpoint {
-	mcs.mu.RLock()
-	defer mcs.mu.RUnlock()
-
-	var result []*Checkpoint
-	for _, cp := range mcs.checkpoints {
-		if cp.State != StageSucceeded && cp.State != StageFailed {
-			result = append(result, cp)
-		}
-	}
-	return result
-}
-
 // Import imports a checkpoint from a reader.
 func (mcs *MemoryCheckpointStore) Import(r io.Reader) (*Checkpoint, error) {
-	var cp Checkpoint
-	if err := json.NewDecoder(r).Decode(&cp); err != nil {
-		return nil, err
-	}
-	if err := mcs.Save(&cp); err != nil {
-		return nil, err
-	}
-	return &cp, nil
+	return importCheckpoint(r, mcs.Save)
 }
 
 // Export exports a checkpoint to a writer.
 func (mcs *MemoryCheckpointStore) Export(w io.Writer, id string) error {
-	cp, ok := mcs.Get(id)
-	if !ok {
-		return fmt.Errorf("checkpoint %s not found", id)
-	}
-	return json.NewEncoder(w).Encode(cp)
+	return exportCheckpoint(w, id, mcs.Get)
 }
 
 // FileCheckpointStore is a file-based checkpoint store.
@@ -647,24 +556,29 @@ func OpenCheckpointStoreAt(path string) (*CheckpointStore, error) {
 
 // Import imports a checkpoint from a reader.
 func (cs *CheckpointStore) Import(r io.Reader) (*Checkpoint, error) {
+	return importCheckpoint(r, cs.Save)
+}
+
+func importCheckpoint(r io.Reader, save func(*Checkpoint) error) (*Checkpoint, error) {
 	var cp Checkpoint
 	if err := json.NewDecoder(r).Decode(&cp); err != nil {
 		return nil, err
 	}
-
-	if err := cs.Save(&cp); err != nil {
+	if err := save(&cp); err != nil {
 		return nil, err
 	}
-
 	return &cp, nil
 }
 
 // Export exports a checkpoint to a writer.
 func (cs *CheckpointStore) Export(w io.Writer, id string) error {
-	cp, ok := cs.Get(id)
+	return exportCheckpoint(w, id, cs.Get)
+}
+
+func exportCheckpoint(w io.Writer, id string, get func(string) (*Checkpoint, bool)) error {
+	cp, ok := get(id)
 	if !ok {
 		return fmt.Errorf("checkpoint %s not found", id)
 	}
-
 	return json.NewEncoder(w).Encode(cp)
 }

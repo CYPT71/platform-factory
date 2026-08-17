@@ -17,7 +17,7 @@ runtime_path="$install_dir/platform-factory-runtime"
 dropin_path="$dropin_dir/90-platform-factory-runtime.conf"
 
 mkdir -p "$install_dir" "$dropin_dir"
-temporary=$(mktemp "$install_dir/.secure-oci-runtime.XXXXXX")
+temporary=$(mktemp "$install_dir/.platform-factory-runtime.XXXXXX")
 trap 'rm -f "$temporary"' EXIT
 (
   cd "$repo_root"
@@ -27,7 +27,7 @@ trap 'rm -f "$temporary"' EXIT
 chmod 0755 "$temporary"
 mv "$temporary" "$runtime_path"
 
-config_temporary=$(mktemp "$dropin_dir/.secure-oci-runtime.XXXXXX")
+config_temporary=$(mktemp "$dropin_dir/.platform-factory-runtime.XXXXXX")
 trap 'rm -f "$config_temporary"' EXIT
 {
   echo '[engine.runtimes]'

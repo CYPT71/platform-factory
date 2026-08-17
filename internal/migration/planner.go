@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"sort"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 const planDigestDomain = "platform-factory/migration-plan/v1\x00"
@@ -23,14 +23,16 @@ type Step struct {
 }
 
 type Plan struct {
-	InputDigest string
-	Discovery   DiscoveryStatus
-	Resources   []Resource
-	Edges       []DependencyEdge
-	Steps       []Step
-	Gaps        []CompatibilityGap
-	Unknowns    []UnknownObservation
-	Digest      string
+	InputDigest          string
+	Discovery            DiscoveryStatus
+	Resources            []Resource
+	Edges                []DependencyEdge
+	Steps                []Step
+	Gaps                 []CompatibilityGap
+	Unknowns             []UnknownObservation
+	ExternalDependencies []ExternalDependency
+	Transformations      []Transformation
+	Digest               string
 }
 
 // BuildPlan is pure: it validates and copies input before deriving a plan.
@@ -51,13 +53,15 @@ func BuildPlan(input Aggregate) (Plan, error) {
 		return Plan{}, err
 	}
 	plan := Plan{
-		InputDigest: inputDigest,
-		Discovery:   canonical.Discovery,
-		Resources:   canonical.Resources,
-		Edges:       canonical.Edges,
-		Steps:       steps,
-		Gaps:        canonical.Gaps,
-		Unknowns:    canonical.Unknowns,
+		InputDigest:          inputDigest,
+		Discovery:            canonical.Discovery,
+		Resources:            canonical.Resources,
+		Edges:                canonical.Edges,
+		Steps:                steps,
+		Gaps:                 canonical.Gaps,
+		Unknowns:             canonical.Unknowns,
+		ExternalDependencies: canonical.ExternalDependencies,
+		Transformations:      canonical.Transformations,
 	}
 	plan.Digest, err = plan.ComputeDigest()
 	if err != nil {
@@ -139,7 +143,7 @@ func (p Plan) Validate() error {
 	if invalidText(p.InputDigest) {
 		return invalid("plan input digest is required")
 	}
-	aggregate := Aggregate{Discovery: p.Discovery, Resources: p.Resources, Edges: p.Edges, Gaps: p.Gaps, Unknowns: p.Unknowns}
+	aggregate := Aggregate{Discovery: p.Discovery, Resources: p.Resources, Edges: p.Edges, Gaps: p.Gaps, Unknowns: p.Unknowns, ExternalDependencies: p.ExternalDependencies, Transformations: p.Transformations}
 	if err := aggregate.Validate(); err != nil {
 		return fmt.Errorf("invalid plan aggregate: %w", err)
 	}
@@ -168,8 +172,7 @@ func (p Plan) Validate() error {
 }
 
 func operationID(inputDigest, resourceID, capability, version, action string) core.OperationID {
-	sum := sha256.Sum256([]byte("platform-factory/migration-operation/v1\x00" + inputDigest + "\x00" + resourceID + "\x00" + capability + "\x00" + version + "\x00" + action))
-	return core.OperationID("migration-" + hex.EncodeToString(sum[:]))
+	return core.OperationID("migration-" + core.DeriveID("platform-factory/migration-operation/v1", inputDigest, resourceID, capability, version, action))
 }
 
 func digestValue(domain string, value any) (string, error) {

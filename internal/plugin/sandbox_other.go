@@ -11,7 +11,7 @@ import (
 // platform. Namespaces are a Linux kernel feature; Start falls back to an
 // unsandboxed launch when this returns an error, exactly as it does when
 // the Linux implementation's namespace creation itself fails.
-func wrapWithPluginSandbox(*exec.Cmd) error {
+func wrapWithPluginSandbox(*exec.Cmd, PluginFamily, PluginPermissions) error {
 	return errors.New("plugin sandboxing is not available on this platform")
 }
 

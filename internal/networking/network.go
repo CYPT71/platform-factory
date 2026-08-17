@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/CYPT71/secure-oci-base/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 var (

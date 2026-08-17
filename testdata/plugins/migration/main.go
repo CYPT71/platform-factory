@@ -13,7 +13,7 @@ import (
 	"sort"
 	"sync"
 
-	plugin "github.com/CYPT71/secure-oci-base/sdk/plugin"
+	plugin "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 var state struct {
@@ -23,11 +23,30 @@ var state struct {
 	artifact plugin.MigrationArtifact
 }
 
+var (
+	configuredName          = "migration-fixture"
+	configuredBidirectional = "0"
+	configuredInitial       = "0"
+)
+
 func discover(ctx context.Context, p plugin.MigrationDiscoverParams) (plugin.MigrationDiscoverResult, error) {
 	if plugin.TraceIDFromContext(ctx) == "" {
 		return plugin.MigrationDiscoverResult{}, fmt.Errorf("trace ID required")
 	}
-	r := plugin.MigrationResource{ID: "vm-1", Kind: "compute", Origin: plugin.MigrationResourceOrigin{Source: "migration-fixture", NativeType: "vm", NativeID: "one"}, Attributes: map[string]string{"cpu": "2"}, Requirements: []plugin.MigrationRequirement{{Capability: plugin.CapabilityMigrationApply, Version: "v1"}}}
+	pluginName := configuredName
+	if configuredBidirectional == "1" {
+		state.Lock()
+		defer state.Unlock()
+		if state.resource == nil {
+			return plugin.MigrationDiscoverResult{Status: "complete"}, nil
+		}
+		r := *state.resource
+		r.Origin.Source = pluginName
+		r.Origin.NativeType = "native-compute"
+		r.Origin.NativeID = pluginName + "/" + r.ID
+		return plugin.MigrationDiscoverResult{Status: "complete", Resources: []plugin.MigrationResource{r}}, nil
+	}
+	r := plugin.MigrationResource{ID: "vm-1", Kind: "compute", Origin: plugin.MigrationResourceOrigin{Source: pluginName, NativeType: "vm", NativeID: "one"}, Attributes: map[string]string{"cpu": "2"}, Requirements: []plugin.MigrationRequirement{{Capability: plugin.CapabilityMigrationApply, Version: "v1"}}}
 	if p.Cursor == "" {
 		return plugin.MigrationDiscoverResult{Status: "complete", Resources: []plugin.MigrationResource{r}, NextCursor: "page-2"}, nil
 	}
@@ -44,6 +63,18 @@ func observe(context.Context, plugin.MigrationObserveParams) (plugin.MigrationOb
 	}
 	r := *state.resource
 	return plugin.MigrationObserveResult{Found: true, Resource: &r}, nil
+}
+func inspect(context.Context, plugin.MigrationInspectParams) (plugin.MigrationInspectResult, error) {
+	state.Lock()
+	defer state.Unlock()
+	if state.resource == nil {
+		return plugin.MigrationInspectResult{}, nil
+	}
+	r := *state.resource
+	r.Origin.Source = configuredName
+	r.Origin.NativeType = "native-compute"
+	r.Origin.NativeID = configuredName + "/" + r.ID
+	return plugin.MigrationInspectResult{Found: true, Resource: &r}, nil
 }
 func apply(ctx context.Context, p plugin.MigrationApplyParams) (plugin.MigrationApplyResult, error) {
 	if plugin.OperationIDFromContext(ctx) == "" {
@@ -156,8 +187,14 @@ func observeArtifact(context.Context, plugin.MigrationArtifactObserveParams) (pl
 	return plugin.MigrationArtifactObserveResult{Found: true, Resource: &r, NativeBinding: "installed/" + r.ID, Attestation: []byte(state.artifact.Digest)}, nil
 }
 func main() {
-	s := plugin.NewServer("migration-fixture", "v1")
+	pluginName := configuredName
+	if configuredInitial == "1" {
+		r := plugin.MigrationResource{ID: "vm-1", Kind: "compute", Origin: plugin.MigrationResourceOrigin{Source: pluginName, NativeType: "native-compute", NativeID: pluginName + "/vm-1"}, Attributes: map[string]string{"cpu": "2"}, Requirements: []plugin.MigrationRequirement{{Capability: plugin.CapabilityMigrationApply, Version: "v1"}}}
+		state.resource = &r
+	}
+	s := plugin.NewServer(pluginName, "v1")
 	plugin.RegisterMigration(s, discover, observe, apply)
+	plugin.RegisterMigrationInspect(s, inspect)
 	plugin.RegisterMigrationArtifacts(s, exportArtifact, importArtifact, observeArtifact)
 	if err := s.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)

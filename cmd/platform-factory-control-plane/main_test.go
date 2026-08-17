@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/control"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/control"
+	"github.com/CYPT71/platform-factory/internal/observability"
 )
 
 func TestRunRejectsInvalidConfigurationBeforeListening(t *testing.T) {

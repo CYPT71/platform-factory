@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +19,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
+	"github.com/CYPT71/platform-factory/internal/strictjson"
 )
 
 const (
@@ -25,9 +30,7 @@ const (
 	artifactMediaType = "application/vnd.oci.artifact.manifest.v1+json"
 	maxResponseBody   = 1 << 20
 	uploadChunkSize   = 4 << 20
-	// maxFetchedBlobSize bounds GetBlob: it exists for fetching small,
-	// verify-before-trust artifacts (signatures, SBOM, provenance), not
-	// for pulling multi-gigabyte image layers - see GetBlob's doc comment.
+	// maxFetchedBlobSize keeps GetBlob limited to verification artifacts.
 	maxFetchedBlobSize = 64 << 20
 
 	manifestAcceptTypes = "application/vnd.oci.image.index.v1+json," +
@@ -55,13 +58,21 @@ type Client struct {
 	Scheme   string
 	Username string
 	Password string
-	// SessionDir persists opaque registry upload locations so a new process can
-	// reconcile and resume an interrupted blob upload. Empty disables it.
+	// SessionDir persists resumable upload sessions. Empty disables persistence.
 	SessionDir string
-	// MountFrom requests a cross-repository blob mount before uploading.
-	// Registries that decline it return an upload Location and transparently
-	// fall back to the normal streaming upload.
+	// MountFrom requests a cross-repository mount before streaming an upload.
 	MountFrom string
+	// FollowBlobRedirects opts GetBlob into following a bounded, validated
+	// chain of HTTP redirects (see followBlobRedirect) before verifying the
+	// digest of whatever content is ultimately returned. Off by default:
+	// httpClient's CheckRedirect otherwise deliberately refuses every 3xx
+	// (see its own comment) so a registry can never silently redirect a
+	// credentialed request elsewhere. This exists because some registries
+	// (Docker Hub among them) route blob GETs through a 307 to a separate
+	// content host - a real, common pattern for pulling third-party base
+	// images - that every other Client caller (publish, verify-release)
+	// neither needs nor should opt into.
+	FollowBlobRedirects bool
 
 	mu    sync.RWMutex
 	token string
@@ -82,12 +93,40 @@ type ArtifactResult struct {
 	Size   int64  `json:"size"`
 }
 
-// GetManifest fetches the manifest at reference (a tag or a digest) in
-// target and returns its raw bytes plus the Content-Type the registry
-// served it as. If reference is itself a digest, the returned bytes are
-// re-hashed and checked against it before returning - a registry's
-// Docker-Content-Digest response header is informational, never trusted
-// on its own the way this client trusts a digest it computes itself.
+// CleanupSessions removes abandoned local upload checkpoints older than maxAge.
+// It never follows symlinks and ignores unrelated files in SessionDir.
+func (c *Client) CleanupSessions(maxAge time.Duration) error {
+	if c.SessionDir == "" || maxAge <= 0 {
+		return nil
+	}
+	entries, err := os.ReadDir(c.SessionDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("registry: read upload sessions: %w", err)
+	}
+	cutoff := time.Now().Add(-maxAge)
+	for _, entry := range entries {
+		if entry.Type()&os.ModeSymlink != 0 || !entry.Type().IsRegular() ||
+			filepath.Ext(entry.Name()) != ".json" || len(strings.TrimSuffix(entry.Name(), ".json")) != 64 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("registry: inspect upload session %s: %w", entry.Name(), err)
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(filepath.Join(c.SessionDir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("registry: remove abandoned upload session %s: %w", entry.Name(), err)
+			}
+		}
+	}
+	return nil
+}
+
+// GetManifest returns a manifest and its content type. Digest references are
+// verified from the response body, never from registry headers alone.
 func (c *Client) GetManifest(ctx context.Context, target Reference, reference string) ([]byte, string, error) {
 	response, err := c.doAccept(ctx, http.MethodGet, target, "/manifests/"+url.PathEscape(reference),
 		nil, "", manifestAcceptTypes, -1)
@@ -111,13 +150,8 @@ func (c *Client) GetManifest(ctx context.Context, target Reference, reference st
 	return body, response.Header.Get("Content-Type"), nil
 }
 
-// GetBlob fetches and returns the blob at digest in target, verifying its
-// SHA-256 digest before returning - never the server's status code or
-// Content-Length alone. Bounded to maxFetchedBlobSize: this is for
-// fetching small, already-digest-addressed artifacts a caller is about to
-// verify (a signature envelope, an SBOM, a provenance predicate - the
-// shapes secure-oci verify-release and publish's own subject artifacts
-// use), not a general-purpose layer puller.
+// GetBlob returns a bounded verification artifact after checking its SHA-256
+// digest. It is not a general-purpose image-layer puller.
 func (c *Client) GetBlob(ctx context.Context, target Reference, digest string) ([]byte, error) {
 	wantHex, err := digestHex(digest)
 	if err != nil {
@@ -128,6 +162,13 @@ func (c *Client) GetBlob(ctx context.Context, target Reference, digest string) (
 		return nil, err
 	}
 	defer response.Body.Close()
+	if c.FollowBlobRedirects && response.StatusCode >= 300 && response.StatusCode < 400 {
+		response, err = c.followBlobRedirect(ctx, response)
+		if err != nil {
+			return nil, err
+		}
+		defer response.Body.Close()
+	}
 	if response.StatusCode != http.StatusOK {
 		return nil, responseError("get blob", response)
 	}
@@ -145,9 +186,89 @@ func (c *Client) GetBlob(ctx context.Context, target Reference, digest string) (
 	return body, nil
 }
 
-// PushArtifact uploads payload and publishes an OCI artifact manifest whose
-// subject is the immutable image digest. No tag is required: the registry's
-// referrers API can discover it from the subject relationship.
+// maxBlobRedirectHops bounds followBlobRedirect against a malicious or
+// misconfigured server issuing an unbounded redirect chain.
+const maxBlobRedirectHops = 5
+
+// followBlobRedirect follows a bounded chain of HTTP redirects from an
+// already-received 3xx response, validating every hop before requesting
+// it: the target must be https, and must not resolve (via a real DNS
+// lookup, not a string match - the same TOCTOU-aware posture
+// internal/marketplace's catalog fetcher already uses for the same class
+// of problem) to a loopback, private, link-local, unspecified, or
+// multicast address. This is deliberately opt-in per-call (GetBlob checks
+// FollowBlobRedirects) rather than a change to httpClient's own
+// CheckRedirect, which every other Client method continues to rely on to
+// refuse all redirects outright.
+func (c *Client) followBlobRedirect(ctx context.Context, response *http.Response) (*http.Response, error) {
+	for hop := 0; ; hop++ {
+		location := response.Header.Get("Location")
+		_ = response.Body.Close()
+		if location == "" {
+			return nil, errors.New("registry: redirect response carried no Location header")
+		}
+		if hop >= maxBlobRedirectHops {
+			return nil, fmt.Errorf("registry: blob redirect exceeded %d hops", maxBlobRedirectHops)
+		}
+		target, err := url.Parse(location)
+		if err != nil {
+			return nil, fmt.Errorf("registry: invalid blob redirect Location: %w", err)
+		}
+		if target.Scheme != "https" {
+			return nil, fmt.Errorf("registry: blob redirect to non-https URL refused")
+		}
+		if err := checkRedirectHostSafe(ctx, target.Hostname()); err != nil {
+			return nil, fmt.Errorf("registry: blob redirect: %w", err)
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		response, err = c.httpClient().Do(request)
+		if err != nil {
+			return nil, fmt.Errorf("registry: follow blob redirect: %w", err)
+		}
+		if response.StatusCode < 300 || response.StatusCode >= 400 {
+			return response, nil
+		}
+	}
+}
+
+// checkRedirectHostSafe resolves host via a real DNS lookup and rejects
+// any resolved address that is not a globally-routable unicast address -
+// the network-returned redirect target is untrusted content, unlike an
+// operator-configured registry endpoint.
+func checkRedirectHostSafe(ctx context.Context, host string) error {
+	if host == "" {
+		return errors.New("redirect target has no host")
+	}
+	if literal := net.ParseIP(host); literal != nil {
+		if isBlockedRedirectIP(literal) {
+			return fmt.Errorf("redirect target %s resolves to a blocked address", host)
+		}
+		return nil
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return fmt.Errorf("resolve redirect target %s: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("redirect target %s did not resolve", host)
+	}
+	for _, addr := range addrs {
+		if isBlockedRedirectIP(addr.IP) {
+			return fmt.Errorf("redirect target %s resolves to a blocked address (%s)", host, addr.IP)
+		}
+	}
+	return nil
+}
+
+func isBlockedRedirectIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() || ip.IsMulticast()
+}
+
+// PushArtifact publishes payload as an OCI artifact linked to an image digest.
 func (c *Client) PushArtifact(ctx context.Context, target Reference, subjectDigest, subjectMediaType string, subjectSize int64, artifactType, payloadMediaType string, payload []byte) (ArtifactResult, error) {
 	if _, err := digestHex(subjectDigest); err != nil {
 		return ArtifactResult{}, err
@@ -188,35 +309,18 @@ func (c *Client) PushArtifact(ctx context.Context, target Reference, subjectDige
 	return ArtifactResult{Digest: digest, Size: int64(len(encoded))}, nil
 }
 
-// PushLayout uploads all layout blobs, installs the selected manifest by
-// digest, and only then moves the target tag. sourceReference selects an
-// org.opencontainers.image.ref.name annotation when the layout has several
-// top-level entries.
+// PushLayout uploads a selected layout manifest by digest before moving its tag.
 func (c *Client) PushLayout(ctx context.Context, layoutDir string, target Reference, sourceReference string) (Result, error) {
 	return c.pushLayout(ctx, layoutDir, target, sourceReference, true)
 }
 
-// PushLayoutByDigest uploads and installs the manifest by digest but leaves
-// the mutable tag untouched. Call TagLayout only after policy and linked
-// artifacts succeed.
+// PushLayoutByDigest installs a manifest without changing a mutable tag.
 func (c *Client) PushLayoutByDigest(ctx context.Context, layoutDir string, target Reference, sourceReference string) (Result, error) {
 	return c.pushLayout(ctx, layoutDir, target, sourceReference, false)
 }
 
 func (c *Client) pushLayout(ctx context.Context, layoutDir string, target Reference, sourceReference string, moveTag bool) (Result, error) {
-	indexBytes, err := os.ReadFile(filepath.Join(layoutDir, "index.json"))
-	if err != nil {
-		return Result{}, fmt.Errorf("registry: read layout index: %w", err)
-	}
-	var index imageIndex
-	if err := json.Unmarshal(indexBytes, &index); err != nil {
-		return Result{}, fmt.Errorf("registry: decode layout index: %w", err)
-	}
-	selected, err := selectManifest(index.Manifests, sourceReference)
-	if err != nil {
-		return Result{}, err
-	}
-	manifestBytes, err := readVerifiedBlob(layoutDir, selected)
+	selected, manifestBytes, err := loadSelectedManifest(layoutDir, sourceReference)
 	if err != nil {
 		return Result{}, err
 	}
@@ -233,33 +337,41 @@ func (c *Client) pushLayout(ctx context.Context, layoutDir string, target Refere
 			continue
 		}
 		digest := "sha256:" + entry.Name()
+		blobPath := filepath.Join(blobDir, entry.Name())
+		info, err := verifyLocalBlob(blobPath, digest)
+		if err != nil {
+			return Result{}, err
+		}
 		exists, err := c.blobExists(ctx, target, digest)
 		if err != nil {
 			return Result{}, err
 		}
-		if exists {
-			continue
-		}
-		file, err := os.Open(filepath.Join(blobDir, entry.Name()))
-		if err != nil {
-			return Result{}, fmt.Errorf("registry: open blob %s: %w", digest, err)
-		}
-		info, statErr := file.Stat()
-		if statErr == nil {
+		if !exists {
+			file, openErr := os.Open(blobPath)
+			if openErr != nil {
+				return Result{}, fmt.Errorf("registry: open blob %s: %w", digest, openErr)
+			}
 			err = c.uploadBlob(ctx, target, digest, info.Size(), file)
+			_ = file.Close()
+			if err != nil {
+				return Result{}, err
+			}
+			uploaded++
 		}
-		_ = file.Close()
-		if statErr != nil {
-			return Result{}, fmt.Errorf("registry: stat blob %s: %w", digest, statErr)
+		if err := c.verifyRemoteBlob(ctx, target, digest, info.Size()); err != nil {
+			return Result{}, fmt.Errorf("registry: verify remote blob %s: %w", digest, err)
 		}
-		if err != nil {
-			return Result{}, err
-		}
-		uploaded++
 	}
 
 	if err := c.putManifest(ctx, target, selected.Digest, selected.MediaType, manifestBytes); err != nil {
 		return Result{}, fmt.Errorf("registry: install manifest by digest: %w", err)
+	}
+	installed, _, err := c.GetManifest(ctx, target, selected.Digest)
+	if err != nil {
+		return Result{}, fmt.Errorf("registry: verify installed manifest: %w", err)
+	}
+	if !bytes.Equal(installed, manifestBytes) {
+		return Result{}, errors.New("registry: installed manifest differs from verified local manifest")
 	}
 	if moveTag {
 		if err := c.putManifest(ctx, target, target.Tag, selected.MediaType, manifestBytes); err != nil {
@@ -272,25 +384,81 @@ func (c *Client) pushLayout(ctx context.Context, layoutDir string, target Refere
 	}, nil
 }
 
-// TagLayout moves target.Tag to the already-installed verified manifest.
-func (c *Client) TagLayout(ctx context.Context, layoutDir string, target Reference, sourceReference string) error {
-	indexBytes, err := os.ReadFile(filepath.Join(layoutDir, "index.json"))
+func verifyLocalBlob(path, digest string) (os.FileInfo, error) {
+	wantHex, err := digestHex(digest)
 	if err != nil {
-		return fmt.Errorf("registry: read layout index: %w", err)
+		return nil, err
 	}
-	var index imageIndex
-	if err := json.Unmarshal(indexBytes, &index); err != nil {
-		return fmt.Errorf("registry: decode layout index: %w", err)
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("registry: open blob %s: %w", digest, err)
 	}
-	selected, err := selectManifest(index.Manifests, sourceReference)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("registry: stat blob %s: %w", digest, err)
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return nil, fmt.Errorf("registry: hash blob %s: %w", digest, err)
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != wantHex {
+		return nil, fmt.Errorf("registry: local blob %s digest mismatch", digest)
+	}
+	return info, nil
+}
+
+func (c *Client) verifyRemoteBlob(ctx context.Context, target Reference, digest string, expectedSize int64) error {
+	wantHex, err := digestHex(digest)
 	if err != nil {
 		return err
 	}
-	manifest, err := readVerifiedBlob(layoutDir, selected)
+	response, err := c.do(ctx, http.MethodGet, target, "/blobs/"+url.PathEscape(digest), nil, "", -1)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return responseError("get blob", response)
+	}
+	hash := sha256.New()
+	n, err := io.Copy(hash, io.LimitReader(response.Body, expectedSize+1))
+	if err != nil {
+		return fmt.Errorf("read: %w", err)
+	}
+	if n != expectedSize {
+		return fmt.Errorf("size mismatch: got %d, want %d", n, expectedSize)
+	}
+	if hex.EncodeToString(hash.Sum(nil)) != wantHex {
+		return errors.New("digest mismatch")
+	}
+	return nil
+}
+
+// TagLayout moves target.Tag to the already-installed verified manifest.
+func (c *Client) TagLayout(ctx context.Context, layoutDir string, target Reference, sourceReference string) error {
+	selected, manifest, err := loadSelectedManifest(layoutDir, sourceReference)
 	if err != nil {
 		return err
 	}
 	return c.putManifest(ctx, target, target.Tag, selected.MediaType, manifest)
+}
+
+func loadSelectedManifest(layoutDir, sourceReference string) (descriptor, []byte, error) {
+	indexBytes, err := os.ReadFile(filepath.Join(layoutDir, "index.json"))
+	if err != nil {
+		return descriptor{}, nil, fmt.Errorf("registry: read layout index: %w", err)
+	}
+	var index imageIndex
+	if err := json.Unmarshal(indexBytes, &index); err != nil {
+		return descriptor{}, nil, fmt.Errorf("registry: decode layout index: %w", err)
+	}
+	selected, err := selectManifest(index.Manifests, sourceReference)
+	if err != nil {
+		return descriptor{}, nil, err
+	}
+	manifest, err := readVerifiedBlob(layoutDir, selected)
+	return selected, manifest, err
 }
 
 func selectManifest(manifests []descriptor, source string) (descriptor, error) {
@@ -484,12 +652,8 @@ func (c *Client) saveUpload(target Reference, digest string, size int64, uploadU
 	if err != nil {
 		return err
 	}
-	temporary := path + ".tmp"
-	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+	if err := atomicfile.Write(c.SessionDir, filepath.Base(path), data, 0o600, true); err != nil {
 		return fmt.Errorf("registry: persist upload session: %w", err)
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		return fmt.Errorf("registry: install upload session: %w", err)
 	}
 	return nil
 }
@@ -507,7 +671,7 @@ func (c *Client) resumeUpload(ctx context.Context, target Reference, digest stri
 		return nil, 0, false, fmt.Errorf("registry: read upload session: %w", err)
 	}
 	var session uploadSession
-	if json.Unmarshal(data, &session) != nil || session.Digest != digest || session.Size != size {
+	if strictjson.Decode(data, &session) != nil || session.Digest != digest || session.Size != size {
 		_ = os.Remove(path)
 		return nil, 0, false, nil
 	}
@@ -579,10 +743,6 @@ func (c *Client) do(ctx context.Context, method string, target Reference, suffix
 	return c.doAccept(ctx, method, target, suffix, body, contentType, "", size)
 }
 
-// doAccept is do plus an explicit Accept header, needed for content
-// negotiation on manifest GETs (an OCI registry may otherwise respond
-// with whichever media type it prefers, not the one the caller asked
-// for).
 func (c *Client) doAccept(ctx context.Context, method string, target Reference, suffix string, body io.Reader, contentType, accept string, size int64) (*http.Response, error) {
 	scheme := c.Scheme
 	if scheme == "" {
@@ -764,10 +924,16 @@ func (c *Client) currentToken() string {
 }
 
 func (c *Client) httpClient() *http.Client {
+	base := http.DefaultClient
 	if c.HTTP != nil {
-		return c.HTTP
+		base = c.HTTP
 	}
-	return http.DefaultClient
+	// Registry responses are untrusted. Never let net/http follow a 3xx and
+	// silently replay credentials or digest-bearing requests to another URL;
+	// upload Location handling is validated explicitly by resolveLocation.
+	clone := *base
+	clone.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &clone
 }
 
 func (c *Client) resolveLocation(target Reference, location string) (*url.URL, error) {

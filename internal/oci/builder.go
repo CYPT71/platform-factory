@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/budget"
+	"github.com/CYPT71/platform-factory/internal/budget"
 )
 
 const (
@@ -508,13 +508,28 @@ func compressionLevel(value string) int {
 	return gzip.BestCompression
 }
 
+func deterministicGzip(dst io.Writer, level int) (*gzip.Writer, error) {
+	writer, err := gzip.NewWriterLevel(dst, level)
+	if err == nil {
+		writer.Header.ModTime = time.Unix(0, 0)
+		writer.Header.OS = 255
+	}
+	return writer, err
+}
+
 func writeStreamingLayer(root string, files []streamFile, writablePaths []string, level int, tracker *budget.Tracker) (descriptor, string, error) {
+	return installLayer(root, func(output io.Writer) (descriptor, string, error) {
+		return writeLayerStream(output, files, writablePaths, level, tracker)
+	})
+}
+
+func installLayer(root string, write func(io.Writer) (descriptor, string, error)) (descriptor, string, error) {
 	blobDir := filepath.Join(root, "blobs", "sha256")
-	temporary := filepath.Join(blobDir, ".layer-in-progress")
-	output, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	output, err := os.CreateTemp(blobDir, ".layer-*")
 	if err != nil {
 		return descriptor{}, "", err
 	}
+	temporary := output.Name()
 	success := false
 	defer func() {
 		_ = output.Close()
@@ -523,7 +538,7 @@ func writeStreamingLayer(root string, files []streamFile, writablePaths []string
 		}
 	}()
 
-	layerDesc, diffID, err := writeLayerStream(output, files, writablePaths, level, tracker)
+	layerDesc, diffID, err := write(output)
 	if err != nil {
 		return descriptor{}, "", err
 	}
@@ -544,12 +559,10 @@ func writeStreamingLayer(root string, files []streamFile, writablePaths []string
 func writeLayerStream(dst io.Writer, files []streamFile, writablePaths []string, level int, tracker *budget.Tracker) (descriptor, string, error) {
 	compressedHash := sha256.New()
 	compressedCount := &countingWriter{}
-	gz, err := gzip.NewWriterLevel(io.MultiWriter(dst, compressedHash, compressedCount), level)
+	gz, err := deterministicGzip(io.MultiWriter(dst, compressedHash, compressedCount), level)
 	if err != nil {
 		return descriptor{}, "", err
 	}
-	gz.Header.ModTime = time.Unix(0, 0)
-	gz.Header.OS = 255
 	rawHash := sha256.New()
 	tw := tar.NewWriter(io.MultiWriter(gz, rawHash))
 

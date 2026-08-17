@@ -5,7 +5,7 @@ package hypervisor
 import (
 	"context"
 
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 // ProbeNative reports that no native backend is compiled for this platform.

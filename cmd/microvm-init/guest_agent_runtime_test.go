@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/guesttransport"
+	"github.com/CYPT71/platform-factory/internal/guesttransport"
 )
 
 func TestOptionalGuestEndpointIsDisabledByDefault(t *testing.T) {

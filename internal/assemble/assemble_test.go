@@ -2,14 +2,11 @@ package assemble
 
 import (
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/cache"
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	"github.com/CYPT71/secure-oci-base/internal/layout"
-	"github.com/CYPT71/secure-oci-base/internal/oci"
+	"github.com/CYPT71/platform-factory/internal/cache"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 func newTestStore(t *testing.T) *cache.Store {
@@ -100,42 +97,19 @@ func TestExtractFailsForMissingBlob(t *testing.T) {
 	}
 }
 
-func testPipelineWithBinaryAndConfig() core.Pipeline {
-	return core.Pipeline{
-		Outputs: []core.Output{
-			{Name: "app", Stage: "build", Artifact: "binary"},
-			{Name: "config", Stage: "build", Artifact: "config"},
-		},
-	}
-}
-
-func TestImageBuildsVerifiableOCILayout(t *testing.T) {
-	store := newTestStore(t)
-	resolve := resolverFrom(map[string]map[string]cache.Descriptor{
-		"build": {
-			"binary": put(t, store, "arbitrary binary bytes"),
-			"config": put(t, store, "arbitrary config bytes"),
-		},
-	})
-
-	output := filepath.Join(t.TempDir(), "layout")
-	digest, err := Image(cache.NewStoreAdapter(store), testPipelineWithBinaryAndConfig(), resolve, "app",
-		map[string]string{"config": "/etc/app/config.txt"},
-		oci.Options{Output: output},
-	)
-	if err != nil {
-		t.Fatalf("image: %v", err)
-	}
-	if digest == "" {
-		t.Fatal("expected a non-empty manifest digest")
-	}
-
-	report, err := layout.Verify(output)
-	if err != nil {
-		t.Fatalf("the assembled image did not pass independent layout verification: %v", err)
-	}
-	if !report.Valid || report.Manifests != 1 {
-		t.Fatalf("report=%+v", report)
+// unreachableBuilder fails the test if Image ever calls it - used by tests
+// whose expected error occurs during output resolution, strictly before
+// Image would call build. The real, end-to-end build path (a genuine
+// internal/oci.Build call) is covered by
+// internal/oci's TestAssembleImageBuildsVerifiableOCILayout instead:
+// internal/assemble must not import internal/oci itself (see this
+// package's doc comment, enforced by internal/archtest), so a builder that
+// actually builds an image belongs on the infrastructure side of that
+// boundary, not here.
+func unreachableBuilder(t *testing.T) Builder {
+	return func(string, []ExtraFile) (string, error) {
+		t.Fatal("build must not be called")
+		return "", nil
 	}
 }
 
@@ -146,7 +120,7 @@ func TestImageFailsWhenBinaryOutputMissing(t *testing.T) {
 	})
 	definition := core.Pipeline{Outputs: []core.Output{{Name: "app", Stage: "build", Artifact: "binary"}}}
 
-	_, err := Image(cache.NewStoreAdapter(store), definition, resolve, "does-not-exist", nil, oci.Options{Output: filepath.Join(t.TempDir(), "layout")})
+	_, err := Image(cache.NewStoreAdapter(store), definition, resolve, "does-not-exist", nil, unreachableBuilder(t))
 	if err == nil {
 		t.Fatal("expected an error when binaryOutput names an undeclared output")
 	}
@@ -160,9 +134,7 @@ func TestImageFailsWhenExtraFileOutputMissing(t *testing.T) {
 	definition := core.Pipeline{Outputs: []core.Output{{Name: "app", Stage: "build", Artifact: "binary"}}}
 
 	_, err := Image(cache.NewStoreAdapter(store), definition, resolve, "app",
-		map[string]string{"does-not-exist": "/etc/x"},
-		oci.Options{Output: filepath.Join(t.TempDir(), "layout")},
-	)
+		map[string]string{"does-not-exist": "/etc/x"}, unreachableBuilder(t))
 	if err == nil {
 		t.Fatal("expected an error when an extra-file output is not declared")
 	}

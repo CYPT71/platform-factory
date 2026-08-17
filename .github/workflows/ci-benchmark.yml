@@ -200,7 +200,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "# secure-oci-base benchmark: this branch vs. $(cat /tmp/main-ref.txt 2>/dev/null || echo main)"
+            echo "# platform-factory-base benchmark: this branch vs. $(cat /tmp/main-ref.txt 2>/dev/null || echo main)"
             echo
             echo "## benchstat (statistical A/B comparison, BenchmarkBuild only)"
             echo

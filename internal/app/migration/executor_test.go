@@ -4,17 +4,65 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"syscall"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/core"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
+	"github.com/CYPT71/platform-factory/internal/observability"
 )
 
 type executionCandidates struct{}
 
 func (executionCandidates) Candidates(context.Context, CapabilityRequirement) ([]CapabilityCandidate, error) {
 	return []CapabilityCandidate{{ID: "target", Digest: testDigest('d'), Capability: "compute", Version: "v1", Compatibility: CompatibilityDirect, Evidence: CapabilityEvidence{Declared: true, Discovered: true, Negotiated: true, Verified: true, Available: true}}}, nil
+}
+
+type nonConvergingTarget struct {
+	mode    string
+	applies int
+}
+
+func (t *nonConvergingTarget) Observe(context.Context, domainmigration.Resource) (TargetObservation, error) {
+	switch t.mode {
+	case "network":
+		return TargetObservation{}, errors.New("network unavailable")
+	case "partial":
+		return TargetObservation{Native: "partial"}, nil
+	default:
+		return TargetObservation{Native: false}, nil
+	}
+}
+func (t *nonConvergingTarget) Apply(context.Context, domainmigration.Step, domainmigration.Resource) error {
+	t.applies++
+	return nil
+}
+func (t *nonConvergingTarget) Verify(_ context.Context, _ domainmigration.Resource, observation TargetObservation) (bool, error) {
+	if t.mode == "verification" {
+		return false, errors.New("host verification failed")
+	}
+	value, _ := observation.Native.(bool)
+	return value, nil
+}
+
+func TestExecuteFaultInjectionFailsClosedWithoutBlindRetry(t *testing.T) {
+	for _, mode := range []string{"network", "partial", "stale", "verification"} {
+		t.Run(mode, func(t *testing.T) {
+			target := &nonConvergingTarget{mode: mode}
+			result, err := NewExecutor(NewCapabilityResolver(executionCandidates{}), fakeFactory{operations: target}, &evidenceSink{}).Execute(tracedContext(), executionPlan(t, false))
+			if err == nil || len(result.Evidence) != 1 || result.Evidence[0].Status != StepFailed || target.applies > 1 {
+				t.Fatalf("mode=%s result=%+v applies=%d err=%v", mode, result, target.applies, err)
+			}
+		})
+	}
+}
+
+func TestExecuteReportsProvenanceDiskFullAfterVerifiedMutation(t *testing.T) {
+	target := newFakeTarget()
+	result, err := NewExecutor(NewCapabilityResolver(executionCandidates{}), fakeFactory{operations: target}, &evidenceSink{err: syscall.ENOSPC}).Execute(tracedContext(), executionPlan(t, false))
+	if !errors.Is(err, syscall.ENOSPC) || len(result.Evidence) != 0 || len(target.applies) != 1 {
+		t.Fatalf("result=%+v applies=%v err=%v", result, target.applies, err)
+	}
 }
 
 type fakeFactory struct {

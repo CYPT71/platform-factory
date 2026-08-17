@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 func testJournalContract(t *testing.T, newJournal func(*testing.T) core.OperationJournal) {

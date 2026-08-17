@@ -14,7 +14,7 @@ func writePipelineFile(t *testing.T, dir string) string {
 	// A two-branch DAG so the run exercises the scheduler: resolve feeds
 	// compile and test, both feed package.
 	pipeline := `{
-  "api_version": "secure-oci.dev/v1alpha1",
+  "api_version": "platform-factory.dev/v1alpha1",
   "name": "example",
   "required_capabilities": ["cache", "parallel-stages"],
   "stages": [
@@ -106,7 +106,7 @@ func TestRunPipelineRunEnforcesBudget(t *testing.T) {
 	}
 	dir := t.TempDir()
 	slow := `{
-  "api_version": "secure-oci.dev/v1alpha1",
+  "api_version": "platform-factory.dev/v1alpha1",
   "name": "slow",
   "stages": [
     {"id": "sleeper", "command": {"executable": "/bin/sh", "args": ["-c", "sleep 5"]}}

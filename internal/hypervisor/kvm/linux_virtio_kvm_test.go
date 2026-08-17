@@ -74,7 +74,7 @@ func TestRunLinuxWithRealKVMVirtioBlk(t *testing.T) {
 	if err := backend.Truncate(capacity); err != nil {
 		t.Fatal(err)
 	}
-	seed := []byte("secure-oci-virtio-blk-kvm-proof")
+	seed := []byte("platform-factory-virtio-blk-kvm-proof")
 	if _, err := backend.WriteAt(seed, 0); err != nil {
 		t.Fatal(err)
 	}

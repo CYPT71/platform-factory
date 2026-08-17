@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/control"
+	"github.com/CYPT71/platform-factory/internal/control"
 )
 
 // These tests exercise how the real HTTP handlers, not a simulation of

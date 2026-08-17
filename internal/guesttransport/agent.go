@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 // MaxIOBytes leaves sufficient room in a frame for the authenticated envelope,

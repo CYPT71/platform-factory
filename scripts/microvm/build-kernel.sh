@@ -186,7 +186,7 @@ for cmd in curl sha256sum tar make "$kernel_cc" bc flex bison nproc; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "error: '$cmd' is required on PATH" >&2; exit 1; }
 done
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/secure-oci-base-kernel.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-base-kernel.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
 log "cache=miss version=$KERNEL_VERSION architecture=$arch"
@@ -269,8 +269,8 @@ cat > "$(dirname "$output")/kernel.sbom.cdx.json" <<EOF
         {"alg": "SHA-256", "content": "$kernel_sha256"}
       ],
       "properties": [
-        {"name": "secure-oci-base:resolved-config-sha256", "value": "$config_sha256"},
-        {"name": "secure-oci-base:source-archive-sha256", "value": "$KERNEL_SHA256"}
+        {"name": "platform-factory-base:resolved-config-sha256", "value": "$config_sha256"},
+        {"name": "platform-factory-base:source-archive-sha256", "value": "$KERNEL_SHA256"}
       ],
       "externalReferences": [
         {"type": "distribution", "url": "$KERNEL_URL"}

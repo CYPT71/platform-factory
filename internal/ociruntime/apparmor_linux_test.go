@@ -44,7 +44,7 @@ func TestValidAppArmorProfileName(t *testing.T) {
 	}{
 		{"", false},
 		{"docker-default", true},
-		{"secure-oci/example", true},
+		{"platform-factory/example", true},
 		{"has\nnewline", false},
 		{"has\x00nul", false},
 	}
@@ -56,13 +56,13 @@ func TestValidAppArmorProfileName(t *testing.T) {
 }
 
 func TestApparmorProfileListedIn(t *testing.T) {
-	listing := "docker-default (enforce)\nunconfined\nsecure-oci-example (complain)\n"
+	listing := "docker-default (enforce)\nunconfined\nplatform-factory-example (complain)\n"
 	cases := []struct {
 		name string
 		want bool
 	}{
 		{"docker-default", true},
-		{"secure-oci-example", true},
+		{"platform-factory-example", true},
 		{"docker-default-extra", false}, // must not match on a bare prefix
 		{"unconfined", false},           // no "(mode)" suffix in this fixture: not a loaded profile line
 		{"missing", false},
@@ -93,7 +93,7 @@ func TestAppArmorProfileLoadedReportsUnloadedForUnknownProfile(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("reading the loaded-profiles list requires root")
 	}
-	loaded, err := appArmorProfileLoaded("secure-oci-test-definitely-unloaded-profile")
+	loaded, err := appArmorProfileLoaded("platform-factory-test-definitely-unloaded-profile")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestAppArmorProfileLoadedReportsUnloadedForUnknownProfile(t *testing.T) {
 // calling thread does. Skips everywhere that combination isn't available,
 // which is everywhere except a real, privileged CI runner.
 func TestApplyApparmorProfileTransitionsCurrentThread(t *testing.T) {
-	name := "secure-oci-apparmor-test"
+	name := "platform-factory-apparmor-test"
 	loadTestApparmorProfile(t, name)
 
 	loaded, err := appArmorProfileLoaded(name)
@@ -188,7 +188,7 @@ func TestLoadConfigRejectsUnloadedApparmorProfile(t *testing.T) {
 		t.Skip("reading the loaded-profiles list requires root")
 	}
 	bundle := testBundleWithProcess(t, func(p *Process) {
-		p.ApparmorProfile = "secure-oci-test-definitely-unloaded-profile"
+		p.ApparmorProfile = "platform-factory-test-definitely-unloaded-profile"
 	})
 	if _, err := LoadConfig(bundle); err == nil || !strings.Contains(err.Error(), "is not loaded on this host") {
 		t.Fatalf("err=%v", err)
@@ -196,7 +196,7 @@ func TestLoadConfigRejectsUnloadedApparmorProfile(t *testing.T) {
 }
 
 func TestLoadConfigAcceptsLoadedApparmorProfile(t *testing.T) {
-	name := "secure-oci-apparmor-loadconfig-test"
+	name := "platform-factory-apparmor-loadconfig-test"
 	loadTestApparmorProfile(t, name)
 	bundle := testBundleWithProcess(t, func(p *Process) {
 		p.ApparmorProfile = name

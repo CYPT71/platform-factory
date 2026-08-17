@@ -1,0 +1,1 @@
+{"name":"registry-reference-normalized","registry":{"reference":"docker://registry.example/team/app:v1"},"expect":{"valid":true,"target":"registry","repository":"registry.example/team/app","tag":"v1"}}

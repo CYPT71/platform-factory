@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	pipeline "github.com/CYPT71/secure-oci-base/api/pipeline"
+	pipeline "github.com/CYPT71/platform-factory/api/pipeline/v1"
 )
 
 func main() {

@@ -61,6 +61,35 @@ func TestReferenceRuntimeRegistersLanguageContract(t *testing.T) {
 	}
 }
 
+func TestRegisterTypedExposesNativeContextAndRejectsUnknownFields(t *testing.T) {
+	type params struct {
+		Name string `json:"name"`
+	}
+	type result struct{ TraceID, OperationID, Name string }
+	server := NewServer("native", "v1")
+	err := RegisterTyped(server, CapabilityRuntimeStatus, func(ctx context.Context, value params) (result, error) {
+		return result{TraceID: TraceIDFromContext(ctx), OperationID: OperationIDFromContext(ctx), Name: value.Name}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := server.dispatch(context.Background(), Request{ID: "1", Method: "v1.runtime.status", Params: json.RawMessage(`{"name":"app"}`), TraceID: "trace", OperationID: "operation"})
+	if response.Error != nil {
+		t.Fatal(response.Error)
+	}
+	var got result
+	if err := json.Unmarshal(response.Result, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got != (result{TraceID: "trace", OperationID: "operation", Name: "app"}) {
+		t.Fatalf("result=%+v", got)
+	}
+	bad := server.dispatch(context.Background(), Request{ID: "2", Method: "v1.runtime.status", Params: json.RawMessage(`{"name":"app","secret":"no"}`)})
+	if bad.Error == nil {
+		t.Fatal("typed handler accepted an unknown field")
+	}
+}
+
 func TestReferenceRuntimeRejectsIncompleteConfiguration(t *testing.T) {
 	for _, test := range []struct {
 		name, version string

@@ -2,7 +2,7 @@
 // canonical migration documents without depending on host internals.
 package migration
 
-import apimigration "github.com/CYPT71/secure-oci-base/api/migration"
+import apimigration "github.com/CYPT71/platform-factory/api/migration/v1"
 
 // NewPlan creates an unsealed canonical plan. Call Seal after populating it.
 func NewPlan(status apimigration.DiscoveryStatus) apimigration.MigrationPlan {

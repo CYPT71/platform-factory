@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/CYPT71/secure-oci-base/internal/signing"
+	"github.com/CYPT71/platform-factory/internal/signing"
 )
 
 const EnvelopeMediaType = "application/vnd.dsse.envelope.v1+json"

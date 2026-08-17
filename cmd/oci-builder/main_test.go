@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/oci"
+	"github.com/CYPT71/platform-factory/internal/oci"
 )
 
 func TestRunWithoutArgumentsShowsUsage(t *testing.T) {

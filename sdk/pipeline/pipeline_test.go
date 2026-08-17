@@ -5,21 +5,20 @@ import (
 	"strings"
 	"testing"
 
-	pipeline "github.com/CYPT71/secure-oci-base/api/pipeline"
-	v1 "github.com/CYPT71/secure-oci-base/api/v1"
-	public "github.com/CYPT71/secure-oci-base/sdk/pipeline"
+	pipeline "github.com/CYPT71/platform-factory/api/pipeline/v1"
+	public "github.com/CYPT71/platform-factory/sdk/pipeline"
 )
 
 func TestExternalConsumerCanDecodeStablePipeline(t *testing.T) {
 	definition, graph, err := pipeline.Decode(strings.NewReader(`{
-		"api_version":"` + v1.APIVersion + `","name":"sdk-example",
+		"api_version":"` + pipeline.APIVersion + `","name":"sdk-example",
 		"stages":[{"id":"build","command":{"executable":"/bin/build"}},
 		{"id":"package","depends_on":["build"],"command":{"executable":"/bin/package"}}]
 	}`))
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if definition.APIVersion != v1.APIVersion || definition.Name != "sdk-example" {
+	if definition.APIVersion != pipeline.APIVersion || definition.Name != "sdk-example" {
 		t.Fatalf("unexpected definition: %#v", definition)
 	}
 	if got := strings.Join(graph.Order, ","); got != "build,package" {
@@ -27,27 +26,9 @@ func TestExternalConsumerCanDecodeStablePipeline(t *testing.T) {
 	}
 }
 
-// TestExternalConsumerCanDecodeLegacyStablePipeline proves the pre-rebrand
-// secure-oci.dev/v1 wire identifier still decodes during the documented
-// compatibility overlap window (docs/api-compatibility.md) - the decoded
-// field holds exactly what was on the wire, not the current constant, so
-// this compares against v1.LegacyAPIVersion rather than v1.APIVersion.
-func TestExternalConsumerCanDecodeLegacyStablePipeline(t *testing.T) {
-	definition, _, err := pipeline.Decode(strings.NewReader(`{
-		"api_version":"` + v1.LegacyAPIVersion + `","name":"sdk-example",
-		"stages":[{"id":"build","command":{"executable":"/bin/build"}}]
-	}`))
-	if err != nil {
-		t.Fatalf("Decode: %v", err)
-	}
-	if definition.APIVersion != v1.LegacyAPIVersion {
-		t.Fatalf("unexpected definition: %#v", definition)
-	}
-}
-
 func TestExternalConsumerGetsTypedValidationErrors(t *testing.T) {
 	_, _, err := pipeline.Decode(strings.NewReader(`{
-		"api_version":"secure-oci.dev/v1","name":"sdk-example",
+		"api_version":"platform-factory.dev/v1","name":"sdk-example",
 		"stages":[{"id":"build","depends_on":["missing"],"command":{"executable":"/bin/build"}}
 		]
 	}`))
@@ -61,8 +42,8 @@ func TestExternalConsumerGetsTypedValidationErrors(t *testing.T) {
 }
 
 func TestExternalConsumerCanFingerprintWithoutMutation(t *testing.T) {
-	definition := v1.Pipeline{APIVersion: v1.APIVersion, Name: "sdk-example", Stages: []v1.Stage{{
-		ID: "build", Command: v1.Command{Executable: "/bin/build"}, Env: map[string]string{"B": "2", "A": "1"},
+	definition := pipeline.Pipeline{APIVersion: pipeline.APIVersion, Name: "sdk-example", Stages: []pipeline.Stage{{
+		ID: "build", Command: pipeline.Command{Executable: "/bin/build"}, Env: map[string]string{"B": "2", "A": "1"},
 	}}}
 	first, err := pipeline.Fingerprint(definition)
 	if err != nil {
@@ -81,8 +62,8 @@ func TestExternalConsumerCanFingerprintWithoutMutation(t *testing.T) {
 }
 
 func TestExternalConsumerCanAnalyzeAndCanonicalize(t *testing.T) {
-	definition := v1.Pipeline{APIVersion: v1.APIVersion, Name: "sdk-example", Stages: []v1.Stage{{
-		ID: "build", Command: v1.Command{Executable: "/bin/build"},
+	definition := pipeline.Pipeline{APIVersion: pipeline.APIVersion, Name: "sdk-example", Stages: []pipeline.Stage{{
+		ID: "build", Command: pipeline.Command{Executable: "/bin/build"},
 	}}}
 	graph, err := pipeline.Analyze(definition)
 	if err != nil || len(graph.Order) != 1 || graph.Order[0] != "build" {

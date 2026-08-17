@@ -1,13 +1,13 @@
 # Project Maintainers
 
-This document lists the current maintainers of the secure-oci project and their areas
+This document lists the current maintainers of the platform-factory project and their areas
 of responsibility.
 
 ## Active Maintainers
 
 | Name | GitHub Username | Role | Areas of Responsibility | Contact |
 |------|----------------|------|------------------------|---------|
-| Cyprien | @CYPT71 | Project Lead | Overall project, architecture, release management | cyprien@secure-oci.dev |
+| Cyprien | @CYPT71 | Project Lead | Overall project, architecture, release management | cyprien@platform-factory.dev |
 
 ## Teams
 
@@ -19,7 +19,7 @@ of responsibility.
   - TLS/mTLS implementation
   - Key management
   - Security audits
-- **Contact**: security@secure-oci.dev
+- **Contact**: security@platform-factory.dev
 
 ### Registry Team
 - **Lead**: Cyprien (@CYPT71)
@@ -123,8 +123,8 @@ Maintainers who are no longer able to fulfill their responsibilities should:
 
 ## Contact
 
-For general inquiries: info@secure-oci.dev
-For security issues: security@secure-oci.dev
+For general inquiries: info@platform-factory.dev
+For security issues: security@platform-factory.dev
 
 ## Meeting Schedule
 

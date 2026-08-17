@@ -43,11 +43,7 @@ func FromJournal(reader io.Reader, builderID string) (JournalPredicate, error) {
 	if decoder.Decode(&struct{}{}) != io.EOF {
 		return JournalPredicate{}, errors.New("provenance: journal must contain exactly one JSON object")
 	}
-	// secure-oci.dev/journal/v1 is the pre-rebrand identifier, still
-	// accepted for the documented compatibility overlap window (see
-	// docs/api-compatibility.md) - a journal retained as provenance
-	// evidence may have been written well before this rename.
-	if v := journal["api_version"]; v != "platform-factory.dev/journal/v1" && v != "secure-oci.dev/journal/v1" {
+	if v := journal["api_version"]; v != "platform-factory.dev/journal/v1" {
 		return JournalPredicate{}, errors.New("provenance: unsupported journal api_version")
 	}
 	fingerprint, _ := journal["pipeline_fingerprint"].(string)

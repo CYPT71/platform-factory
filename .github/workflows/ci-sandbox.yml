@@ -61,6 +61,16 @@ jobs:
           sudo systemd-run --scope --property=Delegate=yes \
             env "PATH=$PATH" GOTOOLCHAIN=local \
             /tmp/sandbox.test -test.count=1 -test.v
+      - name: Prove the VMM supervisor PID namespace lifecycle as root
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go test -c ./internal/ociruntime -o /tmp/ociruntime.test
+          sudo systemd-run --scope --property=Delegate=yes \
+            env "PATH=$PATH" GOTOOLCHAIN=local \
+            /tmp/ociruntime.test \
+            -test.run '^Test(LaunchSupervisorPublishesHostPIDWhileChildIsNamespacePIDOne|PersistedReadDoesNotReconcileHostPID|SupervisorRequestIdentityIsIndependentFromNamespacePID)$' \
+            -test.count=1 -test.v
       - name: Confirm the VMM host sandbox skips cleanly when unavailable
         env: {GOTOOLCHAIN: local}
         run: |

@@ -1,0 +1,111 @@
+{
+  "version": 4,
+  "targets": {
+    "net8.0": {
+      "SecureOci.Plugin/1.0.0": {
+        "type": "project",
+        "framework": ".NETCoreApp,Version=v8.0",
+        "compile": {
+          "bin/placeholder/SecureOci.Plugin.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/SecureOci.Plugin.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "SecureOci.Plugin/1.0.0": {
+      "type": "project",
+      "path": "../../../sdk/plugin-csharp/SecureOci.Plugin.csproj",
+      "msbuildProject": "../../../sdk/plugin-csharp/SecureOci.Plugin.csproj"
+    }
+  },
+  "projectFileDependencyGroups": {
+    "net8.0": [
+      "SecureOci.Plugin >= 1.0.0"
+    ]
+  },
+  "packageFolders": {
+    "/Users/cyprien/.nuget/packages/": {}
+  },
+  "project": {
+    "version": "1.0.0",
+    "restore": {
+      "projectUniqueName": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/examples/sdk/plugin-csharp-lazy-docker/LazyDockerPlugin.csproj",
+      "projectName": "LazyDockerPlugin",
+      "projectPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/examples/sdk/plugin-csharp-lazy-docker/LazyDockerPlugin.csproj",
+      "packagesPath": "/Users/cyprien/.nuget/packages/",
+      "outputPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/examples/sdk/plugin-csharp-lazy-docker/obj/",
+      "projectStyle": "PackageReference",
+      "configFilePaths": [
+        "/Users/cyprien/.nuget/NuGet/NuGet.Config"
+      ],
+      "originalTargetFrameworks": [
+        "net8.0"
+      ],
+      "sources": {
+        "https://api.nuget.org/v3/index.json": {}
+      },
+      "frameworks": {
+        "net8.0": {
+          "framework": "net8.0",
+          "targetAlias": "net8.0",
+          "projectReferences": {
+            "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/sdk/plugin-csharp/SecureOci.Plugin.csproj": {
+              "projectPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/sdk/plugin-csharp/SecureOci.Plugin.csproj"
+            }
+          }
+        }
+      },
+      "warningProperties": {
+        "warnAsError": [
+          "NU1605"
+        ]
+      },
+      "restoreAuditProperties": {
+        "enableAudit": "true",
+        "auditLevel": "low",
+        "auditMode": "direct"
+      },
+      "SdkAnalysisLevel": "10.0.300"
+    },
+    "frameworks": {
+      "net8.0": {
+        "framework": "net8.0",
+        "targetAlias": "net8.0",
+        "imports": [
+          "net461",
+          "net462",
+          "net47",
+          "net471",
+          "net472",
+          "net48",
+          "net481"
+        ],
+        "assetTargetFallback": true,
+        "warn": true,
+        "downloadDependencies": [
+          {
+            "name": "Microsoft.AspNetCore.App.Ref",
+            "version": "[8.0.29, 8.0.29]"
+          },
+          {
+            "name": "Microsoft.NETCore.App.Host.osx-arm64",
+            "version": "[8.0.29, 8.0.29]"
+          },
+          {
+            "name": "Microsoft.NETCore.App.Ref",
+            "version": "[8.0.29, 8.0.29]"
+          }
+        ],
+        "frameworkReferences": {
+          "Microsoft.NETCore.App": {
+            "privateAssets": "all"
+          }
+        },
+        "runtimeIdentifierGraphPath": "/usr/local/share/dotnet/sdk/10.0.302/PortableRuntimeIdentifierGraph.json"
+      }
+    }
+  }
+}

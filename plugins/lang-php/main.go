@@ -1,17 +1,3 @@
-// platform-factory-lang-php is the PHP language plugin - see
-// plugins/lang-python/main.go for the full pattern this mirrors and
-// docs/language-plugin-layers.md for the architecture. Only the
-// freeze/deps-location specifics differ per language; every plugin
-// shares its tar-packaging logic via sdk/langplugin instead of
-// duplicating it.
-//
-//	platform-factory-lang-php freeze --root DIR
-//	platform-factory-lang-php build-layer --root DIR --output TAR --dest PREFIX
-//
-// freeze mirrors the host's own built-in PHP freeze step exactly:
-// `composer install --no-dev --prefer-dist --no-interaction`. Composer's
-// own default install location, ./vendor, needs no redirection - like
-// npm and Bundler, Composer has no global package cache to opt out of.
 package main
 
 import (
@@ -19,24 +5,17 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
-	"github.com/CYPT71/secure-oci-base/sdk/langplugin"
+	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-	var err error
-	switch os.Args[1] {
-	case "freeze":
-		err = runFreeze(os.Args[2:])
-	case "build-layer":
-		err = runBuildLayer(os.Args[2:])
-	default:
+	err := langplugin.Dispatch(os.Args[1:], map[string]langplugin.Handler{
+		"inspect": runInspect, "scaffold": runScaffold,
+		"freeze": runFreeze, "build-layer": runBuildLayer,
+	})
+	if err == langplugin.ErrUsage {
 		usage()
 		os.Exit(2)
 	}
@@ -46,10 +25,52 @@ func main() {
 	}
 }
 
+func runScaffold(args []string) error {
+	flags := flag.NewFlagSet("scaffold", flag.ContinueOnError)
+	name := flags.String("name", "", "plugin name")
+	output := flags.String("output", "", "output directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" || *output == "" {
+		return errors.New("--name and --output are required")
+	}
+	if err := os.MkdirAll(*output, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(*output)
+	if err != nil {
+		return err
+	}
+	if len(entries) != 0 {
+		return errors.New("output directory must be empty")
+	}
+	source := fmt.Sprintf("#!/usr/bin/env php\n<?php echo json_encode(['match'=>false,'language'=>'%s','profile'=>'unknown','evidence'=>[],'dependencies'=>['mode'=>'unknown','reason'=>'customize me']]);\n", *name)
+	path := filepath.Join(*output, "plugin.php")
+	if err := os.WriteFile(path, []byte(source), 0o755); err != nil {
+		return err
+	}
+	fmt.Println(path)
+	return nil
+}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: platform-factory-lang-php <freeze|build-layer> [OPTIONS]")
+	fmt.Fprintln(os.Stderr, "usage: platform-factory-lang-php <inspect|freeze|build-layer> [OPTIONS]")
+	fmt.Fprintln(os.Stderr, "  inspect --root DIR")
 	fmt.Fprintln(os.Stderr, "  freeze --root DIR")
 	fmt.Fprintln(os.Stderr, "  build-layer --root DIR --output TAR --dest PREFIX")
+}
+
+func runInspect(args []string) error {
+	root, err := langplugin.ParseRootFlag("inspect", args)
+	if err != nil {
+		return err
+	}
+	result, err := langplugin.Inspect(root, langplugin.Definition{Language: "php", Profile: "php", Markers: []string{"composer.json", "composer.lock"}, SourceExtensions: []string{".php"}, Entrypoints: []string{"public/index.php", "index.php"}, Manifests: []string{"composer.json"}})
+	if err != nil {
+		return err
+	}
+	return langplugin.WriteInspection(result)
 }
 
 // depsRelPath is Composer's own default install location - identical to
@@ -57,61 +78,16 @@ func usage() {
 const depsRelPath = "vendor"
 
 func runFreeze(args []string) error {
-	root, err := parseRootFlag("freeze", args)
+	root, err := langplugin.ParseRootFlag("freeze", args)
 	if err != nil {
 		return err
 	}
-	if err := runIn(root, "composer", "install", "--no-dev", "--prefer-dist", "--no-interaction"); err != nil {
+	if err := langplugin.RunIn(root, "composer", "install", "--no-dev", "--prefer-dist", "--no-interaction"); err != nil {
 		return fmt.Errorf("composer install: %w", err)
 	}
 	return nil
 }
 
 func runBuildLayer(args []string) error {
-	root, output, dest, err := parseBuildLayerFlags(args)
-	if err != nil {
-		return err
-	}
-	source := filepath.Join(root, depsRelPath)
-	info, err := os.Stat(source)
-	if err != nil {
-		return fmt.Errorf("%s does not exist - run `platform-factory-lang-php freeze` first: %w", depsRelPath, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", depsRelPath)
-	}
-	return langplugin.WriteDeterministicTar(source, dest, output)
-}
-func runIn(dir, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func parseRootFlag(subcommand string, args []string) (root string, err error) {
-	flags := flag.NewFlagSet(subcommand, flag.ContinueOnError)
-	rootFlag := flags.String("root", "", "project root directory")
-	if err := flags.Parse(args); err != nil {
-		return "", err
-	}
-	if *rootFlag == "" {
-		return "", errors.New("--root is required")
-	}
-	return *rootFlag, nil
-}
-
-func parseBuildLayerFlags(args []string) (root, output, dest string, err error) {
-	flags := flag.NewFlagSet("build-layer", flag.ContinueOnError)
-	rootFlag := flags.String("root", "", "project root directory")
-	outputFlag := flags.String("output", "", "path to write the uncompressed tar layer to")
-	destFlag := flags.String("dest", "", "container path prefix every entry in the layer is rooted at")
-	if err := flags.Parse(args); err != nil {
-		return "", "", "", err
-	}
-	if *rootFlag == "" || *outputFlag == "" || *destFlag == "" {
-		return "", "", "", errors.New("--root, --output, and --dest are all required")
-	}
-	return *rootFlag, *outputFlag, *destFlag, nil
+	return langplugin.BuildLayer(args, depsRelPath, "platform-factory-lang-php")
 }

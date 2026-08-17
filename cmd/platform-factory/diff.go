@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/CYPT71/secure-oci-base/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/layout"
 )
 
 // runDiff compares two OCI layouts and explains every divergence.
@@ -38,7 +38,10 @@ func runDiff(args []string, stdout, stderr io.Writer) int {
 	if *outputFormat == "text" {
 		report.WriteText(stdout)
 	} else {
-		encoded, _ := json.MarshalIndent(report, "", "  ")
+		encoded, _ := json.MarshalIndent(struct {
+			APIVersion string `json:"api_version"`
+			layout.DiffReport
+		}{APIVersion: cliOutputAPIVersion, DiffReport: report}, "", "  ")
 		fmt.Fprintln(stdout, string(encoded))
 	}
 	if !report.Equal {

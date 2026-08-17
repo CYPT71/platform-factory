@@ -15,13 +15,13 @@ import (
 	"sync"
 	"testing"
 
-	appmigration "github.com/CYPT71/secure-oci-base/internal/app/migration"
+	appmigration "github.com/CYPT71/platform-factory/internal/app/migration"
 )
 
 // thirdPartyPluginPath builds testdata/thirdparty — a separate Go module
 // that imports only the public sdk/plugin SDK — with the module proxy
 // disabled, proving the plugin builds out of tree, offline, without the
-// secure-oci core being recompiled or its internals exposed.
+// platform-factory core being recompiled or its internals exposed.
 var thirdPartyPluginPath = sync.OnceValues(func() (string, error) {
 	dir, err := os.MkdirTemp("", "platform-factory-zig-plugin-*")
 	if err != nil {
@@ -204,7 +204,9 @@ func TestVerifyAndStartRefusesUnavailableSandboxByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := pluginSandboxWrapper
-	pluginSandboxWrapper = func(*exec.Cmd) error { return errors.New("sandbox unavailable (stub)") }
+	pluginSandboxWrapper = func(*exec.Cmd, PluginFamily, PluginPermissions) error {
+		return errors.New("sandbox unavailable (stub)")
+	}
 	defer func() { pluginSandboxWrapper = original }()
 	if client, err := VerifyAndStart(context.Background(), discovered[0].Dir, discovered[0].Manifest,
 		TrustPolicy{Keys: []ed25519.PublicKey{public}}); err == nil {
@@ -215,11 +217,8 @@ func TestVerifyAndStartRefusesUnavailableSandboxByDefault(t *testing.T) {
 	}
 }
 
-// TestVerifyAndStartRefusesARevokedPlugin is the end-to-end proof for
-// Sanetizer-todo.md item 15's revocation policy: a properly signed,
-// digest-matching plugin that would otherwise start must still be
-// refused once its digest or signing key is revoked - revocation wins
-// even over a currently-valid signature.
+// TestVerifyAndStartRefusesARevokedPlugin verifies that revocation takes
+// precedence over an otherwise valid signature.
 func TestVerifyAndStartRefusesARevokedPlugin(t *testing.T) {
 	root, public := installThirdPartyPlugin(t, true)
 	discovered, err := Discover(root)

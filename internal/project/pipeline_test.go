@@ -3,7 +3,7 @@ package project
 import (
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/pipeline"
+	"github.com/CYPT71/platform-factory/internal/pipeline"
 )
 
 func TestLoadedPipelineTranslatesFreezeAndBuild(t *testing.T) {

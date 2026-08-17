@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prove that Podman owns and administers a real secure-oci native-KVM
+# Prove that Podman owns and administers a real platform-factory native-KVM
 # MicroVM through the OCI runtime contract. This requires Linux/amd64 and
 # /dev/kvm; it deliberately has no contract-only fallback.
 set -euo pipefail
@@ -40,7 +40,7 @@ scripts/microvm/install-podman-runtime.sh \
   | tee "$evidence_dir/podman-microvm-install.txt"
 podman info --format json >"$evidence_dir/podman-microvm-info.json"
 
-archive=$(mktemp "${TMPDIR:-/tmp}/secure-oci-podman-layout.XXXXXX.tar")
+archive=$(mktemp "${TMPDIR:-/tmp}/platform-factory-podman-layout.XXXXXX.tar")
 trap 'rm -f "$archive"; cleanup' EXIT
 tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
   -C "$layout" -cf "$archive" .

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	typederrors "github.com/CYPT71/secure-oci-base/internal/errors"
+	typederrors "github.com/CYPT71/platform-factory/internal/errors"
 )
 
 func TestRegisterWorkerRejectsEmptyFields(t *testing.T) {

@@ -124,13 +124,16 @@ func (blk *virtioBlkDevice) processQueue(device *virtioMMIODevice, q *virtQueue)
 // device-readable virtio_blk_outhdr, zero or more data descriptors, and a
 // trailing device-writable status byte (spec 5.2.6.2). It always writes a
 // status byte - VIRTIO_BLK_S_UNSUPP for a request type this device does
-// not implement - rather than returning an error for anything the guest
-// itself controls (request type, sector, buffer layout): a malformed or
-// unsupported *request* is the guest driver's problem, reported back to it
-// exactly as the spec provides for, not a VMM-level fault. An error return
-// here is reserved for guest memory the descriptor chain itself points
-// outside of, which readChain already catches before handleRequest ever
-// sees it, and for host-side backend I/O failures under VIRTIO_BLK_T_FLUSH.
+// not implement, VIRTIO_BLK_S_IOERR for a backend I/O failure on any
+// request type including VIRTIO_BLK_T_FLUSH - rather than returning an
+// error for anything the guest itself controls or any failure the guest's
+// own backing storage can produce: a malformed/unsupported *request* is
+// the guest driver's problem, and a failed flush is the same kind of
+// storage-level failure a real disk reports, both handled back to the
+// guest exactly as the spec provides for, not a VMM-level fault. An error
+// return here is reserved for guest memory the descriptor chain itself
+// points outside of, which readChain already catches before handleRequest
+// ever sees it.
 func (blk *virtioBlkDevice) handleRequest(chain []virtqDescriptor) (uint32, error) {
 	if len(chain) < 2 {
 		return 0, errors.New("vmm: virtio-blk: request chain has fewer than the required header+status descriptors")
@@ -181,7 +184,7 @@ func (blk *virtioBlkDevice) handleRequest(chain []virtqDescriptor) (uint32, erro
 		}
 	case virtioBlkTypeFlush:
 		if err := blk.backend.Sync(); err != nil {
-			return 0, fmt.Errorf("vmm: virtio-blk: flush: %w", err)
+			result = virtioBlkStatusIOErr
 		}
 	case virtioBlkTypeGetID:
 		if len(data) != 1 || !data[0].deviceWrite {

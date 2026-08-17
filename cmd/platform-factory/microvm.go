@@ -8,22 +8,29 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 
-	"github.com/CYPT71/secure-oci-base/internal/directboot"
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor"
-	"github.com/CYPT71/secure-oci-base/internal/microvm"
-	"github.com/CYPT71/secure-oci-base/internal/networking"
-	"github.com/CYPT71/secure-oci-base/internal/vmdisk"
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
+	"github.com/CYPT71/platform-factory/internal/directboot"
+	"github.com/CYPT71/platform-factory/internal/hypervisor"
+	"github.com/CYPT71/platform-factory/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/networking"
+	"github.com/CYPT71/platform-factory/internal/vmdisk"
+	api "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 func runMicroVM(args []string, stdout, stderr io.Writer, execute microVMExecutor) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: platform-factory microvm <probe|create|delete|logs|package|restart|run|run-legacy-disk|start|status|stop> [OPTIONS]")
+		fmt.Fprintln(stderr, "usage: platform-factory microvm <probe|create|delete|inspect-legacy-disk|logs|package|rbac|restart|run|run-legacy-disk|start|status|stop> [OPTIONS]")
 		return 2
 	}
 	action := args[0]
+	if action == "-h" || action == "--help" || action == "help" {
+		fmt.Fprintln(stdout, "usage: platform-factory microvm <probe|create|delete|inspect-legacy-disk|logs|package|rbac|restart|run|run-legacy-disk|start|status|stop> [OPTIONS]")
+		return 0
+	}
 	if action == "__run-native" {
 		return runNativeKVMSubcommand(args[1:], stdout, stderr)
 	}
@@ -48,13 +55,17 @@ func runMicroVM(args []string, stdout, stderr io.Writer, execute microVMExecutor
 	flags.Var(&publishes, "port", "alias for --publish; repeatable; a single PORT remains supported")
 	flags.Var(&publishes, "p", "short alias for --publish; repeatable")
 	runner := flags.String("native-runner", "scripts/microvm/run-microvm.sh", "native backend runner")
+	requireNative := flags.Bool("require-native", false, "fail closed instead of falling back to the QEMU-based runner when the native KVM/HVF backend is not eligible (see nativeKVMEligible)")
 	legacyDiskRunner := flags.String("legacy-disk-runner", "scripts/microvm/run-legacy-disk.sh", "legacy-disk BIOS-boot runner")
 	var diskImages repeatedFlag
 	flags.Var(&diskImages, "disk", "legacy VM disk image (run-legacy-disk): RAW/QCOW2/VMDK/VHD/VHDX/ISO; repeatable for a multi-disk project - boots via BIOS/OVMF and the disks' own bootloader instead of platform-factory's own kernel")
-	bootDiskOverride := flags.String("boot-disk", "", "run-legacy-disk: which --disk is the boot/OS disk, when it can't be (or shouldn't be) auto-detected; must match one of --disk exactly")
+	bootDiskOverride := flags.String("boot-disk", "", "run-legacy-disk/inspect-legacy-disk: which --disk is the boot/OS disk, when it can't be (or shouldn't be) auto-detected; must match one of --disk exactly")
+	reportDir := flags.String("report-dir", "reports", "inspect-legacy-disk: directory to write discovery.json/discovery.txt into")
+	strategy := flags.String("strategy", "auto", "inspect-legacy-disk: auto, container, microvm-oci, microvm-direct, vm-encapsulation, or unsupported")
 	bootPreparer := flags.String("boot-preparer", "scripts/microvm/prepare-kubevirt-boot.sh", "KubeVirt boot-context preparer")
 	output := flags.String("output", "", "new output directory for microvm package")
 	apply := flags.Bool("apply", false, "apply create output using kubectl")
+	pluginFlags := registerPluginFlags(flags)
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
 		flags.Usage()
 		return 2
@@ -88,6 +99,9 @@ func runMicroVM(args []string, stdout, stderr io.Writer, execute microVMExecutor
 		}
 		return executeMicroVM(*legacyDiskRunner, runnerArgs, nil, nil, stdout, stderr, execute)
 	}
+	if action == "inspect-legacy-disk" {
+		return runInspectLegacyDisk(diskImages, *bootDiskOverride, *reportDir, vmdisk.ExecutionMode(*strategy), stdout, stderr)
+	}
 	if action == "probe" {
 		if *backend != "native" {
 			fmt.Fprintln(stderr, "platform-factory microvm probe: only the native backend can be probed")
@@ -98,7 +112,10 @@ func runMicroVM(args []string, stdout, stderr io.Writer, execute microVMExecutor
 			fmt.Fprintf(stderr, "platform-factory microvm probe: %v\n", err)
 			return 1
 		}
-		encoded, _ := json.MarshalIndent(capabilities, "", "  ")
+		encoded, _ := json.MarshalIndent(struct {
+			APIVersion string `json:"api_version"`
+			microvm.Capabilities
+		}{APIVersion: cliOutputAPIVersion, Capabilities: capabilities}, "", "  ")
 		fmt.Fprintln(stdout, string(encoded))
 		if !capabilities.Available {
 			return 1
@@ -110,8 +127,8 @@ func runMicroVM(args []string, stdout, stderr io.Writer, execute microVMExecutor
 			fmt.Fprintln(stderr, "platform-factory microvm: --layout and --kernel are mutually exclusive")
 			return 2
 		}
-		if *memory < 64 || *memory > 1<<20 || *vcpus < 1 || *vcpus > 256 {
-			fmt.Fprintln(stderr, "platform-factory microvm: direct boot requires 64..1048576 MiB and 1..256 vCPUs")
+		if *memory < microvm.MinMemoryMiB || *memory > microvm.MaxMemoryMiB || *vcpus < 1 || *vcpus > microvm.MaxVCPUs {
+			fmt.Fprintf(stderr, "platform-factory microvm: direct boot requires %d..%d MiB and 1..%d vCPUs\n", microvm.MinMemoryMiB, microvm.MaxMemoryMiB, microvm.MaxVCPUs)
 			return 2
 		}
 		cmdline := *commandLine
@@ -173,16 +190,22 @@ func runMicroVM(args []string, stdout, stderr io.Writer, execute microVMExecutor
 			fmt.Fprintf(stderr, "platform-factory microvm: %v\n", err)
 			return 2
 		}
-		return runNative(action, spec, *runner, stdout, stderr, execute)
+		return runNative(action, spec, *runner, *requireNative, stdout, stderr, execute)
 	case "kubevirt":
-		return runKubeVirt(action, spec, publishes, *apply, stdout, stderr, execute)
+		return runKubeVirt(context.Background(), action, spec, publishes, *apply, pluginFlags, stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, "platform-factory microvm: backend must be native or kubevirt")
 		return 2
 	}
 }
 
-func runNative(action string, spec microvm.Spec, runner string, stdout, stderr io.Writer, execute microVMExecutor) int {
+// qemuFallbackRefused reports that --require-native forbids QEMU fallback.
+func qemuFallbackRefused(reason string, stderr io.Writer) int {
+	fmt.Fprintf(stderr, "platform-factory microvm: native KVM backend not used (%s); refusing to fall back to the QEMU-based runner because --require-native was set\n", reason)
+	return 1
+}
+
+func runNative(action string, spec microvm.Spec, runner string, requireNative bool, stdout, stderr io.Writer, execute microVMExecutor) int {
 	unit := "platform-factory-microvm-" + spec.Name + ".service"
 	switch action {
 	case "run":
@@ -195,6 +218,9 @@ func runNative(action string, spec microvm.Spec, runner string, stdout, stderr i
 				return 1
 			}
 			return executeMicroVM(self, nativeRunArgs(spec), nil, nil, stdout, stderr, execute)
+		}
+		if requireNative {
+			return qemuFallbackRefused(reason, stderr)
 		}
 		fmt.Fprintf(stderr, "platform-factory microvm: native KVM backend not used (%s); falling back to %s\n", reason, runner)
 		return executeMicroVM(runner, []string{spec.Layout, strconv.Itoa(spec.Port)}, microvm.NativeEnvironment(spec), nil, stdout, stderr, execute)
@@ -217,6 +243,9 @@ func runNative(action string, spec microvm.Spec, runner string, stdout, stderr i
 			args = append(args, self)
 			args = append(args, nativeRunArgs(spec)...)
 			return executeMicroVM("systemd-run", args, nil, nil, stdout, stderr, execute)
+		}
+		if requireNative {
+			return qemuFallbackRefused(reason, stderr)
 		}
 		fmt.Fprintf(stderr, "platform-factory microvm: native KVM backend not used (%s); falling back to %s\n", reason, runner)
 		for _, value := range microvm.NativeEnvironment(spec) {
@@ -246,32 +275,191 @@ func runNative(action string, spec microvm.Spec, runner string, stdout, stderr i
 	}
 }
 
-// runKubeVirt shells out to the plugins/kubevirt module's own CLI rather
-// than importing it: the main module owns the microVM (native) and OCI
-// runtime interfaces directly, but every other runtime-engine integration -
-// containerd, KubeVirt - is an out-of-module plugin the main module only
-// ever drives through a subprocess boundary, matching
-// plugins/containerd/cmd/platform-factory-shim. platform-factory-kubevirt performs its
-// own KubeVirt-specific spec validation and manifest rendering; this
-// function only forwards flags and propagates its exit code.
-func runKubeVirt(action string, spec microvm.Spec, publishes repeatedFlag, apply bool, stdout, stderr io.Writer, execute microVMExecutor) int {
-	args := []string{
-		action,
-		"--name", spec.Name,
-		"--namespace", spec.Namespace,
-		"--image", spec.Image,
-		"--arch", spec.Arch,
-		"--memory-mib", strconv.Itoa(spec.MemoryMiB),
-		"--vcpus", strconv.Itoa(spec.VCPUs),
-		"--listen-address", spec.Listen,
+// kubevirtParams is the JSON wire shape platform-factory-kubevirt's own
+// specParams (plugins/kubevirt/cmd/platform-factory-kubevirt/main.go)
+// decodes - kept as an independent, explicitly JSON-tagged type here rather
+// than a shared import, the same way any two independent RPC processes
+// agree on a wire contract without sharing a Go type for it.
+type kubevirtParams struct {
+	Name          string   `json:"name"`
+	Namespace     string   `json:"namespace"`
+	Image         string   `json:"image,omitempty"`
+	Arch          string   `json:"arch,omitempty"`
+	MemoryMiB     int      `json:"memory_mib,omitempty"`
+	VCPUs         int      `json:"vcpus,omitempty"`
+	ListenAddress string   `json:"listen_address,omitempty"`
+	Publishes     []string `json:"publishes,omitempty"`
+	Apply         bool     `json:"apply,omitempty"`
+}
+
+// kubevirtResult is the union of platform-factory-kubevirt's manifestResult
+// and commandResult - every field is optional because which ones a given
+// capability populates differs (a lifecycle action returns Output; create
+// and rbac return Manifest, and Applied/Output only when apply was set).
+type kubevirtResult struct {
+	Manifest string `json:"manifest,omitempty"`
+	Applied  bool   `json:"applied,omitempty"`
+	Output   string `json:"output,omitempty"`
+}
+
+// kubevirtCapability maps a microvm action to the runtime.* capability
+// platform-factory-kubevirt declares for it, and whether that capability
+// mutates cluster state - status and logs are pure observations and go
+// through pluginClient.Call; every other action can create, change or
+// delete a real VirtualMachine and must go through CallWithIdempotency so a
+// crash-and-retry can never repeat its effect, the same guarantee publish/
+// deploy/rollback already give their own (non-plugin) mutations.
+func kubevirtCapability(action string) (capability string, mutating bool, err error) {
+	switch action {
+	case "create":
+		return api.CapabilityRuntimeCreate, true, nil
+	case "start":
+		return api.CapabilityRuntimeStart, true, nil
+	case "stop":
+		return api.CapabilityRuntimeStop, true, nil
+	case "restart":
+		return api.CapabilityRuntimeRestart, true, nil
+	case "delete":
+		return api.CapabilityRuntimeDelete, true, nil
+	case "status":
+		return api.CapabilityRuntimeStatus, false, nil
+	case "logs":
+		return api.CapabilityRuntimeLogs, false, nil
+	case "rbac":
+		return api.CapabilityRuntimeRBAC, true, nil
+	default:
+		return "", false, fmt.Errorf("unsupported kubevirt action %q", action)
 	}
-	for _, value := range publishes {
-		args = append(args, "--publish", value)
+}
+
+// runKubeVirt dispatches to a real, discovered, verified and sandboxed
+// KubeVirt plugin by capability, rather than shelling out to a hardcoded
+// binary name the way an earlier version of this function did (see
+// mvp.md's own account of that gap): --backend=kubevirt is a legitimate,
+// explicit user selection of which backend to drive, but which concrete
+// plugin actually implements it, and whether that plugin is trusted to
+// run at all, now goes through the same declared->discovered->negotiated->
+// verified->available lifecycle every other plugin capability
+// (detect/freeze/plan) already does, via pluginFlags (the same
+// --plugin-dir/--plugin-key/--allow-*-plugin flags every other
+// plugin-consuming command already exposes).
+func runKubeVirt(ctx context.Context, action string, spec microvm.Spec, publishes repeatedFlag, apply bool, pluginFlags *pluginOptions, stdout, stderr io.Writer) int {
+	journal, err := operationJournalFor()
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm: %v\n", err)
+		return 1
 	}
-	if apply {
-		args = append(args, "--apply")
+	host, err := pluginFlags.startWithJournal(ctx, journal)
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm: %v\n", err)
+		return 1
 	}
-	return executeMicroVM("platform-factory-kubevirt", args, nil, nil, stdout, stderr, execute)
+	defer host.Close()
+	return dispatchKubeVirt(ctx, host, action, spec, publishes, apply, stdout, stderr)
+}
+
+// dispatchKubeVirt is runKubeVirt's testable core: given an already
+// discovered-and-started pluginHost (real or, in tests, a stub - the same
+// separation detect/freeze/planNotes already use), it resolves action to a
+// capability, calls it and formats the result. Split out from runKubeVirt
+// so tests can exercise capability routing and idempotency without a real
+// plugin subprocess, the same way TestPluginHostDetectFreezeAndNotes tests
+// pluginHost directly instead of through a CLI command's flag parsing.
+func dispatchKubeVirt(ctx context.Context, host *pluginHost, action string, spec microvm.Spec, publishes repeatedFlag, apply bool, stdout, stderr io.Writer) int {
+	capability, mutating, err := kubevirtCapability(action)
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm: %v\n", err)
+		return 2
+	}
+	client, found := host.findCapability(capability)
+	if !found {
+		fmt.Fprintf(stderr, "platform-factory microvm: no installed plugin provides %s; pass --plugin-dir pointing at a directory containing the kubevirt plugin (see docs/containerd-kubernetes.md)\n", capability)
+		return 1
+	}
+
+	params := kubevirtParams{
+		Name: spec.Name, Namespace: spec.Namespace, Image: spec.Image, Arch: spec.Arch,
+		MemoryMiB: spec.MemoryMiB, VCPUs: spec.VCPUs, ListenAddress: spec.Listen,
+		Publishes: []string(publishes), Apply: apply,
+	}
+	var result kubevirtResult
+	if mutating {
+		operationID := cliOperationID("kubevirt-microvm", action, spec.Namespace, spec.Name, spec.Image,
+			strconv.Itoa(spec.MemoryMiB), strconv.Itoa(spec.VCPUs), strconv.FormatBool(apply))
+		err = client.CallWithIdempotency(ctx, operationID, "v1."+capability, params, &result)
+	} else {
+		err = client.Call(ctx, "v1."+capability, params, &result)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm: %v\n", err)
+		return 1
+	}
+	if result.Manifest != "" {
+		fmt.Fprintln(stdout, result.Manifest)
+	}
+	if result.Output != "" {
+		fmt.Fprintln(stdout, result.Output)
+	}
+	return 0
+}
+
+// runInspectLegacyDisk reports read-only disk metadata without mounting or
+// interpreting filesystems. Boot-disk ambiguity is reported, not fatal.
+func runInspectLegacyDisk(diskImages []string, bootDiskOverride, reportDir string, strategy vmdisk.ExecutionMode, stdout, stderr io.Writer) int {
+	if len(diskImages) == 0 {
+		fmt.Fprintln(stderr, "platform-factory microvm inspect-legacy-disk: at least one --disk is required")
+		return 2
+	}
+	report, err := vmdisk.BuildDiscoveryReport(diskImages, bootDiskOverride)
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: %v\n", err)
+		return 1
+	}
+	compatibility, err := vmdisk.BuildCompatibilityReport(report, strategy)
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: %v\n", err)
+		return 2
+	}
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: create %s: %v\n", reportDir, err)
+		return 1
+	}
+	encoded, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: encode report: %v\n", err)
+		return 1
+	}
+	jsonPath := filepath.Join(reportDir, "discovery.json")
+	if err := atomicfile.Write(reportDir, "discovery.json", encoded, 0o644, true); err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: write %s: %v\n", jsonPath, err)
+		return 1
+	}
+	text := report.RenderText()
+	textPath := filepath.Join(reportDir, "discovery.txt")
+	if err := atomicfile.Write(reportDir, "discovery.txt", []byte(text), 0o644, true); err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: write %s: %v\n", textPath, err)
+		return 1
+	}
+	compatibilityJSON, err := json.MarshalIndent(compatibility, "", "  ")
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: encode compatibility report: %v\n", err)
+		return 1
+	}
+	compatibilityJSONPath := filepath.Join(reportDir, "compatibility.json")
+	if err := atomicfile.Write(reportDir, "compatibility.json", compatibilityJSON, 0o644, true); err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: write %s: %v\n", compatibilityJSONPath, err)
+		return 1
+	}
+	compatibilityText := compatibility.RenderText()
+	compatibilityTextPath := filepath.Join(reportDir, "compatibility.txt")
+	if err := atomicfile.Write(reportDir, "compatibility.txt", []byte(compatibilityText), 0o644, true); err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: write %s: %v\n", compatibilityTextPath, err)
+		return 1
+	}
+	fmt.Fprint(stdout, text)
+	fmt.Fprint(stdout, "\n", compatibilityText)
+	fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: wrote %s, %s, %s and %s\n", jsonPath, textPath, compatibilityJSONPath, compatibilityTextPath)
+	return 0
 }
 
 func executeMicroVM(command string, args, environment []string, stdin io.Reader, stdout, stderr io.Writer, execute microVMExecutor) int {

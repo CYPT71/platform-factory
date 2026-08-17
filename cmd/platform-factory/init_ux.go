@@ -4,33 +4,36 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
-	"github.com/CYPT71/secure-oci-base/internal/app/projectinit"
-	"github.com/CYPT71/secure-oci-base/internal/detect"
+	"github.com/CYPT71/platform-factory/internal/app/projectinit"
+	"github.com/CYPT71/platform-factory/internal/detect"
 )
 
-// initLanguageMenu is the fixed, numbered list `pf init` offers when it
-// can't pick a language on its own. A beginner shouldn't have to
-// already know this project's internal language-string vocabulary
-// (e.g. that Node.js is spelled "node", not "javascript") to answer a
-// free-text prompt correctly - a number is impossible to typo into an
-// unsupported value.
-var initLanguageMenu = []struct {
-	value           string
-	label           string
-	artifactExample string
-}{
-	{"go", "Go", "cmd/app/main.go"},
-	{"node", "Node.js (JavaScript/TypeScript)", "src/index.js"},
-	{"python", "Python", "app.py"},
-	{"java", "Java", "target/app.jar"},
-	{"dotnet", ".NET (C#/F#)", "bin/Release/net8.0/app.dll"},
-	{"rust", "Rust", "target/release/app"},
-	{"ruby", "Ruby", "app.rb"},
-	{"php", "PHP", "public/index.php"},
-	{"custom", "Custom (you write your own build_command/freeze_command)", "dist/app"},
+// looksLikeGoSource does a cheap, non-recursive scan for a go.mod or any
+// *.go file directly in dir - the same signal a human glancing at `ls`
+// would use. Go ships as a separate plugin (plugins/lang-go) built from
+// the platform-factory source tree rather than as one of the interpreter
+// plugins bundled with the CLI, so a project that is obviously Go still
+// fails ecosystem resolution until that plugin is built and loaded; this
+// lets the failure message name the real, actionable next step instead of
+// pointing at `pf plugin list`, which never lists Go at all.
+func looksLikeGoSource(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if entry.Name() == "go.mod" || strings.HasSuffix(entry.Name(), ".go") {
+			return true
+		}
+	}
+	return false
 }
 
 // resolvedEcosystem is what ecosystem resolution decided: a
@@ -43,6 +46,7 @@ type resolvedEcosystem struct {
 	result    detect.Result
 	artifact  string // empty means "no artifact decided yet"
 	confident bool   // true once a real (detected, typed, or --language/--artifact-flagged) language is known
+	explained bool   // true once the interactive panel already told the user why nothing was written
 }
 
 // resolveEcosystemInteractively decides the project's language and
@@ -55,7 +59,7 @@ type resolvedEcosystem struct {
 // Confident is false - callers must not write a config with a made-up
 // language in that case (see the LegacyDisks exemption in
 // internal/project.Validate and runInit's refusal otherwise).
-func resolveEcosystemInteractively(result detect.Result, languageFlag, artifactFlag string, assumeYes bool, stdin *bufio.Reader, stdout io.Writer) resolvedEcosystem {
+func resolveEcosystemInteractively(result detect.Result, languageFlag, artifactFlag, dir string, assumeYes bool, stdin *bufio.Reader, stdout io.Writer) resolvedEcosystem {
 	if languageFlag != "" {
 		result.Kind = languageFlag
 		result.Ambiguous = false
@@ -72,33 +76,43 @@ func resolveEcosystemInteractively(result detect.Result, languageFlag, artifactF
 	}
 
 	if result.Ambiguous {
-		fmt.Fprintf(stdout, "platform-factory init: this looks like it could be more than one kind of project: %s\n", strings.Join(result.Candidates, ", "))
+		initPanel(stdout, "1/3", "Choose a language", "Several loaded plugins recognize this project")
+		fmt.Fprintf(stdout, "│ Candidates  %s\n", strings.Join(result.Candidates, ", "))
 	} else {
-		fmt.Fprintln(stdout, "platform-factory init: couldn't tell what kind of project this is automatically")
+		initPanel(stdout, "1/3", "Language not recognized", "No loaded language plugin recognizes this project")
+		if looksLikeGoSource(dir) {
+			fmt.Fprintln(stdout, "│ Next        this looks like Go - see `pf init --help` for how to load Go support")
+		} else {
+			fmt.Fprintln(stdout, "│ Next        pf plugin list · pf plugin load LANGUAGE")
+		}
+		fmt.Fprintln(stdout, "╰────────────────────────────────────────────────────────────")
+		return resolvedEcosystem{result: result, artifact: artifactFlag, explained: true}
 	}
-	fmt.Fprintln(stdout, "platform-factory init: what language is this project written in?")
-	for i, choice := range initLanguageMenu {
-		fmt.Fprintf(stdout, "  %d) %s\n", i+1, choice.label)
+	for i, candidate := range result.Candidates {
+		fmt.Fprintf(stdout, "│  [%d] %s\n", i+1, candidate)
 	}
-	fmt.Fprintf(stdout, "platform-factory init: enter a number 1-%d, or press Enter to stop without changing anything: ", len(initLanguageMenu))
+	fmt.Fprintln(stdout, "╰────────────────────────────────────────────────────────────")
+	fmt.Fprintf(stdout, "Select 1-%d · Enter cancels safely: ", len(result.Candidates))
 	answer := readLine(stdin)
 	if answer == "" {
 		return resolvedEcosystem{result: result, artifact: artifactFlag}
 	}
 	index, err := strconv.Atoi(answer)
-	if err != nil || index < 1 || index > len(initLanguageMenu) {
-		fmt.Fprintf(stdout, "platform-factory init: %q isn't one of the numbers above, so stopping without changing anything - run `pf init` again to retry\n", answer)
+	if err != nil || index < 1 || index > len(result.Candidates) {
+		fmt.Fprintf(stdout, "✗ %q is not a valid choice. Nothing changed; run `pf init` to retry.\n", answer)
 		return resolvedEcosystem{result: result, artifact: artifactFlag}
 	}
-	choice := initLanguageMenu[index-1]
+	choice := result.Candidates[index-1]
 
 	artifact := artifactFlag
 	if artifact == "" {
-		fmt.Fprintf(stdout, "platform-factory init: where's the file your app starts from, relative to this directory? (example: %s) - press Enter to fill this in later: ", choice.artifactExample)
+		initPanel(stdout, "2/3", "Confirm the entrypoint", "Leave empty to accept the language plugin recommendation")
+		fmt.Fprintln(stdout, "╰────────────────────────────────────────────────────────────")
+		fmt.Fprint(stdout, "Entrypoint: ")
 		artifact = readLine(stdin)
 	}
 
-	result.Kind = choice.value
+	result.Kind = choice
 	result.Ambiguous = false
 	result.Evidence = []string{"chosen from the pf init menu"}
 	return resolvedEcosystem{result: result, artifact: artifact, confident: true}
@@ -113,21 +127,34 @@ func confirmPlan(plan projectinit.Plan, dir string, assumeYes bool, stdin *bufio
 	if assumeYes || stdin == nil {
 		return true
 	}
-	fmt.Fprintf(stdout, "platform-factory init: about to create in %s:\n", dir)
+	initPanel(stdout, "3/3", "Review and apply", dir)
+	for _, finding := range plan.Findings {
+		fmt.Fprintln(stdout, "│ ✓ "+finding)
+	}
 	for _, action := range plan.Actions {
-		fmt.Fprintln(stdout, "  "+action.Description())
+		fmt.Fprintln(stdout, "│ + "+action.Description())
 	}
 	for _, unknown := range plan.Unknowns {
-		fmt.Fprintln(stdout, "  "+unknown.Description())
+		fmt.Fprintln(stdout, "│ ? "+unknown.Description())
 	}
 	if plan.System != nil {
 		for _, description := range plan.System.Descriptions() {
-			fmt.Fprintln(stdout, "  "+description)
+			fmt.Fprintln(stdout, "│ • "+description)
 		}
 	}
-	fmt.Fprint(stdout, "platform-factory init: proceed? [y/N] ")
+	fmt.Fprintln(stdout, "│ No build or deployment runs during init.")
+	fmt.Fprintln(stdout, "╰────────────────────────────────────────────────────────────")
+	fmt.Fprint(stdout, "Apply this plan? [y/N] ")
 	answer := strings.ToLower(readLine(stdin))
 	return answer == "y" || answer == "yes"
+}
+
+func initPanel(stdout io.Writer, step, title, subtitle string) {
+	fmt.Fprintln(stdout, "╭─ Platform Factory · Init ──────────────────────────────────")
+	fmt.Fprintf(stdout, "│ %s  %s\n", step, title)
+	if subtitle != "" {
+		fmt.Fprintf(stdout, "│ %s\n", subtitle)
+	}
 }
 
 func readLine(reader *bufio.Reader) string {
@@ -136,4 +163,58 @@ func readLine(reader *bufio.Reader) string {
 		return ""
 	}
 	return strings.TrimSpace(line)
+}
+
+func resolveDependencyMode(detected, explicit string, assumeYes bool, stdin *bufio.Reader, stdout io.Writer) (string, bool) {
+	valid := func(mode string) bool {
+		switch mode {
+		case "none", "manifest", "unresolved", "external", "unknown":
+			return true
+		}
+		return false
+	}
+	if explicit != "" {
+		return explicit, valid(explicit)
+	}
+	if detected == "none" || detected == "manifest" {
+		return detected, true
+	}
+	if assumeYes || stdin == nil {
+		return "", false
+	}
+	fmt.Fprintf(stdout, "platform-factory init: dependency state is %s. Choose: 1) continue unresolved 2) external management 3) no dependencies 4) stop: ", detected)
+	switch readLine(stdin) {
+	case "1":
+		return "unresolved", true
+	case "2":
+		return "external", true
+	case "3":
+		return "none", true
+	default:
+		return "", false
+	}
+}
+
+func resolveRuntime(explicit string, assumeYes bool, stdin *bufio.Reader, stdout io.Writer) (projectinit.RuntimeMode, bool) {
+	if explicit != "" {
+		mode := projectinit.RuntimeMode(explicit)
+		return mode, mode == projectinit.RuntimeContainer || mode == projectinit.RuntimeMicroVM
+	}
+	// The complete plan confirmation accepts this explained recommendation.
+	// An explicit --runtime remains available when the operator disagrees.
+	return projectinit.RuntimeContainer, true
+}
+
+func filterResolvedUnknowns(unknowns []projectinit.Unknown, artifact, dependencyMode string) []projectinit.Unknown {
+	result := unknowns[:0]
+	for _, unknown := range unknowns {
+		if unknown.Subject == "build.artifact" && artifact != "" {
+			continue
+		}
+		if unknown.Subject == "dependencies" && dependencyMode != "unknown" {
+			continue
+		}
+		result = append(result, unknown)
+	}
+	return result
 }

@@ -54,9 +54,7 @@ func TestFromProcessStateNilIsZeroValue(t *testing.T) {
 	}
 }
 
-// TestManagerAggregatesCompletedStageUsage proves Manager.AddStageUsage
-// and CreateTracker-based active measurement compose into one pipeline-
-// level total, the actual "budget aggregation" the roadmap asked for.
+// TestManagerAggregatesCompletedStageUsage combines finished and active stages.
 func TestManagerAggregatesCompletedStageUsage(t *testing.T) {
 	m := NewManager()
 

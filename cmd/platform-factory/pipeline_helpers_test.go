@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/cache"
-	apiv1alpha1 "github.com/CYPT71/secure-oci-base/internal/core"
-	"github.com/CYPT71/secure-oci-base/internal/executor"
-	"github.com/CYPT71/secure-oci-base/internal/pipeline"
+	"github.com/CYPT71/platform-factory/internal/cache"
+	apiv1alpha1 "github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/executor"
+	"github.com/CYPT71/platform-factory/internal/pipeline"
 )
 
 func TestBuildStageRunnerSandboxRequiredFailsClosed(t *testing.T) {

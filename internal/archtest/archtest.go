@@ -16,7 +16,7 @@ import (
 	"testing"
 )
 
-const repositoryModule = "github.com/CYPT71/secure-oci-base"
+const repositoryModule = "github.com/CYPT71/platform-factory"
 
 // domainInfrastructureBoundaries records the repository's established domain
 // ownership rules. Go package paths carry no layer metadata, so these concrete
@@ -26,6 +26,14 @@ var domainInfrastructureBoundaries = map[string][]string{
 	"internal/scheduler": {"internal/oci", "internal/pipeline", "internal/plugin", "internal/cache", "internal/networking", "internal/hypervisor"},
 	"internal/policy":    {"internal/oci", "internal/plugin", "internal/cache", "internal/networking", "internal/hypervisor"},
 	"internal/executor":  {"internal/oci", "internal/pipeline", "internal/plugin", "internal/cache", "internal/networking", "internal/hypervisor"},
+	"internal/assemble":  {"internal/oci"},
+	"internal/project":   {"internal/oci"},
+	// internal/core is the canonical domain model: it must stay independent of
+	// every concrete infrastructure/backend implementation (Kubernetes, containerd,
+	// KubeVirt, plugin transport, sandboxing, the CLI itself), depending only on
+	// interfaces/domain contracts it defines. Audited clean; this rule exists to
+	// keep it that way.
+	"internal/core": {"internal/oci", "internal/pipeline", "internal/plugin", "internal/cache", "internal/networking", "internal/hypervisor", "internal/executor", "internal/microvm", "internal/ociruntime"},
 }
 
 type workspaceJSON struct {

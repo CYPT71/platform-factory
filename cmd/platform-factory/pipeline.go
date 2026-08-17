@@ -14,11 +14,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/cache"
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	"github.com/CYPT71/secure-oci-base/internal/executor"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
-	"github.com/CYPT71/secure-oci-base/internal/pipeline"
+	"github.com/CYPT71/platform-factory/internal/cache"
+	"github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/executor"
+	"github.com/CYPT71/platform-factory/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/pipeline"
 )
 
 const engineVersion = "platform-factory/1"
@@ -110,7 +110,8 @@ func runPipelinePlan(args []string, stdout, stderr io.Writer) int {
 	}
 	available := pipeline.KnownCapabilities()
 	result := map[string]any{
-		"api_version":            document.definition.APIVersion,
+		"api_version":            cliOutputAPIVersion,
+		"pipeline_api_version":   document.definition.APIVersion,
 		"name":                   document.definition.Name,
 		"fingerprint":            document.fingerprint,
 		"order":                  graph.Order,
@@ -221,7 +222,7 @@ func runPipelineRun(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "  %s: %s\n", stage.Stage, stage.State)
 		}
 	} else {
-		output := map[string]any{"journal": journalPath, "result": journal, "valid": runErr == nil}
+		output := map[string]any{"api_version": cliOutputAPIVersion, "journal": journalPath, "result": journal, "valid": runErr == nil}
 		encoded, _ := json.MarshalIndent(output, "", "  ")
 		fmt.Fprintln(stdout, string(encoded))
 	}
@@ -266,7 +267,18 @@ func buildStageRunner(mode, root string, store *cache.Store, secretEnv bool, sec
 		}
 	}
 	if exec == nil {
-		exec = executor.New(root, nil)
+		if err := materializePlainMounts(root, document.definition); err != nil {
+			return nil, err
+		}
+		home := filepath.Join(root, "home")
+		if err := os.MkdirAll(home, 0o700); err != nil {
+			return nil, err
+		}
+		exec = executor.New(root, []string{
+			"PATH=" + os.Getenv("PATH"), "HOME=" + home,
+			"LANG=C.UTF-8", "LC_ALL=C.UTF-8",
+			"TZ=UTC", "SOURCE_DATE_EPOCH=0",
+		})
 	}
 	if secretEnv {
 		exec.WithSecretResolver(executor.EnvResolver{})
@@ -278,6 +290,41 @@ func buildStageRunner(mode, root string, store *cache.Store, secretEnv bool, sec
 	caching := executor.NewCachingRunner(exec, root, storeAdapter, engineVersion, emptyBaseDigest(), "linux/amd64")
 	staging := executor.NewStagingRunner(caching, root, storeAdapter, caching)
 	return &stageRunner{executor: exec, caching: caching, staging: staging, sandbox: sandboxState}, nil
+}
+
+func materializePlainMounts(root string, definition core.Pipeline) error {
+	sources := make(map[string]string, len(definition.Inputs))
+	for _, input := range definition.Inputs {
+		sources[input.ID] = input.Source
+	}
+	installed := map[string]string{}
+	for _, stage := range definition.Stages {
+		for _, mount := range stage.Mounts {
+			source, ok := sources[mount.Source]
+			if !ok {
+				return fmt.Errorf("pipeline mount %q has no declared input", mount.Source)
+			}
+			destination := executor.MapPath(root, mount.Target)
+			if previous, ok := installed[destination]; ok {
+				if previous != source {
+					return fmt.Errorf("pipeline mounts %q and %q to the same target %q", previous, source, mount.Target)
+				}
+				continue
+			}
+			info, err := os.Stat(source)
+			if err != nil {
+				return fmt.Errorf("pipeline input %q: %w", mount.Source, err)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("pipeline input %q: plain execution currently requires a directory", mount.Source)
+			}
+			if err := os.CopyFS(destination, os.DirFS(source)); err != nil {
+				return fmt.Errorf("pipeline input %q: %w", mount.Source, err)
+			}
+			installed[destination] = source
+		}
+	}
+	return nil
 }
 
 func buildJournal(document pipelineDocument, report pipeline.ScheduleResult, runner *stageRunner) map[string]any {
@@ -303,8 +350,12 @@ func buildJournal(document pipelineDocument, report pipeline.ScheduleResult, run
 		if result, ran := execResults[stage.Stage]; ran {
 			entry["exit_code"] = result.ExitCode
 			entry["duration_ms"] = result.Duration.Milliseconds()
-			entry["stdout_bytes"] = len(result.Stdout)
-			entry["stderr_bytes"] = len(result.Stderr)
+			if len(result.Stdout) > 0 {
+				entry["stdout"] = string(result.Stdout)
+			}
+			if len(result.Stderr) > 0 {
+				entry["stderr"] = string(result.Stderr)
+			}
 		}
 		stages = append(stages, entry)
 	}

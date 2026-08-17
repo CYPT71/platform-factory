@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/CYPT71/secure-oci-base/sdk/microvm"
+	"github.com/CYPT71/platform-factory/sdk/microvm"
 )
 
 func main() {

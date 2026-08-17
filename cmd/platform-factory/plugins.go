@@ -8,8 +8,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/CYPT71/secure-oci-base/internal/plugin"
-	api "github.com/CYPT71/secure-oci-base/sdk/plugin"
+	"github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/plugin"
+	api "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 // pluginOptions carries the plugin trust flags shared by every command
@@ -39,6 +40,13 @@ type pluginClient interface {
 	Hello() plugin.HelloResult
 	HasCapability(capability string) bool
 	Call(ctx context.Context, method string, params, result any) error
+	// CallWithIdempotency is Call for a mutating method - see
+	// internal/plugin.Client.CallWithIdempotency. Every pluginClient must
+	// support it, not just plugin.Client itself, so a command that drives a
+	// plugin through a mutating capability (microvm.go's runKubeVirt, for
+	// example) can be tested against a stub the same way detect/freeze/plan
+	// already are.
+	CallWithIdempotency(ctx context.Context, operationID core.OperationID, method string, params, result any) error
 	Close() error
 }
 
@@ -49,7 +57,22 @@ type pluginHost struct {
 
 // start discovers, verifies and starts every plugin under the
 // configured directory. No directory means no plugins and no error.
+// Plugins started this way can only be driven through Call: any mutating
+// capability call fails closed with "operation journal is required" (see
+// internal/plugin.Client.CallWithIdempotency) because no journal was
+// injected. Commands that only ever consult read-only capabilities
+// (detect/freeze/plan) use this; a command that also drives a mutating
+// capability (microvm.go's runKubeVirt) must use startWithJournal instead.
 func (options *pluginOptions) start(ctx context.Context) (*pluginHost, error) {
+	return options.startWithJournal(ctx, nil)
+}
+
+// startWithJournal is start, but injects journal into every started plugin
+// client so mutating capability calls (CallWithIdempotency) are actually
+// usable - the same durable, crash-safe claim publish/deploy/rollback
+// already use for their own non-plugin mutations (see lifecycle.go's
+// operationJournalFor/cliOperationID).
+func (options *pluginOptions) startWithJournal(ctx context.Context, journal core.OperationJournal) (*pluginHost, error) {
 	host := &pluginHost{}
 	if options == nil || options.dir == "" {
 		return host, nil
@@ -72,7 +95,13 @@ func (options *pluginOptions) start(ctx context.Context) (*pluginHost, error) {
 		return nil, err
 	}
 	for _, entry := range discovered {
-		client, err := plugin.VerifyAndStart(ctx, entry.Dir, entry.Manifest, policy)
+		var client *plugin.Client
+		var err error
+		if journal != nil {
+			client, err = plugin.VerifyAndStartWithJournal(ctx, entry.Dir, entry.Manifest, policy, journal)
+		} else {
+			client, err = plugin.VerifyAndStart(ctx, entry.Dir, entry.Manifest, policy)
+		}
 		if err != nil {
 			host.Close()
 			return nil, err
@@ -86,6 +115,18 @@ func (host *pluginHost) Close() {
 	for _, client := range host.clients {
 		_ = client.Close()
 	}
+}
+
+// findCapability returns the first started plugin that declared capability
+// at handshake, in discovery order - the same "first match wins" contract
+// detect/freeze/planNotes already use.
+func (host *pluginHost) findCapability(capability string) (pluginClient, bool) {
+	for _, client := range host.clients {
+		if client.HasCapability(capability) {
+			return client, true
+		}
+	}
+	return nil, false
 }
 
 // detect consults every plugin with the detect capability, in

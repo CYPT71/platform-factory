@@ -12,6 +12,11 @@ equivalent local package under `sdk/plugin-*`) and is exercised by
 | Validate a MicroVM specification | [`microvm`](microvm) | `go run ./examples/sdk/microvm` |
 | Implement a language plugin (Go) | [`plugin-go`](plugin-go) | Build it, then run `platform-factory-conformance plugin BINARY` |
 | Implement a language plugin (Python) | [`plugin-python`](plugin-python) | `platform-factory-conformance plugin plugin-python/plugin.py` |
+| Monitor Docker/Podman with the Python SDK | [`plugin-python-lazy-docker`](plugin-python-lazy-docker) | Conformance runner + Python unit tests |
+| Monitor Docker/Podman with the Go SDK | [`plugin-go-lazy-docker`](plugin-go-lazy-docker) | Build + conformance runner |
+| Monitor Docker/Podman with the JavaScript SDK | [`plugin-javascript-lazy-docker`](plugin-javascript-lazy-docker) | Conformance runner |
+| Monitor Docker/Podman with the TypeScript SDK | [`plugin-typescript-lazy-docker`](plugin-typescript-lazy-docker) | `npm run build` + conformance runner |
+| Monitor Docker/Podman with the C# SDK | [`plugin-csharp-lazy-docker`](plugin-csharp-lazy-docker) | `dotnet build` + conformance runner |
 | Implement a language plugin (JavaScript) | [`plugin-javascript`](plugin-javascript) | `platform-factory-conformance plugin plugin-javascript/plugin.js` |
 | Implement a language plugin (TypeScript) | [`plugin-typescript`](plugin-typescript) | `npm install && npm run build`, then `platform-factory-conformance plugin plugin.js` |
 | Implement a language plugin (C#) | [`plugin-csharp`](plugin-csharp) | `dotnet publish -c Release -o OUT`, then `platform-factory-conformance plugin OUT/SecureOciPlugin` |
@@ -48,5 +53,9 @@ path, or a .NET `ProjectReference`) rather than published to
 PyPI/npm/NuGet - they are structured so publishing later needs no
 rework, not so they are installable from a registry today.
 
-The old `api/pipeline`, `api/microvm`, `api/vmm` and `api/plugin` paths remain
-compatibility shims. New applications should use `sdk/` directly.
+All SDKs expose native contextual handlers for arbitrary capability families:
+Go `RegisterTyped`, Python `handle_context`, JavaScript/TypeScript
+`handleContext`, and the C# contextual `Handle` overload.
+
+Applications use `sdk/` for behavior and the versioned `api/*/v1` packages for
+wire contracts. `api/microvm` and `api/vmm` remain migration-only aliases.

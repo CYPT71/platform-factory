@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/conformance"
+	"github.com/CYPT71/platform-factory/conformance"
 )
 
 // conformanceDir is the source-tree conformance package directory, relative
@@ -145,7 +145,7 @@ var demoPluginPath = sync.OnceValues(func() (string, error) {
 		return "", err
 	}
 	binary := filepath.Join(dir, "platform-factory-plugin-demo")
-	cmd := exec.Command("go", "build", "-o", binary, "github.com/CYPT71/secure-oci-base/cmd/platform-factory-plugin-demo")
+	cmd := exec.Command("go", "build", "-o", binary, "github.com/CYPT71/platform-factory/cmd/platform-factory-plugin-demo")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("build demo plugin: %w: %s", err, output)
 	}

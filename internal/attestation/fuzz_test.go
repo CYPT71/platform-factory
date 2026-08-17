@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/signing"
+	"github.com/CYPT71/platform-factory/internal/signing"
 )
 
 // FuzzVerify feeds arbitrary envelope JSON at Verify against one real
-// trusted key. This is the exact attack surface secure-oci verify-release
-// and secure-oci publish's signature checks depend on: an attacker fully
+// trusted key. This is the exact attack surface platform-factory verify-release
+// and platform-factory publish's signature checks depend on: an attacker fully
 // controls the envelope bytes (a file on disk, or in the future a
 // registry-fetched artifact), and Verify must never panic, only
 // authenticate or reject.
@@ -23,7 +23,7 @@ func FuzzVerify(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	valid, err := Sign(store, "release", "release-key", "application/vnd.secure-oci.subject.v1+json",
+	valid, err := Sign(store, "release", "release-key", "application/vnd.platform-factory.subject.v1+json",
 		map[string]string{"digest": "sha256:00"})
 	if err != nil {
 		f.Fatal(err)

@@ -50,7 +50,7 @@ jobs:
           work=$(mktemp -d)
           cat > /tmp/pipeline.json <<'JSON'
           {
-            "api_version": "secure-oci.dev/v1alpha1",
+            "api_version": "platform-factory.dev/v1alpha1",
             "name": "ci-pipeline",
             "required_capabilities": ["cache", "parallel-stages"],
             "stages": [
@@ -88,10 +88,16 @@ jobs:
           (cd examples/sdk/plugin-typescript && npm install --no-audit --no-fund && npm run build)
           /tmp/platform-factory-conformance plugin ./examples/sdk/plugin-typescript/plugin.js
           dotnet publish examples/sdk/plugin-csharp/SecureOciPlugin.csproj \
-            --configuration Release --output /tmp/secure-oci-plugin-csharp
-          /tmp/platform-factory-conformance plugin \
-            /tmp/secure-oci-plugin-csharp/SecureOciPlugin
+            --configuration Release --output /tmp/platform-factory-plugin-csharp
+          source scripts/ci/dotnet-runtime.sh
+          csharp_runtime_root=$(find_dotnet_runtime_root 8) || {
+            echo "C# conformance requires Microsoft.NETCore.App 8.x" >&2
+            exit 1
+          }
+          DOTNET_ROOT="$csharp_runtime_root" /tmp/platform-factory-conformance plugin \
+            /tmp/platform-factory-plugin-csharp/SecureOciPlugin
           (cd /tmp && ./platform-factory-conformance backend)
+          (cd /tmp && ./platform-factory-conformance publication)
       - name: Run explicit CLI, OCI, and mTLS regression tests
         if: matrix.target == 'amd64'
         env: {GOTOOLCHAIN: local}
@@ -107,6 +113,7 @@ jobs:
           set -euo pipefail
           bash -n scripts/local/bootstrap.sh
           bootstrap_root=$(mktemp -d)
+          echo "bootstrap_root=$bootstrap_root" >> "$GITHUB_ENV"
           scripts/local/bootstrap.sh --target linux/amd64 --env "$bootstrap_root/linux"
           scripts/local/bootstrap.sh --target windows/amd64 --env "$bootstrap_root/windows"
           test -x "$bootstrap_root/linux/bin/platform-factory"
@@ -117,6 +124,12 @@ jobs:
           test -f "$bootstrap_root/windows/bin/oci-builder.exe"
           test -f "$bootstrap_root/windows/bin/example-service.exe"
           test -f "$bootstrap_root/windows/bin/microvm-init.exe"
+      - name: Prove containerd node installation is idempotent and reversible
+        if: matrix.target == 'amd64'
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          scripts/microvm/test-install-containerd-runtime.sh
           bash -c 'source "$1/activate"; command -v platform-factory; deactivate_platform_factory' \
             bash "$bootstrap_root/linux"
           pwsh -NoProfile -Command \

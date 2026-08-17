@@ -16,6 +16,12 @@ import (
 
 const APIVersion = "platform-factory.dev/vmm/v1alpha1"
 
+const (
+	MinMemoryMiB = 64
+	MaxMemoryMiB = 64 << 10
+	MaxVCPUs     = 256
+)
+
 var NamePattern = regexp.MustCompile(`^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$`)
 
 type Spec struct {
@@ -35,11 +41,11 @@ func (s Spec) ValidateCommon() error {
 	if !NamePattern.MatchString(s.Name) {
 		return fmt.Errorf("name must be a DNS label of at most 63 characters")
 	}
-	if s.MemoryMiB < 64 || s.MemoryMiB > 1<<20 {
-		return fmt.Errorf("memory must be between 64 and 1048576 MiB")
+	if s.MemoryMiB < MinMemoryMiB || s.MemoryMiB > MaxMemoryMiB {
+		return fmt.Errorf("memory must be between %d and %d MiB", MinMemoryMiB, MaxMemoryMiB)
 	}
-	if s.VCPUs < 1 || s.VCPUs > 256 {
-		return fmt.Errorf("vcpus must be between 1 and 256")
+	if s.VCPUs < 1 || s.VCPUs > MaxVCPUs {
+		return fmt.Errorf("vcpus must be between 1 and %d", MaxVCPUs)
 	}
 	if s.Port < 1 || s.Port > 65535 {
 		return fmt.Errorf("port must be between 1 and 65535")

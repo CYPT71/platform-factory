@@ -2,7 +2,6 @@
 package detect
 
 import (
-	"archive/zip"
 	"bufio"
 	"debug/elf"
 	"encoding/json"
@@ -10,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -44,56 +42,14 @@ func Path(name string) (Result, error) {
 	if result, ok, err := scriptFile(name); ok || err != nil {
 		return result, err
 	}
-	if strings.EqualFold(filepath.Ext(name), ".jar") {
-		if reader, err := zip.OpenReader(name); err == nil {
-			reader.Close()
-			return Result{Path: name, Kind: "java", Profile: "java", Evidence: []string{"zip-compatible .jar archive"}}, nil
-		}
-	}
-	if strings.EqualFold(filepath.Ext(name), ".dll") {
-		return Result{Path: name, Kind: "dotnet", Profile: "dotnet", Evidence: []string{".dll extension"}}, nil
-	}
 	return Result{Path: name, Kind: "unknown", Profile: "unknown", Evidence: []string{"no recognized executable signature"}}, nil
 }
 
 func directory(name string) (Result, error) {
-	checks := []struct {
-		kind, profile string
-		files         []string
-	}{
-		{"node", "node", []string{"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock"}},
-		{"python", "python", []string{"requirements.lock", "pyproject.toml", "Pipfile.lock"}},
-		{"java", "java", []string{"pom.xml", "gradlew", "build.gradle", "build.gradle.kts"}},
-		{"dotnet", "dotnet", []string{"global.json"}},
-		// Compiled ecosystems produce ELF executables, so their runtime
-		// profile is resolved from the built binary, not the language.
-		{"go", "static", []string{"go.mod"}},
-		{"rust", "static", []string{"Cargo.lock", "Cargo.toml"}},
-		{"ruby", "ruby", []string{"Gemfile.lock", "Gemfile"}},
-		{"php", "php", []string{"composer.lock", "composer.json"}},
+	if _, err := os.ReadDir(name); err != nil {
+		return Result{}, fmt.Errorf("read project directory: %w", err)
 	}
-	var candidates, evidence []string
-	profiles := map[string]string{}
-	for _, check := range checks {
-		for _, file := range check.files {
-			if info, err := os.Stat(filepath.Join(name, file)); err == nil && info.Mode().IsRegular() {
-				candidates = append(candidates, check.kind)
-				profiles[check.kind] = check.profile
-				evidence = append(evidence, file)
-				break
-			}
-		}
-	}
-	sort.Strings(candidates)
-	sort.Strings(evidence)
-	if len(candidates) == 0 {
-		return Result{Path: name, Kind: "unknown", Profile: "unknown", Evidence: []string{"no supported lockfile or project marker"}}, nil
-	}
-	result := Result{Path: name, Kind: candidates[0], Profile: profiles[candidates[0]], Evidence: evidence, Candidates: candidates}
-	if len(candidates) > 1 {
-		result.Kind, result.Profile, result.Ambiguous = "ambiguous", "unknown", true
-	}
-	return result, nil
+	return Result{Path: name, Kind: "unknown", Profile: "unknown", Evidence: []string{"directory language classification is delegated to language plugins"}}, nil
 }
 
 func elfFile(name string) (Result, bool, error) {
@@ -145,19 +101,7 @@ func scriptFile(name string) (Result, bool, error) {
 		return Result{}, false, nil
 	}
 	shebang := strings.TrimSpace(strings.TrimPrefix(line, "#!"))
-	kind := "script"
-	profile := "unknown"
-	switch {
-	case strings.Contains(shebang, "python"):
-		kind, profile = "python", "python"
-	case strings.Contains(shebang, "node"):
-		kind, profile = "node", "node"
-	case strings.Contains(shebang, "ruby"):
-		kind, profile = "ruby", "ruby"
-	case strings.Contains(shebang, "php"):
-		kind, profile = "php", "php"
-	}
-	return Result{Path: name, Kind: kind, Profile: profile, Interpreter: shebang, Evidence: []string{"shebang"}}, true, nil
+	return Result{Path: name, Kind: "script", Profile: "unknown", Interpreter: shebang, Evidence: []string{"shebang"}}, true, nil
 }
 
 func JSON(result Result) ([]byte, error) {

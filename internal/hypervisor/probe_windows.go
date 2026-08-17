@@ -5,8 +5,8 @@ package hypervisor
 import (
 	"context"
 
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor/whpx"
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
+	"github.com/CYPT71/platform-factory/internal/hypervisor/whpx"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 // ProbeNative reports native WHPX availability on Windows.

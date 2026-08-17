@@ -1,30 +1,22 @@
-// Package plugin is the host side of the out-of-process plugin
-// boundary: it launches plugin subprocesses, performs the handshake,
-// verifies signed digest-pinned manifests and discovers installed
-// plugins.
+// Package idempotency persists crash-safe operation outcomes.
 package idempotency
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
+	"github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/strictjson"
 )
 
 // FileJournal records the outcome of every mutating operation by
 // OperationID and answers whether a given ID has already run.
-// This persistent implementation survives process crashes between
-// "operation started" and "operation confirmed", which is the exact
-// scenario Sanetizer-todo item 13 lists as a required test case.
-//
-// It stores records in a dedicated directory with one file per operation,
-// providing durability across process restarts and host crashes.
+// Records survive crashes between operation start and completion.
 type FileJournal struct {
 	mu      sync.Mutex
 	root    string
@@ -155,7 +147,6 @@ func (j *FileJournal) Lookup(id core.OperationID) (core.OperationRecord, bool) {
 // started it (false means id was already recorded - started, completed,
 // or failed - and the caller must not begin the operation a second
 // time). This is the compare-and-set the "duplicate submission" test
-// case in Sanetizer-todo item 13 needs: two concurrent Start calls with the
 // same id can never both return true.
 func (j *FileJournal) Start(id core.OperationID, scope string) (started bool, err error) {
 	if !isValidOperationFile(string(id)) {
@@ -244,56 +235,9 @@ func (j *FileJournal) persist(record core.OperationRecord) error {
 		return fmt.Errorf("marshal operation record: %w", err)
 	}
 
-	// CreateTemp uses O_EXCL and an unpredictable name, preventing symlink and
-	// predictable-temp-file attacks by another local process.
-	tmpFile, err := os.CreateTemp(j.root, ".operation-*")
-	if err != nil {
-		return fmt.Errorf("write temp operation record: %w", err)
+	if err := atomicfile.Write(j.root, string(record.ID), data, 0o600, true); err != nil {
+		return fmt.Errorf("persist operation record: %w", err)
 	}
-	tmpPath := tmpFile.Name()
-	finalPath := filepath.Join(j.root, string(record.ID))
-	if err := tmpFile.Chmod(0o600); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("protect temp operation record: %w", err)
-	}
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("write temp operation record: %w", err)
-	}
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("sync temp operation record: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("close temp operation record: %w", err)
-	}
-
-	// Rename is atomic on POSIX systems
-	if err := os.Rename(tmpPath, finalPath); err != nil {
-		// Clean up temp file on failure
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename operation record: %w", err)
-	}
-
-	// Sync the directory to ensure the rename is durable
-	// Note: This doesn't guarantee durability on all filesystems,
-	// but it's better than nothing for 10+ year robustness.
-	dirFile, err := os.Open(j.root)
-	if err != nil {
-		return fmt.Errorf("open journal directory for sync: %w", err)
-	}
-	if err := dirFile.Sync(); err != nil {
-		_ = dirFile.Close()
-		return fmt.Errorf("sync journal directory: %w", err)
-	}
-	if err := dirFile.Close(); err != nil {
-		return fmt.Errorf("close journal directory: %w", err)
-	}
-
 	return nil
 }
 
@@ -370,19 +314,7 @@ func (j *FileJournal) loadRecord(id core.OperationID) (core.OperationRecord, err
 
 func decodePersistedOperationRecord(data []byte) (persistedOperationRecord, error) {
 	var stored persistedOperationRecord
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields() // fail closed on legacy raw result/error fields
-	if err := decoder.Decode(&stored); err != nil {
-		return persistedOperationRecord{}, err
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return persistedOperationRecord{}, errors.New("trailing operation record data")
-		}
-		return persistedOperationRecord{}, err
-	}
-	return stored, nil
+	return stored, strictjson.Decode(data, &stored)
 }
 
 func syncDirectory(root string) error {

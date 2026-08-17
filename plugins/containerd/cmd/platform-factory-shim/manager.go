@@ -5,10 +5,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path"
+	"strings"
 	"syscall"
 	"time"
 
@@ -46,10 +49,44 @@ func (shimManager) Name() string { return runtimeName }
 // pod sandbox ID for every container in that pod.
 const groupLabel = "io.kubernetes.cri.sandbox-id"
 
+// allowedContainerdSocketEnv pins the containerd socket accepted by the shim.
+const allowedContainerdSocketEnv = "PLATFORM_FACTORY_SHIM_ALLOWED_CONTAINERD_SOCKET"
+
+// allowedContainerdSocket validates address (opts.Address, containerd's own
+// daemon socket path for this shim to dial/report back to) before Start
+// uses it for anything. Structural validation (non-empty, no NUL byte, an
+// absolute path) always applies, since a Unix domain socket address that
+// fails any of those could never be a legitimate containerd socket in the
+// first place - this alone refuses a class of malformed/injected values
+// unconditionally, with no configuration required. When
+// PLATFORM_FACTORY_SHIM_ALLOWED_CONTAINERD_SOCKET is set, address must also
+// match it exactly: an operator who knows their containerd socket's real,
+// fixed location can pin it, so any other value - including a
+// structurally valid one - is refused too.
+func allowedContainerdSocket(address string) error {
+	if address == "" {
+		return errors.New("containerd address is empty")
+	}
+	if strings.ContainsRune(address, 0) {
+		return errors.New("containerd address contains a NUL byte")
+	}
+	if !path.IsAbs(address) {
+		return fmt.Errorf("containerd address %q is not an absolute path", address)
+	}
+	if pinned := strings.TrimSpace(os.Getenv(allowedContainerdSocketEnv)); pinned != "" && address != pinned {
+		return fmt.Errorf("containerd address %q does not match the pinned socket %q (%s)", address, pinned, allowedContainerdSocketEnv)
+	}
+	return nil
+}
+
 func (shimManager) Start(ctx context.Context, id string, opts shim.StartOpts) (_ shim.BootstrapParams, retErr error) {
 	var params shim.BootstrapParams
 	params.Version = 3
 	params.Protocol = "ttrpc"
+
+	if err := allowedContainerdSocket(opts.Address); err != nil {
+		return params, fmt.Errorf("platform-factory-shim: refusing untrusted containerd address: %w", err)
+	}
 
 	grouping := id
 	if annotations, err := readBundleAnnotations(); err == nil {

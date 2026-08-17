@@ -1,4 +1,4 @@
-module github.com/CYPT71/secure-oci-base/plugins/containerd
+module github.com/CYPT71/platform-factory/plugins/containerd
 
 go 1.25.12
 

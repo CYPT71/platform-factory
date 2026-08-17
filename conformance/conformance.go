@@ -1,5 +1,5 @@
 // Package conformance is the public conformance suite for the
-// secure-oci stable v1 pipeline API (including its v1alpha1/v1beta1
+// platform-factory stable v1 pipeline API (including its v1alpha1/v1beta1
 // compatibility inputs) and the v1 plugin protocol. The
 // golden vectors pin validation outcomes, canonical fingerprints and
 // stage cache keys so an independent implementation (or a future
@@ -27,9 +27,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/cache"
-	"github.com/CYPT71/secure-oci-base/internal/pipeline"
-	apiplugin "github.com/CYPT71/secure-oci-base/sdk/plugin"
+	"github.com/CYPT71/platform-factory/internal/cache"
+	"github.com/CYPT71/platform-factory/internal/pipeline"
+	apiplugin "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 //go:embed vectors/*.json
@@ -192,12 +192,26 @@ type pluginProcess struct {
 	reader *bufio.Reader
 }
 
+// pluginEnv builds the environment a plugin process is launched with.
+// Preserve only PATH so interpreter-backed plugins (Python, Node, dotnet)
+// are language-neutral while the conformance process still withholds the
+// caller's credentials and other environment variables. DOTNET_ROOT is
+// also forwarded when present: a published .NET apphost resolves its
+// shared framework via that variable (or a host-global registration file)
+// and never consults PATH, so on hosts where the SDK and the matching
+// Microsoft.NETCore.App runtime live under different roots, the caller
+// needs a way to point the apphost at the runtime-bearing root explicitly.
+func pluginEnv() []string {
+	env := []string{"PATH=" + os.Getenv("PATH")}
+	if root, ok := os.LookupEnv("DOTNET_ROOT"); ok {
+		env = append(env, "DOTNET_ROOT="+root)
+	}
+	return env
+}
+
 func startPlugin(ctx context.Context, executable string) (*pluginProcess, error) {
 	cmd := exec.CommandContext(ctx, executable)
-	// Preserve only PATH so interpreter-backed plugins (Python, Node, dotnet)
-	// are language-neutral while the conformance process still withholds the
-	// caller's credentials and other environment variables.
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
+	cmd.Env = pluginEnv()
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

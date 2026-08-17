@@ -1,11 +1,8 @@
-// See microvm_native_linux_amd64.go's own comment for why this split
-// exists: the real runNativeKVM needs internal/hypervisor/kvm symbols
-// that only exist for linux/amd64. microvm_native_darwin.go is darwin's
-// own real implementation (HVF). This stub exists purely so
-// runNativeKVMSubcommand (microvm_native.go, portable) still type-checks
-// on every other platform; nativeKVMEligible already refuses this
-// backend before runNativeKVM would ever be reached here in practice.
-//go:build !(linux && amd64) && !darwin
+// Unsupported platforms reject the native backend before reaching this
+// stub - including a CGO_ENABLED=0 darwin build, which has neither this
+// stub (excluded by !darwin) nor microvm_native_darwin.go's real HVF
+// backend (which requires "darwin && cgo") without the "&& cgo" here too.
+//go:build !(linux && amd64) && !(darwin && cgo)
 
 package main
 
@@ -15,7 +12,7 @@ import (
 	"io"
 	"runtime"
 
-	"github.com/CYPT71/secure-oci-base/internal/networking"
+	"github.com/CYPT71/platform-factory/internal/networking"
 )
 
 func runNativeKVM(_ context.Context, _ string, _ int, _ []networking.Forward, _, _ io.Writer) error {

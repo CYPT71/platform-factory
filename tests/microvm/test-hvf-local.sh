@@ -21,7 +21,7 @@ export PLATFORM_FACTORY_TEST_KERNEL_IMAGE PLATFORM_FACTORY_TEST_INITRD
 test -s "$PLATFORM_FACTORY_TEST_KERNEL_IMAGE"
 test -s "$PLATFORM_FACTORY_TEST_INITRD"
 
-test_binary=$(mktemp "${TMPDIR:-/tmp}/secure-oci-vmm-hvf.XXXXXX")
+test_binary=$(mktemp "${TMPDIR:-/tmp}/platform-factory-vmm-hvf.XXXXXX")
 trap 'rm -f "$test_binary"' EXIT
 
 (
@@ -30,7 +30,7 @@ trap 'rm -f "$test_binary"' EXIT
   codesign --force --sign - \
     --entitlements scripts/microvm/hvf.entitlements "$test_binary"
   codesign --verify --strict --verbose=2 "$test_binary"
-  test_output=$(mktemp "${TMPDIR:-/tmp}/secure-oci-vmm-hvf-output.XXXXXX")
+  test_output=$(mktemp "${TMPDIR:-/tmp}/platform-factory-vmm-hvf-output.XXXXXX")
   trap 'rm -f "$test_output"' EXIT
   set +e
   "$test_binary" -test.run '^(TestRunLinuxWithRealHVF|TestDarwinVMMWithRealHVF)$' -test.count=1 -test.v \

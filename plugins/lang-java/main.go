@@ -1,49 +1,21 @@
-// platform-factory-lang-java is the Java language plugin - see
-// plugins/lang-python/main.go for the full pattern this mirrors and
-// docs/language-plugin-layers.md for the architecture. Only the
-// freeze/deps-location specifics differ per language; every plugin
-// shares its tar-packaging logic via sdk/langplugin instead of
-// duplicating it.
-//
-//	platform-factory-lang-java freeze --root DIR
-//	platform-factory-lang-java build-layer --root DIR --output TAR --dest PREFIX
-//
-// freeze detects the build tool the same way the host's own built-in
-// Java freeze step does - mvnw first, then gradlew, then a bare pom.xml
-// (see cmd/platform-factory/project.go's freezeSteps) - and runs the
-// same command. Unlike pip/npm/Bundler/Composer, neither Maven nor
-// Gradle has a clean project-local install flag: both default to a
-// shared, unbounded, per-user global cache (~/.m2, ~/.gradle). That
-// cache can't be packaged into a layer as-is, so this plugin deliberately
-// deviates from byte-identical built-in behavior and redirects it to a
-// project-local directory instead: -Dmaven.repo.local for Maven,
-// GRADLE_USER_HOME for Gradle.
 package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 
-	"github.com/CYPT71/secure-oci-base/sdk/langplugin"
+	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-	var err error
-	switch os.Args[1] {
-	case "freeze":
-		err = runFreeze(os.Args[2:])
-	case "build-layer":
-		err = runBuildLayer(os.Args[2:])
-	default:
+	err := langplugin.Dispatch(os.Args[1:], map[string]langplugin.Handler{
+		"inspect": runInspect, "freeze": runFreeze, "build-layer": runBuildLayer,
+	})
+	if err == langplugin.ErrUsage {
 		usage()
 		os.Exit(2)
 	}
@@ -54,9 +26,22 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: platform-factory-lang-java <freeze|build-layer> [OPTIONS]")
+	fmt.Fprintln(os.Stderr, "usage: platform-factory-lang-java <inspect|freeze|build-layer> [OPTIONS]")
+	fmt.Fprintln(os.Stderr, "  inspect --root DIR")
 	fmt.Fprintln(os.Stderr, "  freeze --root DIR")
 	fmt.Fprintln(os.Stderr, "  build-layer --root DIR --output TAR --dest PREFIX")
+}
+
+func runInspect(args []string) error {
+	root, err := langplugin.ParseRootFlag("inspect", args)
+	if err != nil {
+		return err
+	}
+	result, err := langplugin.Inspect(root, langplugin.Definition{Language: "java", Profile: "java", Markers: []string{"pom.xml", "mvnw", "gradlew", "build.gradle", "build.gradle.kts"}, SourceExtensions: []string{".java"}, Manifests: []string{"pom.xml", "build.gradle", "build.gradle.kts"}})
+	if err != nil {
+		return err
+	}
+	return langplugin.WriteInspection(result)
 }
 
 // mavenDepsRelPath and gradleDepsRelPath are the project-local cache
@@ -105,7 +90,7 @@ func depsRelPathFor(tool buildTool) string {
 }
 
 func runFreeze(args []string) error {
-	root, err := parseRootFlag("freeze", args)
+	root, err := langplugin.ParseRootFlag("freeze", args)
 	if err != nil {
 		return err
 	}
@@ -130,7 +115,7 @@ func runFreeze(args []string) error {
 }
 
 func runBuildLayer(args []string) error {
-	root, output, dest, err := parseBuildLayerFlags(args)
+	root, output, dest, err := langplugin.ParseBuildLayerFlags(args)
 	if err != nil {
 		return err
 	}
@@ -165,30 +150,4 @@ func runInWithEnv(dir string, extraEnv []string, name string, args ...string) er
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
 	return cmd.Run()
-}
-
-func parseRootFlag(subcommand string, args []string) (root string, err error) {
-	flags := flag.NewFlagSet(subcommand, flag.ContinueOnError)
-	rootFlag := flags.String("root", "", "project root directory")
-	if err := flags.Parse(args); err != nil {
-		return "", err
-	}
-	if *rootFlag == "" {
-		return "", errors.New("--root is required")
-	}
-	return *rootFlag, nil
-}
-
-func parseBuildLayerFlags(args []string) (root, output, dest string, err error) {
-	flags := flag.NewFlagSet("build-layer", flag.ContinueOnError)
-	rootFlag := flags.String("root", "", "project root directory")
-	outputFlag := flags.String("output", "", "path to write the uncompressed tar layer to")
-	destFlag := flags.String("dest", "", "container path prefix every entry in the layer is rooted at")
-	if err := flags.Parse(args); err != nil {
-		return "", "", "", err
-	}
-	if *rootFlag == "" || *outputFlag == "" || *destFlag == "" {
-		return "", "", "", errors.New("--root, --output, and --dest are all required")
-	}
-	return *rootFlag, *outputFlag, *destFlag, nil
 }

@@ -2,7 +2,6 @@ package oci
 
 import (
 	"archive/tar"
-	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -10,9 +9,7 @@ import (
 	"io"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
-	"time"
 )
 
 const (
@@ -43,29 +40,18 @@ func writePrebuiltLayer(root, tarPath string, level int) (descriptor, string, er
 		return descriptor{}, "", fmt.Errorf("open: %w", err)
 	}
 	defer file.Close()
+	return installLayer(root, func(output io.Writer) (descriptor, string, error) {
+		return compressPrebuiltLayer(output, file, level)
+	})
+}
 
-	blobDir := filepath.Join(root, "blobs", "sha256")
-	temporary := filepath.Join(blobDir, ".layer-in-progress")
-	output, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+func compressPrebuiltLayer(output io.Writer, file *os.File, level int) (descriptor, string, error) {
+	compressedHash, rawHash := sha256.New(), sha256.New()
+	compressedCount := &countingWriter{}
+	gz, err := deterministicGzip(io.MultiWriter(output, compressedHash, compressedCount), level)
 	if err != nil {
 		return descriptor{}, "", err
 	}
-	success := false
-	defer func() {
-		_ = output.Close()
-		if !success {
-			_ = os.Remove(temporary)
-		}
-	}()
-
-	compressedHash := sha256.New()
-	gz, err := gzip.NewWriterLevel(io.MultiWriter(output, compressedHash), level)
-	if err != nil {
-		return descriptor{}, "", err
-	}
-	gz.Header.ModTime = time.Unix(0, 0)
-	gz.Header.OS = 255
-	rawHash := sha256.New()
 	// Every byte read from file passes through the tar parser (for
 	// validation) and, via the tee, into the gzip+hash pipeline in the
 	// same pass - the layer Build actually stores is bit-for-bit the
@@ -100,24 +86,9 @@ func writePrebuiltLayer(root, tarPath string, level int) (descriptor, string, er
 	if err := gz.Close(); err != nil {
 		return descriptor{}, "", err
 	}
-	if err := output.Close(); err != nil {
-		return descriptor{}, "", err
-	}
 	digest := "sha256:" + hex.EncodeToString(compressedHash.Sum(nil))
-	stat, err := os.Stat(temporary)
-	if err != nil {
-		return descriptor{}, "", err
-	}
-	destination := filepath.Join(blobDir, strings.TrimPrefix(digest, "sha256:"))
-	if err := os.Rename(temporary, destination); err != nil {
-		return descriptor{}, "", err
-	}
-	if err := os.Chmod(destination, 0644); err != nil {
-		return descriptor{}, "", err
-	}
-	success = true
 	diffID := "sha256:" + hex.EncodeToString(rawHash.Sum(nil))
-	return descriptor{MediaType: layerMediaType, Digest: digest, Size: stat.Size()}, diffID, nil
+	return descriptor{MediaType: layerMediaType, Digest: digest, Size: compressedCount.n}, diffID, nil
 }
 
 // validatePrebuiltEntry rejects anything a plugin-supplied layer must

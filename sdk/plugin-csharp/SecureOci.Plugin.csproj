@@ -5,6 +5,6 @@
     <Nullable>enable</Nullable>
     <RootNamespace>SecureOci.Plugin</RootNamespace>
     <PackageId>SecureOci.Plugin</PackageId>
-    <Description>SDK for out-of-process secure-oci language plugins: the versioned, length-prefixed JSON-RPC protocol plugins speak over stdin/stdout, and the plugin-side Server.</Description>
+    <Description>SDK for out-of-process platform-factory language plugins: the versioned, length-prefixed JSON-RPC protocol plugins speak over stdin/stdout, and the plugin-side Server.</Description>
   </PropertyGroup>
 </Project>

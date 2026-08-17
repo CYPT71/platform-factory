@@ -62,7 +62,32 @@ jobs:
           # argument arrays, no shell, to build the components the caller
           # selected and read version metadata - the same pattern
           # scripts/local/bootstrap.sh already uses (a shell script, so not
-          # scanned here). Process execution remains forbidden elsewhere.
+          # scanned here). doctor.go and plugin.go's `pf plugin load --from`
+          # shell out to fixed `go`/diagnostic-tool binaries the same way, as
+          # do the microvm_native_*.go native-KVM build helpers (`go build`,
+          # `go env GOMOD`, the fixed build-kernel.sh path) and
+          # internal/archtest's own `go work edit -json` (workspace
+          # introspection, not a plugin or user-controlled path).
+          # internal/provenance/plugin.go's CapturePluginSourceCommit shells
+          # out only to the fixed `git` binary with explicit argument arrays
+          # to capture a plugin's build provenance (source commit, dirty
+          # state) - never a shell, never a caller-controlled command name.
+          # Every *_test.go entry below builds or drives a throwaway test
+          # fixture the same way this file's own tests already do elsewhere
+          # (a plugin/CLI binary via `go build`, or `git` to set up a real
+          # repository fixture) - fixed binary names and argument arrays,
+          # no shell, no user input. seccomp_linux_test.go re-execs this
+          # test binary itself (os.Args[0], the same self-re-exec pattern
+          # as sandbox_linux_test.go above) to apply a real seccomp filter
+          # in a throwaway child rather than the shared test process.
+          # projectinit_test.go's `git init` sets up a real repository
+          # fixture, the same as gitfixture_test.go above.
+          # provisionruntime.go's own os/exec import
+          # is exec.LookPath only (pf init's optional host-runtime-reuse
+          # offer, locating a candidate interpreter already on PATH) - it
+          # never executes anything; actual provisioning still goes through
+          # the injected projectExecutor, not a direct exec.Command here.
+          # Process execution remains forbidden elsewhere.
           test -z "$(find cmd internal -name '*.go' -type f \
               ! -path 'cmd/microvm-init/main.go' \
               ! -path 'cmd/microvm-init/guest_agent.go' \
@@ -70,7 +95,19 @@ jobs:
               ! -path 'cmd/microvm-init/identity_other.go' \
             ! -path 'cmd/platform-factory/main.go' \
             ! -path 'cmd/platform-factory/exitcriteria_test.go' \
+            ! -path 'cmd/platform-factory/kubevirt_plugin_test.go' \
+            ! -path 'cmd/platform-factory/microvm_native_darwin.go' \
+            ! -path 'cmd/platform-factory/microvm_native_kvm_test.go' \
+            ! -path 'cmd/platform-factory/microvm_native_linux_amd64.go' \
+            ! -path 'cmd/platform-factory/microvm_native_shared.go' \
+            ! -path 'cmd/platform-factory/plugin.go' \
+            ! -path 'cmd/platform-factory/provisionruntime.go' \
+            ! -path 'cmd/platform-factory/plugin_provenance_test.go' \
+            ! -path 'cmd/platform-factory/plugin_test.go' \
             ! -path 'cmd/platform-factory-installer/main.go' \
+            ! -path 'internal/app/doctor/doctor.go' \
+            ! -path 'internal/archtest/archtest.go' \
+            ! -path 'internal/budget/stage_usage_test.go' \
             ! -path 'internal/executor/executor.go' \
             ! -path 'internal/executor/rlimit_linux.go' \
             ! -path 'internal/executor/rlimit_linux_test.go' \
@@ -78,19 +115,47 @@ jobs:
             ! -path 'internal/executor/sandbox_linux.go' \
             ! -path 'internal/executor/sandbox_linux_test.go' \
             ! -path 'internal/executor/sandbox_other.go' \
+            ! -path 'internal/executor/sandbox_other_test.go' \
             ! -path 'internal/executor/sandboxed.go' \
             ! -path 'internal/executor/cgroup_linux.go' \
+            ! -path 'internal/hypervisor/sandbox/sandbox_linux_test.go' \
+            ! -path 'internal/hypervisor/sandbox/seccomp_linux_test.go' \
+            ! -path 'internal/hypervisor/sandbox/syscalls_linux.go' \
             ! -path 'conformance/conformance.go' \
             ! -path 'conformance/conformance_test.go' \
             ! -path 'internal/plugin/client.go' \
+            ! -path 'internal/plugin/migration_thirdparty_test.go' \
             ! -path 'internal/plugin/subprocess_test.go' \
             ! -path 'internal/plugin/thirdparty_test.go' \
             ! -path 'internal/plugin/sandbox_linux.go' \
             ! -path 'internal/plugin/sandbox_other.go' \
             ! -path 'internal/plugin/sandbox_linux_test.go' \
+            ! -path 'internal/provenance/plugin.go' \
+            ! -path 'internal/provenance/plugin_test.go' \
             ! -path 'internal/sbom/sbom_test.go' \
             ! -path 'internal/ociruntime/supervisor_linux.go' \
             ! -path 'internal/ociruntime/apparmor_linux_test.go' \
+            ! -path 'internal/ociruntime/runtime_linux_test.go' \
+            ! -path 'internal/app/projectinit/projectinit.go' \
+            ! -path 'internal/app/projectinit/projectinit_test.go' \
+            ! -path 'internal/marketplace/sync.go' \
+            ! -path 'internal/marketplace/gitfixture_test.go' \
+            ! -path 'internal/mcp/git/exec.go' \
+            ! -path 'internal/mcp/git/gitfixture_test.go' \
+            ! -path 'internal/mcp/project/inspect_test.go' \
+            ! -path 'internal/mcp/core/validate.go' \
+            ! -path 'internal/mcp/core/affected.go' \
+            ! -path 'internal/mcp/core/affected_test.go' \
+            ! -path 'internal/mcp/plugins/validate.go' \
+            ! -path 'internal/mcp/agent/orchestrate_test.go' \
+            ! -path 'internal/mcp/agent/implement_test.go' \
+            ! -path 'internal/mcp/product/product.go' \
+            ! -path 'internal/mcp/product/product_test.go' \
+            ! -path 'cmd/tui/marketplacetui/tui_test.go' \
+            ! -path 'cmd/platform-factory/init_test.go' \
+            ! -path 'cmd/platform-factory/init_e2e_test.go' \
+            ! -path 'cmd/platform-factory/marketplace_e2e_test.go' \
+            ! -path 'cmd/platform-factory/main_test.go' \
             -exec grep -nE 'os/exec|exec\.Command' {} + || true)"
           test -z "$(find cmd internal -name '*.go' -type f \
             -exec grep -n 'InsecureSkipVerify' {} + || true)"

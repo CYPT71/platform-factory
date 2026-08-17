@@ -1,11 +1,10 @@
 // Package cache provides the concrete implementation of core.CacheStore interface.
-// See Sanetizer-todo.md items 9 and 33 for architectural separation requirements.
 package cache
 
 import (
 	"io"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 // StoreAdapter wraps a concrete cache.Store to implement the core.CacheStore interface.

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"sort"
 
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
 )
 
 // CapabilityCandidates is the inward-facing port used to inspect implementations.

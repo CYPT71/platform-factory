@@ -2,14 +2,18 @@ package projectinit
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/detect"
-	"github.com/CYPT71/secure-oci-base/internal/project"
+	api "github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/detect"
+	"github.com/CYPT71/platform-factory/internal/project"
+	"github.com/CYPT71/platform-factory/internal/scheduler"
 )
 
 func TestBuildPlanIsExplicitAndDoesNotMutate(t *testing.T) {
@@ -18,11 +22,161 @@ func TestBuildPlanIsExplicitAndDoesNotMutate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Actions) == 0 || !strings.Contains(plan.Actions[0].Description(), "platform-factory.yaml") {
+	if len(plan.Actions) == 0 || !strings.Contains(plan.Actions[0].Description(), "pf.yaml") {
 		t.Fatalf("plan does not explain its config mutation: %+v", plan.Actions)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "platform-factory.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "pf.yaml")); !os.IsNotExist(err) {
 		t.Fatalf("planning mutated the project: %v", err)
+	}
+	for _, want := range []string{".gitignore", ".pf", "policies", "deploy", "dist", "reports", "git repository"} {
+		found := false
+		for _, action := range plan.Actions {
+			if strings.Contains(action.Description(), want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("plan does not include %q: %+v", want, plan.Actions)
+		}
+	}
+}
+
+func TestBuildPlanLongFilenameStyleCreatesExactlyOnePair(t *testing.T) {
+	dir := t.TempDir()
+	plan, err := BuildPlanWithFilenameStyle(dir, Ecosystem{Result: detect.Result{Kind: "go"}, Artifact: "app", Confident: true}, nil, testObservations(), "long")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Execute(plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"platform-factory.yaml", "platform-factory.lock"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("missing %s: %v", name, err)
+		}
+	}
+	for _, name := range []string{"pf.yaml", "pf.lock"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("unexpected alias %s: %v", name, err)
+		}
+	}
+	if _, err := project.Discover(dir, ""); err != nil {
+		t.Fatalf("long style does not discover: %v", err)
+	}
+}
+
+func TestBuildPlanRejectsInvalidFilenameStyleWithoutMutation(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := BuildPlanWithFilenameStyle(dir, Ecosystem{}, nil, testObservations(), "both"); err == nil {
+		t.Fatal("invalid filename style accepted")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("planning mutated directory: %v %v", entries, err)
+	}
+}
+
+func TestBuildPlanLongStyleMigratesLegacyConfigToSelectedPair(t *testing.T) {
+	dir := t.TempDir()
+	legacy := []byte("language: python\nruntime: python\n")
+	if err := os.WriteFile(filepath.Join(dir, ".config_image.yaml"), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := BuildPlanWithFilenameStyle(dir, Ecosystem{}, nil, testObservations(), "long")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Execute(plan); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "platform-factory.yaml"))
+	if err != nil || !bytes.Equal(got, legacy) {
+		t.Fatalf("migration content=%q err=%v", got, err)
+	}
+	trace, err := os.ReadFile(filepath.Join(dir, ".pf", "migration.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(trace, []byte(`"to": "platform-factory.yaml"`)) {
+		t.Fatalf("migration trace has wrong target: %s", trace)
+	}
+	if _, err := project.Discover(dir, ""); err != nil {
+		t.Fatalf("migrated long project does not discover: %v", err)
+	}
+}
+
+func TestBuildPlanWritesBoundedMultiEcosystemInventoryWithoutEnvironmentValues(t *testing.T) {
+	dir := t.TempDir()
+	ecosystem := Ecosystem{
+		Result: detect.Result{Kind: "go"}, Artifact: "app", Confident: true,
+		Inspections: []ApplicationInspection{
+			{Detection: detect.Result{Kind: "python", Profile: "script", Evidence: []string{"app.py"}}, Artifact: "app.py", Entrypoint: "app.py", Dependencies: DependencyState{Mode: "none", Reason: "no external dependencies detected"}},
+			{Detection: detect.Result{Kind: "go", Profile: "module", Evidence: []string{"go.mod"}}, BuildCommand: []string{"go", "build", "-o", "app", "."}, Artifact: "app", Dependencies: DependencyState{Mode: "manifest", Manifest: "go.mod", Reason: "go.mod detected"}, Environment: map[string]string{"API_TOKEN": "must-not-leak"}},
+		},
+	}
+	plan, err := BuildPlan(dir, ecosystem, nil, testObservations())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := Execute(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = Rollback(receipt) })
+	raw, err := os.ReadFile(filepath.Join(dir, ".pf", "inventory.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("must-not-leak")) {
+		t.Fatalf("environment value leaked into inventory: %s", raw)
+	}
+	var inventory ProjectInventory
+	if err := json.Unmarshal(raw, &inventory); err != nil {
+		t.Fatal(err)
+	}
+	if inventory.APIVersion != InventoryAPIVersion || inventory.Primary != "go" || len(inventory.Ecosystems) != 2 {
+		t.Fatalf("unexpected inventory: %+v", inventory)
+	}
+	if inventory.Ecosystems[0].Language != "go" || !inventory.Ecosystems[0].Selected || inventory.Ecosystems[1].Language != "python" {
+		t.Fatalf("inventory must be stable and preserve every ecosystem: %+v", inventory.Ecosystems)
+	}
+	if got := inventory.Ecosystems[0].Metadata.EnvironmentKeys; len(got) != 1 || got[0] != "API_TOKEN" {
+		t.Fatalf("environment keys = %v", got)
+	}
+	dagRaw, err := os.ReadFile(filepath.Join(dir, ".pf", "build.pipeline.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dag api.Pipeline
+	if err := json.Unmarshal(dagRaw, &dag); err != nil {
+		t.Fatal(err)
+	}
+	graph, err := scheduler.Analyze(dag)
+	if err != nil {
+		t.Fatalf("generated DAG is invalid: %v", err)
+	}
+	if len(graph.Order) != 1 || graph.Order[0] != "build" || dag.Stages[0].Command.Executable != "go" {
+		t.Fatalf("unexpected initial build DAG: graph=%+v pipeline=%+v", graph, dag)
+	}
+}
+
+func TestBuildPlanRejectsUnsafeOrUnboundedInventoryBeforeMutation(t *testing.T) {
+	for name, inspection := range map[string]ApplicationInspection{
+		"path traversal":          {Detection: detect.Result{Kind: "go", Evidence: []string{"../secret"}}},
+		"invalid environment key": {Detection: detect.Result{Kind: "go", Evidence: []string{"go.mod"}}, Environment: map[string]string{"BAD=KEY": "secret"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			_, err := BuildPlan(dir, Ecosystem{Result: detect.Result{Kind: "go"}, Confident: true, Inspections: []ApplicationInspection{inspection}}, nil, testObservations())
+			if err == nil || !strings.Contains(err.Error(), "project inventory") {
+				t.Fatalf("expected inventory validation failure, got %v", err)
+			}
+			entries, readErr := os.ReadDir(dir)
+			if readErr != nil || len(entries) != 0 {
+				t.Fatalf("failed planning mutated project: entries=%v err=%v", entries, readErr)
+			}
+		})
 	}
 }
 
@@ -32,7 +186,7 @@ func TestExecuteRefusesFileAppearingAfterPlanning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(dir, "platform-factory.yaml")
+	target := filepath.Join(dir, "pf.yaml")
 	if err := os.WriteFile(target, []byte("do not overwrite"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -115,16 +269,6 @@ func TestExecuteSuccessCreatesExclusivePlan(t *testing.T) {
 
 func TestBuildPlanRejectsSymlinkAndIsDeterministicForObservations(t *testing.T) {
 	dir := t.TempDir()
-	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(dir, "policies")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := BuildPlan(dir, Ecosystem{}, nil, testObservations()); err == nil || !strings.Contains(err.Error(), "symlink") {
-		t.Fatalf("expected symlink rejection, got %v", err)
-	}
-	if err := os.Remove(filepath.Join(dir, "policies")); err != nil {
-		t.Fatal(err)
-	}
 	eco := Ecosystem{Result: detect.Result{Kind: "go"}, Artifact: "app", Confident: true}
 	first, err := BuildPlan(dir, eco, nil, testObservations())
 	if err != nil {
@@ -199,7 +343,7 @@ func TestNeedsEcosystemResolutionRecognizesExistingConfigs(t *testing.T) {
 
 func TestValidateMigrationSourceDetectsPostPlanChange(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "pf.yaml")
+	path := filepath.Join(dir, ".config_image.yaml")
 	if err := os.WriteFile(path, []byte("original"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -229,6 +373,44 @@ func TestObservationAndEncodingHelpers(t *testing.T) {
 	}
 	if got := (Action{kind: ActionKind(99), path: "opaque"}).Description(); got != "opaque" {
 		t.Fatalf("unknown action description = %q", got)
+	}
+}
+
+func TestResolveRootUsesExistingGitTopLevelAndDoesNotGuessOutsideGit(t *testing.T) {
+	repository := t.TempDir()
+	if out, err := exec.Command("git", "init", repository).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	nested := filepath.Join(repository, "services", "api")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolveRoot(nested)
+	wantRoot, evalErr := filepath.EvalSymlinks(repository)
+	gotRoot, gotEvalErr := filepath.EvalSymlinks(got)
+	if err != nil || evalErr != nil || gotEvalErr != nil || gotRoot != wantRoot {
+		t.Fatalf("ResolveRoot(Git nested)=%q err=%v want=%q", got, err, repository)
+	}
+
+	plain := t.TempDir()
+	plainNested := filepath.Join(plain, "services", "api")
+	if err := os.MkdirAll(plainNested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err = ResolveRoot(plainNested)
+	if err != nil || got != plainNested {
+		t.Fatalf("ResolveRoot(plain nested)=%q err=%v want explicit=%q", got, err, plainNested)
+	}
+}
+
+func TestResolveRootRejectsSymlinkSource(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "project")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveRoot(link); err == nil || !strings.Contains(err.Error(), "not a symlink") {
+		t.Fatalf("expected symlink rejection, got %v", err)
 	}
 }
 
@@ -280,8 +462,18 @@ func TestBuildPlanCoversExistingAndLegacyInputs(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(plan.Actions) != 2 || plan.Actions[0].kind != ActionMigrateConfig {
+		if len(plan.Actions) != 3 || plan.Actions[0].kind != ActionMigrateConfig || filepath.Base(plan.Actions[2].path) != "migration.json" {
 			t.Fatalf("legacy plan actions = %+v", plan.Actions)
+		}
+	})
+	t.Run("unsafe existing scaffold", func(t *testing.T) {
+		dir := t.TempDir()
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(dir, "reports")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := BuildPlan(dir, Ecosystem{}, nil, testObservations()); err == nil || !strings.Contains(err.Error(), "unsafe") {
+			t.Fatalf("expected unsafe scaffold rejection, got %v", err)
 		}
 	})
 }
@@ -299,7 +491,7 @@ func TestRenderConfigIncludesLegacyDisks(t *testing.T) {
 
 func TestRollbackRestoresMigratedConfigurationAfterLaterFailure(t *testing.T) {
 	dir := t.TempDir()
-	legacy := filepath.Join(dir, "pf.yaml")
+	legacy := filepath.Join(dir, ".config_image.yaml")
 	content := []byte("version: 1\nlanguage: go\nartifact: app\n")
 	if err := os.WriteFile(legacy, content, 0o640); err != nil {
 		t.Fatal(err)
@@ -322,7 +514,7 @@ func TestRollbackRestoresMigratedConfigurationAfterLaterFailure(t *testing.T) {
 	if readErr != nil || string(restored) != string(content) {
 		t.Fatalf("legacy config not restored: content=%q err=%v", restored, readErr)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "platform-factory.yaml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "pf.yaml")); !os.IsNotExist(err) {
 		t.Fatalf("canonical config survived rollback: %v", err)
 	}
 }

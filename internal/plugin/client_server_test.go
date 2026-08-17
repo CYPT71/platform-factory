@@ -195,7 +195,7 @@ func attachClient(t *testing.T, conn *pipeConn) (*Client, error) {
 }
 
 func TestStartRejectsNonexistentExecutable(t *testing.T) {
-	if _, err := Start(context.Background(), "/does/not/exist/secure-oci-plugin", nil, nil); err == nil {
+	if _, err := Start(context.Background(), "/does/not/exist/platform-factory-plugin", nil, nil); err == nil {
 		t.Fatal("expected an error for a nonexistent executable")
 	}
 }

@@ -137,7 +137,7 @@ vz_machine_t *vz_create_machine(
             return NULL;
         }
 
-        dispatch_queue_t queue = dispatch_queue_create("dev.secure-oci.vmm", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_t queue = dispatch_queue_create("dev.platform-factory.vmm", DISPATCH_QUEUE_SERIAL);
         VZBridgeMachine *bridge = [[VZBridgeMachine alloc] init];
         bridge.queue = queue;
         bridge.serialLogHandle = logHandle;
@@ -189,7 +189,7 @@ int vz_machine_stop(vz_machine_t *machine, char *error_out, size_t error_cap) {
                 return;
             }
             if (!bridge.vm.canStop) {
-                resultError = [NSError errorWithDomain:@"dev.secure-oci.vmm" code:1
+                resultError = [NSError errorWithDomain:@"dev.platform-factory.vmm" code:1
                                                userInfo:@{NSLocalizedDescriptionKey : @"machine is not in a stoppable state"}];
                 dispatch_semaphore_signal(done);
                 return;

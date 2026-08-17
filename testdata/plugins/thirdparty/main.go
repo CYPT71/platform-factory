@@ -1,9 +1,9 @@
-// Command secure-oci-zig-plugin is the third-party proof for the plugin
+// Command platform-factory-zig-plugin is the third-party proof for the plugin
 // boundary: a separate Go module that adds support for a language the
-// secure-oci core knows nothing about ("zig"), importing only the
+// platform-factory core knows nothing about ("zig"), importing only the
 // public sdk/plugin SDK. The host discovers it through a signed
 // manifest and consults it for detect and freeze without recompiling
-// secure-oci.
+// platform-factory.
 package main
 
 import (
@@ -14,7 +14,7 @@ import (
 	"os"
 	"path/filepath"
 
-	plugin "github.com/CYPT71/secure-oci-base/sdk/plugin"
+	plugin "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 func handleDetect(_ context.Context, raw json.RawMessage) (any, error) {

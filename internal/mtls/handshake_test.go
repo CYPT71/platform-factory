@@ -116,13 +116,7 @@ func serveOnce(t *testing.T, serverConfig *tls.Config) (addr string, result <-ch
 	return listener.Addr().String(), out
 }
 
-// TestMutualHandshakeAuthenticatesBothPeers is a real, live TLS handshake
-// over an actual localhost TCP connection - not a config-shape assertion.
-// It proves the property internal/mtls exists for: a server enforcing
-// MutualTLS both verifies who is connecting to it and correctly presents
-// an identity the client itself independently verifies, which is what any
-// future control-plane/worker component would rely on to authenticate
-// each other (the roadmap's "authenticate every component" item).
+// TestMutualHandshakeAuthenticatesBothPeers performs a live mutual TLS handshake.
 func TestMutualHandshakeAuthenticatesBothPeers(t *testing.T) {
 	ca := newTestCA(t)
 	serverCert := issueLeaf(t, ca, "control-plane", []string{"control-plane.internal"})

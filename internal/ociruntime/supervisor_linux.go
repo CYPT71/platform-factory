@@ -1,10 +1,3 @@
-// This file's supervisor calls directly into internal/hypervisor/kvm's
-// native run loop (RunLinuxWithOptions), which is currently implemented
-// for linux/amd64 only - see kvm_run_linux_amd64.go. Restricting the
-// build tag to match is what actually reflects that: an unrestricted
-// "linux" tag here compiles but fails to link on linux/arm64, breaking
-// `go build ./...` for the whole repository on that platform, not just
-// this package.
 //go:build linux && amd64
 
 package ociruntime
@@ -30,12 +23,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/guesttransport"
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor/kvm"
-	"github.com/CYPT71/secure-oci-base/internal/hypervisor/sandbox"
+	"github.com/CYPT71/platform-factory/internal/guesttransport"
+	"github.com/CYPT71/platform-factory/internal/hypervisor/kvm"
+	"github.com/CYPT71/platform-factory/internal/hypervisor/sandbox"
+	"github.com/CYPT71/platform-factory/internal/observability"
 )
 
 const (
+	maxKernelBytes = int64(256 << 20)
+	maxInitBytes   = int64(64 << 20)
+
 	annotationKernelPath   = "platform-factory.dev/kernel-path"
 	annotationKernelDigest = "platform-factory.dev/kernel-digest"
 	annotationInitrdPath   = "platform-factory.dev/initramfs-path"
@@ -43,47 +40,19 @@ const (
 	annotationMemoryMiB    = "platform-factory.dev/memory-mib"
 	annotationVCPUs        = "platform-factory.dev/vcpus"
 
-	// annotationSandboxCgroups/annotationSandboxNamespaces opt this
-	// supervisor into cgroup v2 resource limits and NET/UTS/IPC namespace
-	// isolation (see internal/hypervisor/sandbox.Config.NamespaceList and
-	// .CgroupParent). Both default to off, unlike seccomp and capability
-	// dropping below: they need a host that has actually delegated a
-	// cgroup subtree, or granted CAP_SYS_ADMIN, to the account this
-	// supervisor runs as - requirements a bare "go test"/first-boot
-	// environment won't generally satisfy, whereas a real deployment
-	// under systemd or a container orchestrator generally will. Turning
-	// them on unconditionally would make the runtime unable to start any
-	// container at all on a host that hasn't set that up. Seccomp and
-	// capability dropping have no equivalent host precondition, so they
-	// are not gated the same way - see sandboxConfigForSupervisor.
+	// Cgroups and namespaces require explicit host delegation.
 	annotationSandboxCgroups    = "platform-factory.dev/sandbox-cgroups"
 	annotationSandboxNamespaces = "platform-factory.dev/sandbox-namespaces"
 
-	// annotationBlockDevicePath/annotationBlockDeviceReadonly attach one
-	// virtio-blk device backed by a host file. Unlike
-	// annotationSandbox{Cgroups,Namespaces} above, an explicit request
-	// here that can't be satisfied fails guest launch rather than
-	// silently booting without the device: a missing disk is a
-	// functional gap the caller asked for and would otherwise have no
-	// way to notice, not a hardening nice-to-have with a safe fallback.
+	// Requested devices fail closed when unavailable.
 	annotationBlockDevicePath     = "platform-factory.dev/block-device-path"
 	annotationBlockDeviceReadonly = "platform-factory.dev/block-device-readonly"
 
-	// annotationNetworkTAP opts this container into one virtio-net
-	// device backed by a host TAP interface (internal/hypervisor/kvm's
-	// OpenTAP) - see that package's own doc comment on ProbeTAPSupport
-	// for exactly what "rootless" does and doesn't mean here: a process
-	// with real CAP_NET_ADMIN in its actual network namespace (typically
-	// root, or a deployment that granted the capability explicitly) gets
-	// a real TAP device; anything else fails closed with a clear reason
-	// rather than silently booting a guest with no network. Turning real
-	// outside connectivity into something available to a fully
-	// unprivileged rootless Podman invocation would additionally need a
-	// userspace NAT layer (the same job slirp4netns/pasta do for
-	// Podman's own container networking), which is out of scope here -
-	// TAP creation alone does not provide that, regardless of privilege.
+	// TAP requires CAP_NET_ADMIN in the active network namespace.
 	annotationNetworkTAP = "platform-factory.dev/network-tap"
 )
+
+var supervisorReadyTimeout = 5 * time.Second
 
 func LaunchSupervisor(ctx context.Context, store *Store, id, executable, pidFile string) error {
 	readyReader, readyWriter, err := os.Pipe()
@@ -91,51 +60,35 @@ func LaunchSupervisor(ctx context.Context, store *Store, id, executable, pidFile
 		return fmt.Errorf("oci runtime: create supervisor readiness pipe: %w", err)
 	}
 	defer readyReader.Close()
+	// The supervisor outlives this process (Setsid below detaches it from
+	// our session entirely), but inheriting our os.Stdout/os.Stderr would
+	// leave it writing to whatever pipe our own short-lived CLI invocation
+	// was given - typically conmon's per-invocation log pipe for `create`,
+	// not a descriptor conmon keeps open for the container's full
+	// lifetime. Once that pipe's read end goes away, any write the
+	// long-lived supervisor makes to it (e.g. the guest's serial console
+	// output piped to stdout) raises SIGPIPE; Go's runtime terminates the
+	// process outright for fd 1/2 rather than surfacing EPIPE, silently
+	// killing the supervisor before it can answer a pending `start`
+	// command - see supervisorLogPath's callers for the resulting
+	// diagnostic. A dedicated on-disk log file has no such lifetime
+	// coupling and survives the crash for later inspection.
+	logPath := supervisorLogPath(store, id)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("oci runtime: open supervisor log: %w", err)
+	}
+	defer logFile.Close()
 	command := exec.CommandContext(ctx, executable, "__serve", "--root", store.Dir(), "--ready-fd", "3", id)
 	command.Stdin = nil
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
+	command.Stdout = logFile
+	command.Stderr = logFile
 	command.ExtraFiles = []*os.File{readyWriter}
 	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	// IPC and UTS namespace isolation is applied here, at process
-	// creation, rather than self-applied later in ServeSupervisor via
-	// internal/hypervisor/sandbox.applyNamespaces, for one consistent
-	// isolation boundary established before this process runs any code
-	// at all.
-	//
-	// CLONE_NEWPID is deliberately NOT requested, even though it was at
-	// one point: this whole function's and ServeSupervisor's PID
-	// bookkeeping assumes parent and child share one PID namespace -
-	// store.SetSupervisor below records command.Process.Pid, the
-	// host-visible PID as this parent sees it, and ServeSupervisor's own
-	// startup loop waits for state.PID == os.Getpid() inside the child.
-	// Under CLONE_NEWPID the child becomes PID 1 of a *new* namespace, so
-	// os.Getpid() there is always 1, that comparison never succeeds, and
-	// every single container launch fails closed with "supervisor PID
-	// mismatch". Isolating the PID namespace would need the state store
-	// to stop keying on a raw host PID first; that's separate work, not
-	// something to bolt on by only gating the clone flag.
-	//
-	// Requesting even IPC/UTS without CLONE_NEWUSER needs CAP_SYS_ADMIN
-	// in the caller's own namespace - the process running this function
-	// (platform-factory-runtime create, invoked by Podman/Docker/containerd as
-	// the OCI runtime), not the child being launched. That privilege is
-	// not guaranteed by this codebase's own contract, so this probes for
-	// it first: without it, clone() itself would fail and command.Start()
-	// below would return an error, turning an isolation improvement into
-	// a complete guest-launch regression on any host that lacks it.
-	// Falling back to Setsid-only here reproduces this function's exact
-	// pre-existing behavior on such a host.
-	//
-	// Mount and network namespaces are deliberately excluded even when
-	// available: this process needs continued access to the store
-	// directory tree and, for TAP networking, the host network
-	// namespace. An isolated mount namespace could hide a device or
-	// path a caller supplied by host path, so the safer default is to
-	// leave those alone until the paths this process actually needs
-	// are enumerated and can be bind-mounted in explicitly.
+	// PID/IPC/UTS isolation is established before child code executes. Mount
+	// and network namespaces remain shared for bundle and TAP access.
 	if sandbox.ProbeSandbox().Namespaces {
-		command.SysProcAttr.Cloneflags = syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS
+		command.SysProcAttr.Cloneflags = syscall.CLONE_NEWPID | syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS
 	}
 	if err := command.Start(); err != nil {
 		readyWriter.Close()
@@ -144,11 +97,13 @@ func LaunchSupervisor(ctx context.Context, store *Store, id, executable, pidFile
 	readyWriter.Close()
 	if err := store.SetSupervisor(ctx, id, command.Process.Pid); err != nil {
 		_ = command.Process.Kill()
+		_ = command.Wait()
 		return err
 	}
 	if pidFile != "" {
 		if err := os.WriteFile(pidFile, []byte(strconv.Itoa(command.Process.Pid)), 0o600); err != nil {
 			_ = command.Process.Kill()
+			_ = command.Wait()
 			return fmt.Errorf("oci runtime: write pid file: %w", err)
 		}
 	}
@@ -165,53 +120,28 @@ func LaunchSupervisor(ctx context.Context, store *Store, id, executable, pidFile
 	case err := <-ready:
 		if err != nil {
 			_ = command.Process.Kill()
+			_ = command.Wait()
 			return fmt.Errorf("oci runtime: supervisor failed before READY: %w", err)
 		}
 	case <-ctx.Done():
 		_ = command.Process.Kill()
+		_ = command.Wait()
 		return ctx.Err()
-	case <-time.After(5 * time.Second):
+	case <-time.After(supervisorReadyTimeout):
+		// Kill alone leaves a zombie: PidfdOpen (processAlive's liveness
+		// check, used by Store.Get's reconciliation) succeeds for a zombie
+		// until its parent reaps it, so the persisted state would be stuck
+		// showing this dead supervisor as still running forever. Wait
+		// reaps it so the next Store.Get sees the process is really gone.
 		_ = command.Process.Kill()
-		return errors.New("oci runtime: supervisor did not become ready within 5 seconds")
+		_ = command.Wait()
+		return fmt.Errorf("oci runtime: supervisor did not become ready within %s", supervisorReadyTimeout)
 	}
 	return nil
 }
 
-// applyVMMSandbox hardens the __serve process (the VMM host) against
-// the consequences of a KVM or guest-transport bug being exploited
-// from inside. PID/IPC/UTS namespace isolation is already in place by
-// the time this runs - see LaunchSupervisor's Cloneflags - so this
-// only applies what must be self-applied from inside the process
-// itself:
-//
-//   - PR_SET_NO_NEW_PRIVS, unconditionally: it needs no privilege and
-//     cannot fail for lack of it, and this process never execs a
-//     setuid or file-capability binary, so its permanent, process-wide
-//     nature has no downside here.
-//   - A delegated cgroup with a PID ceiling, only when ProbeSandbox
-//     confirms the parent cgroup has actually delegated a controller
-//     to children - routinely unavailable outside a delegated scope
-//     (systemd Delegate=yes, or root), so this is skipped rather than
-//     treated as fatal on a host without it. A CPU or memory ceiling is
-//     deliberately not requested: guest resource needs are set by the
-//     annotation-driven memory-mib/vcpus configuration already
-//     enforced elsewhere, and constraining the host cgroup on top of
-//     that risks starving KVM itself rather than the guest.
-//   - A capability bounding-set drop of every capability guest
-//     execution does not need, only when ProbeSandbox confirms
-//     CAP_SETPCAP is held. The accompanying setuid-to-nobody step
-//     dropPrivileges would otherwise perform is deliberately skipped:
-//     this process needs continued access to an already-open /dev/kvm,
-//     and this change cannot verify locally (developed without a
-//     Linux host) whether this deployment's DAC access to that device
-//     depends on UID rather than group membership - see
-//     sandbox.DropBoundingCapabilities's doc comment.
-//
-// This has been cross-compiled for linux/amd64 and reviewed against
-// each primitive's documented kernel behavior, but has not been
-// exercised against a real /dev/kvm by this change locally.
-// ci-sandbox.yml and ci-microvm.yml, which run on real Linux hardware,
-// are the actual proof this does not break guest boot.
+// applyVMMSandbox sets no-new-privileges and applies supported cgroup and
+// capability limits without changing the UID that owns /dev/kvm access.
 func applyVMMSandbox() error {
 	sb := sandbox.NewSandbox(sandbox.Config{DropCapabilities: sandbox.AllCapabilities, PIDsLimit: 256})
 	if err := sb.ApplySeccomp(); err != nil {
@@ -231,22 +161,27 @@ func applyVMMSandbox() error {
 	return nil
 }
 
+var debugFD, _ = syscall.Open("/tmp/debug-trace.txt", syscall.O_CREAT|syscall.O_WRONLY|syscall.O_APPEND, 0o600)
+
+func dbg(s string) { _, _ = syscall.Write(debugFD, []byte(s+"\n")) }
+
 func ServeSupervisor(ctx context.Context, store *Store, id string, readyFD int) (err error) {
+	dbg("ENTER")
 	startAcknowledged := false
 	var command *net.UnixConn
 	var state State
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		var found bool
-		state, found, err = store.Get(ctx, id)
+		state, found, err = store.readPersisted(ctx, id)
 		if err != nil || !found {
 			return fmt.Errorf("oci runtime: load supervisor state: %w", err)
 		}
-		if state.PID == os.Getpid() {
+		if state.PID > 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("oci runtime: supervisor PID mismatch: state=%d process=%d", state.PID, os.Getpid())
+			return errors.New("oci runtime: supervisor host PID was not published")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -297,33 +232,8 @@ func ServeSupervisor(ctx context.Context, store *Store, id string, readyFD int) 
 	if err != nil {
 		return err
 	}
-	// change_profile confines the calling OS thread, not the Go process as
-	// a whole - a goroutine the Go scheduler later migrates elsewhere would
-	// carry on unconfined. LockOSThread pins this goroutine for the rest of
-	// its life first, so vmm.RunLinuxWithOptions's own KVM_RUN loop (locked
-	// to a thread for its own, unrelated reason: vcpu fds are thread-
-	// affine) ends up on this same, now-confined thread rather than a
-	// fresh one. Never unlocked on purpose: if this goroutine ever exits
-	// without a matching Unlock, Go terminates the underlying OS thread
-	// instead of returning it to the pool, which is exactly what should
-	// happen to one a security profile was permanently applied to.
-	//
-	// This still only protects this goroutine's own call path - reading
-	// the bundle's rootfs into the guest initramfs, the pinned kernel/init
-	// binaries, and every /dev/kvm ioctl RunLinuxWithOptions makes - not
-	// the separate signal-forwarding goroutine ServeSupervisor spawns
-	// below. That's a deliberate scope limit, not an oversight: full-
-	// process confinement of an already-running, already-multi-threaded Go
-	// binary (every GC/netpoller/sysmon thread the runtime started before
-	// this function ever ran, plus every future goroutine that might land
-	// on any of them) is a substantially larger problem than confining the
-	// one goroutine that does the security-sensitive work here.
-	//
-	// Unconditional now, unlike the AppArmor transition below it staying
-	// profile-gated: sandbox.Sandbox.Apply's seccomp filter (installed a
-	// few lines down) applies to whichever OS thread happens to be current
-	// when it's installed, same scoping rule, and unlike an AppArmor
-	// profile it is not optional here - every container gets one.
+	// AppArmor and seccomp are thread-scoped; pin the KVM execution path and
+	// never return its confined thread to the runtime pool.
 	runtime.LockOSThread()
 	if err := applyApparmorProfile(config.Process.ApparmorProfile); err != nil {
 		return err
@@ -337,39 +247,43 @@ func ServeSupervisor(ctx context.Context, store *Store, id string, readyFD int) 
 		return fmt.Errorf("oci runtime: apply VMM sandbox: %w", err)
 	}
 	defer func() { _ = guestSandbox.Cleanup() }()
-	// Last of all, on this now-permanently-locked thread: the real
-	// classic-BPF filter (see sandbox.Sandbox.ApplyStrictSeccomp's doc
-	// comment for why it must run here and not from applyVMMSandbox above,
-	// which runs before LockOSThread and would install it on a thread this
-	// goroutine is about to leave). Everything from here through
-	// RunLinuxWithOptions - initramfs assembly, kernel/init loading, the
-	// KVM_RUN loop itself - executes under it.
+	// Apply the thread-scoped filter after LockOSThread.
 	if err := guestSandbox.ApplyStrictSeccomp(); err != nil {
 		return fmt.Errorf("oci runtime: apply strict VMM seccomp filter: %w", err)
 	}
+	dbg("ApplyStrictSeccomp OK")
 	sessionKey, err := generateGuestSessionKey(rand.Reader)
 	if err != nil {
 		return err
 	}
+	dbg("generateGuestSessionKey OK")
 	defer clear(sessionKey)
 	initrdPath, cleanup, err := buildGuestInitramfs(state.Bundle, config, sessionKey)
 	if err != nil {
+		dbg("buildGuestInitramfs err=" + err.Error())
 		return err
 	}
+	dbg("buildGuestInitramfs OK")
 	defer cleanup()
 	initrd, err := os.ReadFile(initrdPath)
 	if err != nil {
+		dbg("ReadFile initrd err=" + err.Error())
 		return err
 	}
+	dbg("ReadFile initrd OK")
 	defer clear(initrd)
 	kernel, memoryBytes, err := loadPinnedBoot(state.Annotations)
 	if err != nil {
+		dbg("loadPinnedBoot err=" + err.Error())
 		return err
 	}
+	dbg("loadPinnedBoot OK")
 	virtioOptions, cleanupBlockDevice, err := virtioDevicesForSupervisor(state.Annotations)
 	if err != nil {
+		dbg("virtioDevicesForSupervisor err=" + err.Error())
 		return err
 	}
+	dbg("virtioDevicesForSupervisor OK")
 	defer cleanupBlockDevice()
 	hostChannel, guestChannel := net.Pipe()
 	agent, err := guesttransport.NewAgent(hostChannel, sessionKey)
@@ -396,13 +310,13 @@ func ServeSupervisor(ctx context.Context, store *Store, id string, readyFD int) 
 				// response is still draining from COM2. In that race the requested
 				// outcome has succeeded even though the transport returns EOF.
 				for attempts := 0; attempts < 25; attempts++ {
-					terminal, found, stateErr := store.Get(context.Background(), id)
+					terminal, found, stateErr := store.readPersisted(context.Background(), id)
 					if stateErr == nil && found && terminal.Status == "stopped" {
 						return nil
 					}
 					select {
 					case <-ctx.Done():
-						terminal, found, stateErr := store.Get(context.Background(), id)
+						terminal, found, stateErr := store.readPersisted(context.Background(), id)
 						if stateErr == nil && found && terminal.Status == "stopped" {
 							return nil
 						}
@@ -418,6 +332,19 @@ func ServeSupervisor(ctx context.Context, store *Store, id string, readyFD int) 
 		cancelRun()
 		<-signalServerDone
 	}()
+	// Best-effort liveness observability, not a correctness mechanism: a
+	// stuck guest is logged, never acted on automatically (no forced
+	// kill/restart) - see guesttransport.RunHeartbeat's own doc comment
+	// for why a single missed probe isn't "confirmed" stuck. Stops on its
+	// own once runContext is canceled above.
+	go guesttransport.RunHeartbeat(runContext, agent, 5*time.Second, 3, func(stuck bool, consecutiveMisses int) {
+		fields := observability.Fields{"container_id": id, "consecutive_misses": consecutiveMisses}
+		if stuck {
+			observability.Warn("guest heartbeat missed repeatedly; guest may be stuck", fields)
+			return
+		}
+		observability.Info("guest heartbeat recovered", fields)
+	})
 	commandLine := "console=ttyS0,115200 earlycon=uart,io,0x3f8,115200 ignore_loglevel panic=0 rdinit=/sbin/init 8250.nr_uarts=2 platform_factory.guest_transport=ttyS1 platform_factory.guest_config=/etc/platform-factory/guest-transport.json"
 	result, err := kvm.RunLinuxWithOptions(
 		runContext,
@@ -493,11 +420,9 @@ func acceptStartCommand(ctx context.Context, listener *net.UnixListener, store *
 		}
 		var request startResult
 		decodeErr := json.NewDecoder(io.LimitReader(connection, 4097)).Decode(&request)
-		current, found, stateErr := store.Get(ctx, state.ID)
+		current, found, stateErr := store.readPersisted(ctx, state.ID)
 		valid := decodeErr == nil && stateErr == nil && found &&
-			request.Command == "start" && request.ID == state.ID &&
-			request.PID == os.Getpid() && current.PID == os.Getpid() &&
-			request.Incarnation == incarnation && stateIncarnation(current) == incarnation
+			validSupervisorRequest(request, current, state, incarnation, "start")
 		if valid {
 			return connection, nil
 		}
@@ -555,11 +480,9 @@ func serveSignalCommands(
 		}
 		var request startResult
 		decodeErr := json.NewDecoder(io.LimitReader(connection, 4097)).Decode(&request)
-		current, found, stateErr := store.Get(ctx, state.ID)
+		current, found, stateErr := store.readPersisted(ctx, state.ID)
 		valid := decodeErr == nil && stateErr == nil && found &&
-			request.Command == "signal" && request.ID == state.ID &&
-			request.PID == os.Getpid() && current.PID == os.Getpid() &&
-			request.Incarnation == incarnation && stateIncarnation(current) == incarnation &&
+			validSupervisorRequest(request, current, state, incarnation, "signal") &&
 			guestTerminationSignal(syscall.Signal(request.Signal))
 		if !valid {
 			cause := errors.New("invalid or stale supervisor signal command")
@@ -609,18 +532,9 @@ func writeSignalResponse(connection io.Writer, state State, incarnation string, 
 	return nil
 }
 
-// shutdownMarker is the fixed portion of the line cmd/microvm-init's
-// realMainChild logs over COM1 right before it attempts poweroff, once the
-// supervised child has exited. See newShutdownLogWatcher.
 const shutdownMarker = "component=microvm-init operation=supervise phase=child-exit"
 
-// newShutdownLogWatcher wraps a serial console writer to notice, purely from
-// the host side, the one moment a guest-initiated shutdown becomes
-// observable: cmd/microvm-init logging that its child has exited and it's
-// about to call poweroff. It cannot wait for anything from the guest after
-// that - see the call site's comment - so it calls cancel as soon as the
-// marker appears in the byte stream, which handleLinuxSerialIO delivers one
-// byte at a time.
+// newShutdownLogWatcher observes the guest's final child-exit record.
 func newShutdownLogWatcher(underlying io.Writer, exited func(uint32)) io.Writer {
 	return &shutdownLogWatcher{underlying: underlying, exited: exited}
 }
@@ -654,21 +568,8 @@ func (w *shutdownLogWatcher) Write(p []byte) (int, error) {
 
 var shutdownExitPattern = regexp.MustCompile(regexp.QuoteMeta(shutdownMarker) + ` exit_code=([0-9]{1,3})(?: |$)`)
 
-// sandboxConfigForSupervisor builds the sandbox.Config this supervisor
-// applies to itself before touching the bundle's rootfs or /dev/kvm.
-// Seccomp is unconditional - this process needs no ambient privilege to
-// install it, and the filter's syscall allow-list was derived from what
-// this exact call path actually does (see sandbox.DefaultSeccompProfile's
-// doc comment). Capability-bounding-set dropping is handled separately, by
-// applyVMMSandbox above (probe-gated, and deliberately without a paired
-// setuid - see that function's doc comment); DropPrivileges is
-// deliberately left false here for the same reason: setuid(65534) can
-// succeed inside a rootless Podman invocation (which maps the invoking
-// user to UID 0 in its own user namespace, satisfying dropPrivileges'
-// euid==0 check) and then break /dev/kvm access outright on a host where
-// that device was chowned to a specific UID rather than a shared group.
-// Cgroups and namespaces stay annotation-gated - see
-// annotationSandboxCgroups/annotationSandboxNamespaces.
+// sandboxConfigForSupervisor always enables seccomp; host-dependent controls
+// require explicit annotations. UID changes are excluded to preserve /dev/kvm.
 func sandboxConfigForSupervisor(annotations map[string]string) (sandbox.Config, error) {
 	config := sandbox.Config{
 		Seccomp: true,
@@ -771,14 +672,14 @@ func virtioDevicesForSupervisor(annotations map[string]string) (options kvm.Linu
 }
 
 func loadPinnedBoot(annotations map[string]string) ([]byte, uint64, error) {
-	kernel, err := readPinnedFile(annotations[annotationKernelPath], annotations[annotationKernelDigest], "kernel")
+	kernel, err := readPinnedFile(annotations[annotationKernelPath], annotations[annotationKernelDigest], "kernel", maxKernelBytes)
 	if err != nil {
 		return nil, 0, err
 	}
 	memoryMiB := uint64(128)
 	if raw := annotations[annotationMemoryMiB]; raw != "" {
 		memoryMiB, err = strconv.ParseUint(raw, 10, 64)
-		if err != nil || memoryMiB < 64 || memoryMiB > 1<<20 {
+		if err != nil || memoryMiB < 64 || memoryMiB > 64<<10 {
 			return nil, 0, errors.New("oci runtime: memory-mib annotation is invalid")
 		}
 	}
@@ -807,7 +708,7 @@ func guestSignalName(signal syscall.Signal) string {
 	}
 }
 
-func readPinnedFile(path, digest, label string) ([]byte, error) {
+func readPinnedFile(path, digest, label string, maxBytes int64) ([]byte, error) {
 	if path == "" || !strings.HasPrefix(digest, "sha256:") || len(digest) != 71 {
 		return nil, fmt.Errorf("oci runtime: %s path and sha256 digest annotations are required", label)
 	}
@@ -815,9 +716,21 @@ func readPinnedFile(path, digest, label string) ([]byte, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("oci runtime: %s must be a real regular file", label)
 	}
-	data, err := os.ReadFile(path)
+	if maxBytes <= 0 || info.Size() > maxBytes {
+		return nil, fmt.Errorf("oci runtime: %s exceeds the %d byte limit", label, maxBytes)
+	}
+	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		clear(data)
+		return nil, fmt.Errorf("oci runtime: %s exceeds the %d byte limit", label, maxBytes)
 	}
 	sum := sha256.Sum256(data)
 	actual := "sha256:" + hex.EncodeToString(sum[:])

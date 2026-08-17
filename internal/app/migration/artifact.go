@@ -10,9 +10,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/core"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
+	"github.com/CYPT71/platform-factory/internal/observability"
 )
 
 // Base64 expands payloads by 4/3; 380 KiB leaves bounded room for the JSON-RPC

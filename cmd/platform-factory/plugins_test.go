@@ -9,8 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/plugin"
-	api "github.com/CYPT71/secure-oci-base/sdk/plugin"
+	"github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/plugin"
+	api "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 type stubPlugin struct {
@@ -31,6 +32,9 @@ func (s *stubPlugin) HasCapability(capability string) bool {
 	return false
 }
 func (s *stubPlugin) Close() error { return nil }
+func (s *stubPlugin) CallWithIdempotency(ctx context.Context, _ core.OperationID, method string, params, result any) error {
+	return s.Call(ctx, method, params, result)
+}
 func (s *stubPlugin) Call(_ context.Context, method string, _, result any) error {
 	if s.err != nil {
 		return s.err

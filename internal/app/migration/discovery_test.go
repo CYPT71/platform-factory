@@ -5,8 +5,9 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
 )
 
 type pageSource struct {
@@ -123,6 +124,19 @@ func TestDiscoverCancellation(t *testing.T) {
 	_, err := NewDiscoverer().Discover(ctx, source)
 	if !errors.Is(err, context.Canceled) || len(source.cursors) != 0 {
 		t.Fatalf("cancellation not propagated before provider call: err=%v calls=%v", err, source.cursors)
+	}
+}
+
+func TestDiscoverDeadlineStopsProviderCall(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	source := &pageSource{id: "slow-source", pages: map[string]DiscoveryPage{}, call: func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	result, err := NewDiscoverer().Discover(ctx, source)
+	if !errors.Is(err, context.DeadlineExceeded) || result.Discovery != domainmigration.DiscoveryFailed || len(source.cursors) != 1 {
+		t.Fatalf("result=%+v calls=%v err=%v", result, source.cursors, err)
 	}
 }
 

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
 )
 
 func TestPlannerBuildUsesDomainPlanner(t *testing.T) {

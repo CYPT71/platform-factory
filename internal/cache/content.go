@@ -95,12 +95,7 @@ func OpenChunked(store ContentStore, root Descriptor) (io.ReadCloser, ChunkManif
 	if decodeErr != nil {
 		return nil, ChunkManifest{}, fmt.Errorf("cache: decode chunk manifest: %w", decodeErr)
 	}
-	// secure-oci.dev/chunks/v1 is the pre-rebrand identifier: a chunk
-	// manifest is content-addressed and can persist in the CAS
-	// indefinitely, unlike the short-lived session record above, so it's
-	// still accepted for the documented compatibility overlap window
-	// (see docs/api-compatibility.md).
-	if (manifest.APIVersion != "platform-factory.dev/chunks/v1" && manifest.APIVersion != "secure-oci.dev/chunks/v1") || manifest.ChunkSize <= 0 {
+	if manifest.APIVersion != "platform-factory.dev/chunks/v1" || manifest.ChunkSize <= 0 {
 		return nil, ChunkManifest{}, errors.New("cache: invalid chunk manifest")
 	}
 	return &chunkReader{store: store, chunks: manifest.Chunks}, manifest, nil

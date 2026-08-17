@@ -6,7 +6,7 @@ import (
 	"context"
 	"runtime"
 
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
 )
 
 func ProbeNative(ctx context.Context) (api.Capabilities, error) {

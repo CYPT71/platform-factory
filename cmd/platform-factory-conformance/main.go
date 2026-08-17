@@ -5,6 +5,7 @@
 //	platform-factory-conformance vectors [DIR]     pipeline API vectors
 //	platform-factory-conformance plugin EXECUTABLE plugin protocol checks
 //	platform-factory-conformance backend [DIR]     execution backend vectors
+//	platform-factory-conformance publication [DIR] publication target vectors
 //
 // DIR, when given, must contain a vectors/ (or, for backend,
 // vectors-backend/) directory replacing the embedded corpus. Exit code 0
@@ -20,12 +21,12 @@ import (
 	"io/fs"
 	"os"
 
-	"github.com/CYPT71/secure-oci-base/conformance"
+	"github.com/CYPT71/platform-factory/conformance"
 )
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
-		fmt.Fprintln(stderr, "usage: platform-factory-conformance <vectors [DIR] | plugin EXECUTABLE | backend [DIR]>")
+		fmt.Fprintln(stderr, "usage: platform-factory-conformance <vectors [DIR] | plugin EXECUTABLE | backend [DIR] | publication [DIR]>")
 		return 2
 	}
 	var results []conformance.Result
@@ -55,6 +56,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		results, err = conformance.RunBackend(corpus)
+	case "publication":
+		var corpus fs.FS = conformance.EmbeddedPublicationVectors()
+		if len(args) == 2 {
+			corpus = os.DirFS(args[1])
+		} else if len(args) > 2 {
+			fmt.Fprintln(stderr, "usage: platform-factory-conformance publication [DIR]")
+			return 2
+		}
+		results, err = conformance.RunPublication(corpus)
 	default:
 		fmt.Fprintf(stderr, "platform-factory-conformance: unknown command %q\n", args[0])
 		return 2

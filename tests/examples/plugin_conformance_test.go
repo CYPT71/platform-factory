@@ -5,7 +5,7 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/conformance"
+	"github.com/CYPT71/platform-factory/conformance"
 )
 
 func TestLanguagePluginExamplesUseTheSameConformanceSuite(t *testing.T) {

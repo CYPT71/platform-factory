@@ -1,5 +1,4 @@
 // Package core defines the abstract interfaces for Platform Factory's domain.
-// See Sanetizer-todo.md items 9 and 33 for architectural separation requirements.
 package core
 
 import (
@@ -9,7 +8,6 @@ import (
 // CacheStore is the interface that pipeline stages use to store and retrieve
 // content-addressed build artifacts. It abstracts the concrete implementation
 // in internal/cache, allowing internal/executor to depend only on this interface.
-// See Sanetizer-todo.md item 9: "domain → interfaces ← implementations".
 type CacheStore interface {
 	// Put streams content into the cache and returns a descriptor.
 	// Identical content is deduplicated.
@@ -38,9 +36,9 @@ type Descriptor struct {
 	Size   int64  `json:"size"`
 }
 
-// CacheStageKeyInputs is re-exported from internal/cache for interface compatibility.
-// TODO(Sanetizer-todo): Move this type definition to api/ or core/ to avoid
-// the dependency on internal/cache types.
+// CacheStageKeyInputs is the core-owned input to deterministic stage-key
+// computation. Concrete cache implementations consume this contract without
+// leaking their types back into the domain.
 type CacheStageKeyInputs struct {
 	EngineVersion string
 	Stage         Stage

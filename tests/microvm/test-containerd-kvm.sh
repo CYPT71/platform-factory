@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prove that a real containerd owns and administers a real secure-oci
+# Prove that a real containerd owns and administers a real platform-factory
 # native-KVM MicroVM through platform-factory-shim's Sandbox+Task TTRPC contract,
 # driven by crictl exactly the way a kubelet would. This requires
 # Linux/amd64, /dev/kvm and root (a dedicated containerd instance, CNI); it
@@ -23,9 +23,9 @@ image=$2
 kernel=$3
 microvm_init=$4
 evidence_dir=${PLATFORM_FACTORY_EVIDENCE_DIR:-.}
-work=$(mktemp -d "${TMPDIR:-/tmp}/secure-oci-containerd-kvm.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-containerd-kvm.XXXXXX")
 sock="$work/containerd.sock"
-pod_name=secure-oci-containerd-e2e
+pod_name=platform-factory-containerd-e2e
 # Computed up front, not where first used below: cleanup() references these
 # under set -u, and must not fail on an unset variable if it fires from a
 # trap before the script reaches the block that would otherwise set them.
@@ -90,10 +90,10 @@ for plugin in bridge host-local loopback; do
   }
 done
 bridge_name=secoci-e2e0
-cat >"$work/cni.d/10-secure-oci-e2e.conflist" <<EOF
+cat >"$work/cni.d/10-platform-factory-e2e.conflist" <<EOF
 {
   "cniVersion": "1.0.0",
-  "name": "secure-oci-e2e",
+  "name": "platform-factory-e2e",
   "plugins": [
     {"type": "bridge", "bridge": "$bridge_name", "isGateway": true, "ipMasq": true,
      "ipam": {"type": "host-local", "subnet": "10.89.0.0/16", "routes": [{"dst": "0.0.0.0/0"}]}},

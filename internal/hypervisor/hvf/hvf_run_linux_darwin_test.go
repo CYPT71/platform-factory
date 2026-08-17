@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	api "github.com/CYPT71/secure-oci-base/internal/microvm"
-	vmruntime "github.com/CYPT71/secure-oci-base/internal/runtime"
+	api "github.com/CYPT71/platform-factory/internal/microvm"
+	vmruntime "github.com/CYPT71/platform-factory/internal/runtime"
 )
 
 func fileDigest(t *testing.T, path string) string {

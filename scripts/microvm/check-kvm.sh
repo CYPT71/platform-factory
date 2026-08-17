@@ -74,7 +74,7 @@ fi
 
 if [ "$fail" -ne 0 ]; then
   note ""
-  note "one or more checks failed; see https://github.com/CYPT71/secure-oci-base/wiki/MicroVM-Support for the install procedure."
+  note "one or more checks failed; see https://github.com/CYPT71/platform-factory/wiki/MicroVM-Support for the install procedure."
   exit 1
 fi
 echo "host is ready for scripts/microvm/run-microvm.sh ($HOST_ARCH)"

@@ -9,9 +9,9 @@ import (
 	"io"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/core"
-	domainmigration "github.com/CYPT71/secure-oci-base/internal/migration"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/core"
+	domainmigration "github.com/CYPT71/platform-factory/internal/migration"
+	"github.com/CYPT71/platform-factory/internal/observability"
 )
 
 type artifactExporter struct {

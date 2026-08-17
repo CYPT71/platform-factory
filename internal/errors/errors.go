@@ -1,4 +1,4 @@
-// Package errors provides a common typed error model for all secure-oci components.
+// Package errors provides a common typed error model for all platform-factory components.
 // It enables consistent error handling, categorization, and introspection across
 // the entire codebase while remaining compatible with the standard library error.
 package errors
@@ -13,7 +13,7 @@ import (
 // programmatic error handling across package boundaries.
 type ErrorCode string
 
-// Standard error codes used across the secure-oci project.
+// Standard error codes used across the platform-factory project.
 // Each code prefixes its domain (e.g., "pipeline.", "oci.", "plugin.").
 const (
 	// General errors

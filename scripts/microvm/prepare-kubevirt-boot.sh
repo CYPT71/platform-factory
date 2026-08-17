@@ -56,8 +56,8 @@ fi
 
 parent=$(dirname "$output")
 mkdir -p "$parent"
-context=$(mktemp -d "$parent/.secure-oci-kubevirt-boot.XXXXXX")
-work=$(mktemp -d "${TMPDIR:-/tmp}/secure-oci-kubevirt-boot.XXXXXX")
+context=$(mktemp -d "$parent/.platform-factory-kubevirt-boot.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-kubevirt-boot.XXXXXX")
 cleanup() {
   rm -rf "$work"
   [ -d "$context" ] && rm -rf "$context"

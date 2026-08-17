@@ -26,7 +26,7 @@ func isSeccompEnabled() bool  { return false }
 // ProbeSandbox reports that none of this package's real sandboxing
 // operations are implemented outside Linux. Details carries a reason
 // under each facility's own key (matching sandbox_linux.go's
-// ProbeSandbox), not just a generic one - callers like `secure-oci
+// ProbeSandbox), not just a generic one - callers like `platform-factory
 // doctor` look up the specific facility key for any check that came
 // back unavailable, and a missing key there reads as a bug (an
 // unavailable check with no explanation) rather than as "not on

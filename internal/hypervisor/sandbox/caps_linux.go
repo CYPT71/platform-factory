@@ -8,11 +8,7 @@ import (
 	"unsafe"
 )
 
-// capabilityBits maps every name in AllCapabilities to its Linux capability
-// bit number (linux/capability.h CAP_*). These are stable, published ABI
-// constants - the list and its order already matched CAP_CHOWN=0 through
-// CAP_CHECKPOINT_RESTORE=40 before this file existed, which is what let it
-// double as this table's construction below.
+// capabilityBits maps AllCapabilities to linux/capability.h bit numbers.
 var capabilityBits = func() map[string]uint {
 	bits := make(map[string]uint, len(AllCapabilities))
 	for i, name := range AllCapabilities {

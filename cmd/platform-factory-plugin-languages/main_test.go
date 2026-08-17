@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	plugin "github.com/CYPT71/secure-oci-base/sdk/plugin"
+	plugin "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 func TestOfficialAdaptersCoverSupportedLanguages(t *testing.T) {
@@ -51,7 +51,7 @@ func TestOfficialDetectAndValidationErrors(t *testing.T) {
 	}
 	raw, _ := json.Marshal(plugin.DetectParams{Path: root})
 	value, err := handleDetect(context.Background(), raw)
-	if err != nil || value.(plugin.DetectResult).Kind != "go" {
+	if err != nil || value.(plugin.DetectResult).Kind != "unknown" || len(value.(plugin.DetectResult).Evidence) == 0 {
 		t.Fatalf("value=%+v err=%v", value, err)
 	}
 	for _, raw := range []json.RawMessage{[]byte(`{`), []byte(`{}`)} {

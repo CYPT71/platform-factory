@@ -10,7 +10,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/CYPT71/secure-oci-base/plugins/containerd/internal/containerdshim"
+	"github.com/CYPT71/platform-factory/plugins/containerd/internal/containerdshim"
 )
 
 var version = "dev"

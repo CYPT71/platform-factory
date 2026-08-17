@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/secure-oci-base/internal/oci"
+	"github.com/CYPT71/platform-factory/internal/oci"
 )
 
 func buildLayout(t *testing.T) string {
-	return buildNamedLayout(t, "secure-oci-base", "latest", "amd64", "payload")
+	return buildNamedLayout(t, "platform-factory-base", "latest", "amd64", "payload")
 }
 
 func buildNamedLayout(t *testing.T, image, tag, architecture, payload string) string {
@@ -136,6 +136,34 @@ func TestVerifyAndInspectLayout(t *testing.T) {
 	inspected, err := Inspect(root)
 	if err != nil || inspected.Platforms[0].Digest == "" {
 		t.Fatalf("inspect=%+v err=%v", inspected, err)
+	}
+}
+
+func TestVerifyForLocalImportSkipsTheSecretScanButKeepsEveryOtherCheck(t *testing.T) {
+	root := buildNamedLayout(t, "example/api", "v1", "amd64", "password=hunter2")
+	if _, err := Verify(root); err == nil {
+		t.Fatal("Verify should still reject a layer carrying a real secret-shaped marker")
+	}
+	report, err := VerifyForLocalImport(root)
+	if err != nil {
+		t.Fatalf("VerifyForLocalImport should accept the same layout: %v", err)
+	}
+	if !report.Valid || report.Manifests != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+
+	// Every other check VerifyForLocalImport shares with Verify must
+	// still reject corruption - only the secret scan is skipped.
+	corrupt := buildNamedLayout(t, "example/api", "v1", "amd64", "password=hunter2")
+	entries, err := os.ReadDir(filepath.Join(corrupt, "blobs", "sha256"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(corrupt, "blobs", "sha256", entries[0].Name()), []byte("corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyForLocalImport(corrupt); err == nil {
+		t.Fatal("VerifyForLocalImport should still reject a corrupted blob")
 	}
 }
 

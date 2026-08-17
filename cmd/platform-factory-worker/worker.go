@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	typederrors "github.com/CYPT71/secure-oci-base/internal/errors"
-	"github.com/CYPT71/secure-oci-base/internal/observability"
-	"github.com/CYPT71/secure-oci-base/internal/provenance"
+	typederrors "github.com/CYPT71/platform-factory/internal/errors"
+	"github.com/CYPT71/platform-factory/internal/observability"
+	"github.com/CYPT71/platform-factory/internal/provenance"
 )
 
 // Client talks to one control plane. Execute is called for every lease

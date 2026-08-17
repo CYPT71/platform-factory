@@ -1,0 +1,47 @@
+DÉMO INTERMÉDIAIRE — quatre stacks, preuves honnêtes
+====================================================
+
+# Précondition : demo-bin créé par demo-junior.txt est dans PATH.
+DEMO_ROOT="${TMPDIR:-/tmp}/pf-demo-intermediaire"
+mkdir -p "$DEMO_ROOT"/{go,python,javascript,typescript}
+
+printf 'package main\nimport "fmt"\nfunc main(){fmt.Println("release Go")}\n' > "$DEMO_ROOT/go/main.go"
+printf 'print("release Python")\n' > "$DEMO_ROOT/python/app.py"
+printf 'console.log("release JavaScript");\n' > "$DEMO_ROOT/javascript/index.js"
+printf 'const message: string = "release TypeScript";\nconsole.log(message);\n' > "$DEMO_ROOT/typescript/index.ts"
+
+# 1. Même contrat PF pour détecter et initialiser les quatre stacks.
+for stack in go python javascript typescript; do
+  echo "===== $stack ====="
+  cd "$DEMO_ROOT/$stack"
+  pf init --yes .
+  pf inspect
+  pf doctor build
+  test -f pf.yaml && test -f pf.lock
+done
+
+# 2. Parcours OCI complet actuellement prouvé pour l'exécutable statique Go.
+cd "$DEMO_ROOT/go"
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o app main.go
+pf build --dist dist --reports reports --entrypoint /app/app app
+pf verify dist/oci-layout
+test -f dist/sbom.json && test -f reports/build.json
+pf status
+
+# 3. Exécution native des trois stacks interprétées/transpilées. Aucun paquet
+# réseau n'est nécessaire pour Python et JavaScript. TypeScript utilise le
+# compilateur local s'il est disponible ; sinon la démo s'arrête avec une
+# précondition claire au lieu de prétendre avoir exécuté le .ts directement.
+(cd "$DEMO_ROOT/python" && python3 app.py)
+(cd "$DEMO_ROOT/javascript" && node index.js)
+if command -v tsx >/dev/null 2>&1; then
+  (cd "$DEMO_ROOT/typescript" && tsx index.ts)
+elif command -v ts-node >/dev/null 2>&1; then
+  (cd "$DEMO_ROOT/typescript" && ts-node index.ts)
+else
+  echo "TypeScript détecté et initialisé ; installez tsx ou ts-node pour l'exécuter dans cette démo." >&2
+fi
+
+# Limite annoncée : PF ne fabrique pas encore une image Linux autonome à partir
+# d'un script Python/Node sans couche runtime. Le builder refuse donc ces scripts
+# comme exécutables OCI, au lieu de produire une image trompeuse ou non lançable.

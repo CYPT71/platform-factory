@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,8 +16,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
-	"github.com/CYPT71/secure-oci-base/internal/oci"
+	"github.com/CYPT71/platform-factory/internal/oci"
 )
 
 func testLayout(t *testing.T) string {
@@ -31,6 +33,33 @@ func testLayout(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return output
+}
+
+func TestCleanupSessionsRemovesOnlyAbandonedOwnedCheckpoints(t *testing.T) {
+	dir := t.TempDir()
+	oldName := strings.Repeat("a", 64) + ".json"
+	newName := strings.Repeat("b", 64) + ".json"
+	unrelated := "notes.json"
+	for _, name := range []string{oldName, newName, unrelated} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldTime := time.Now().Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(filepath.Join(dir, oldName), oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Client{SessionDir: dir}).CleanupSessions(7 * 24 * time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, oldName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old checkpoint still present: %v", err)
+	}
+	for _, name := range []string{newName, unrelated} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("preserved file %s: %v", name, err)
+		}
+	}
 }
 
 func TestReadVerifiedBlobRejectsCorruptDescriptorsAndContent(t *testing.T) {
@@ -199,8 +228,9 @@ func TestPushArtifactFailsClosedAtEachRegistryBoundary(t *testing.T) {
 
 func TestRegistryURLAndDigestHelpersFailClosed(t *testing.T) {
 	client := &Client{}
-	if client.httpClient() != http.DefaultClient {
-		t.Fatal("nil client did not use the standard HTTP client")
+	resolvedHTTP := client.httpClient()
+	if resolvedHTTP == http.DefaultClient || resolvedHTTP.Transport != http.DefaultClient.Transport || resolvedHTTP.CheckRedirect == nil {
+		t.Fatal("nil client did not clone the standard HTTP client with redirects disabled")
 	}
 	target := Reference{Registry: "registry.example", Repository: "team/service", Tag: "v1"}
 	if _, err := client.resolveLocation(target, "https://other.example/upload"); err == nil {
@@ -275,6 +305,8 @@ func (r *oneShotReader) Read(buffer []byte) (int, error) {
 func TestPushLayoutUploadsBlobsBeforeDigestAndTag(t *testing.T) {
 	var mu sync.Mutex
 	uploads := map[string][]byte{}
+	blobs := map[string][]byte{}
+	manifests := map[string][]byte{}
 	known := map[string]bool{}
 	var events []string
 	nextUpload := 0
@@ -304,13 +336,30 @@ func TestPushLayoutUploadsBlobsBeforeDigestAndTag(t *testing.T) {
 				t.Errorf("invalid completed upload digest=%q bytes=%d", digest, len(uploads[path]))
 			}
 			known[digest] = true
+			blobs[digest] = append([]byte(nil), uploads[path]...)
 			events = append(events, "blob")
 			return response(http.StatusCreated, "", nil)
+		case r.Method == http.MethodGet && strings.Contains(path, "/blobs/"):
+			digest, _ := url.PathUnescape(path[strings.LastIndex(path, "/")+1:])
+			blob, ok := blobs[digest]
+			if !ok {
+				return response(http.StatusNotFound, "", nil)
+			}
+			return response(http.StatusOK, "", bytes.NewReader(blob))
 		case r.Method == http.MethodPut && strings.Contains(path, "/manifests/"):
 			reference, _ := url.PathUnescape(path[strings.LastIndex(path, "/")+1:])
-			_, _ = io.Copy(io.Discard, r.Body)
+			manifests[reference], _ = io.ReadAll(r.Body)
 			events = append(events, "manifest:"+reference)
 			return response(http.StatusCreated, "", nil)
+		case r.Method == http.MethodGet && strings.Contains(path, "/manifests/"):
+			reference, _ := url.PathUnescape(path[strings.LastIndex(path, "/")+1:])
+			manifest, ok := manifests[reference]
+			if !ok {
+				return response(http.StatusNotFound, "", nil)
+			}
+			result := response(http.StatusOK, "", bytes.NewReader(manifest))
+			result.Header.Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			return result
 		default:
 			return response(http.StatusNotFound, "", strings.NewReader(r.Method+" "+path))
 		}
@@ -328,12 +377,30 @@ func TestPushLayoutUploadsBlobsBeforeDigestAndTag(t *testing.T) {
 		t.Fatalf("publication was not digest-before-tag: %v", events)
 	}
 	client := &Client{HTTP: &http.Client{Transport: transport}, Scheme: "https"}
+	blobEventsBeforeSecondPush := 0
+	for _, event := range events {
+		if event == "blob" {
+			blobEventsBeforeSecondPush++
+		}
+	}
 	byDigest, err := client.PushLayoutByDigest(context.Background(), testLayout(t), target, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if byDigest.Digest != result.Digest || events[len(events)-1] != "manifest:"+result.Digest {
 		t.Fatalf("digest-only publication moved a tag: result=%+v events=%v", byDigest, events)
+	}
+	if byDigest.Blobs != 0 {
+		t.Fatalf("already-present blobs were uploaded again: result=%+v", byDigest)
+	}
+	blobEventsAfterSecondPush := 0
+	for _, event := range events {
+		if event == "blob" {
+			blobEventsAfterSecondPush++
+		}
+	}
+	if blobEventsAfterSecondPush != blobEventsBeforeSecondPush {
+		t.Fatalf("already-present blobs caused upload traffic: before=%d after=%d events=%v", blobEventsBeforeSecondPush, blobEventsAfterSecondPush, events)
 	}
 	if err := client.TagLayout(context.Background(), testLayout(t), target, ""); err != nil {
 		t.Fatal(err)
@@ -343,12 +410,94 @@ func TestPushLayoutUploadsBlobsBeforeDigestAndTag(t *testing.T) {
 	}
 	artifact, err := (&Client{HTTP: &http.Client{Transport: transport}, Scheme: "https"}).PushArtifact(
 		context.Background(), target, result.Digest, result.MediaType, result.Size,
-		"application/vnd.secure-oci.sbom.v1+json", "application/json", []byte(`{"components":[]}`))
+		"application/vnd.platform-factory.sbom.v1+json", "application/json", []byte(`{"components":[]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if artifact.Digest == "" || events[len(events)-1] != "manifest:"+artifact.Digest {
 		t.Fatalf("artifact=%+v events=%v", artifact, events)
+	}
+}
+
+func TestPushLayoutRefusesUnverifiableInstalledManifestBeforeTag(t *testing.T) {
+	tagMoved := false
+	layout := testLayout(t)
+	transport := roundTripFunc(func(r *http.Request) *http.Response {
+		switch {
+		case r.Method == http.MethodHead && strings.Contains(r.URL.Path, "/blobs/"):
+			return response(http.StatusOK, "", nil)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/blobs/"):
+			// The remote blob verifier must pass before this test reaches its
+			// intended manifest-verification boundary.
+			digest, _ := url.PathUnescape(r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:])
+			data, err := os.ReadFile(filepath.Join(layout, "blobs", "sha256", strings.TrimPrefix(digest, "sha256:")))
+			if err != nil {
+				return response(http.StatusNotFound, "", nil)
+			}
+			return response(http.StatusOK, "", bytes.NewReader(data))
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/manifests/"):
+			reference, _ := url.PathUnescape(r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:])
+			if reference == "v1" {
+				tagMoved = true
+			}
+			return response(http.StatusCreated, "", nil)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/manifests/"):
+			return response(http.StatusOK, "", strings.NewReader("tampered"))
+		default:
+			return response(http.StatusNotFound, "", nil)
+		}
+	})
+	target := Reference{Registry: "registry.example", Repository: "team/service", Tag: "v1"}
+	_, err := (&Client{HTTP: &http.Client{Transport: transport}, Scheme: "https"}).PushLayout(
+		context.Background(), layout, target, "")
+	if err == nil || !strings.Contains(err.Error(), "verify installed manifest") {
+		t.Fatalf("err=%v", err)
+	}
+	if tagMoved {
+		t.Fatal("tag moved after the installed digest could not be verified")
+	}
+}
+
+func TestPushLayoutVerifiesEveryRemoteBlobBeforeManifestOrTag(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		tampered bool
+		want     string
+	}{{name: "truncated", want: "size mismatch"}, {name: "tampered", tampered: true, want: "digest mismatch"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			layout := testLayout(t)
+			manifestWritten := false
+			transport := roundTripFunc(func(r *http.Request) *http.Response {
+				switch {
+				case r.Method == http.MethodHead && strings.Contains(r.URL.Path, "/blobs/"):
+					return response(http.StatusOK, "", nil)
+				case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/blobs/"):
+					if !tc.tampered {
+						return response(http.StatusOK, "", nil)
+					}
+					digest, _ := url.PathUnescape(r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:])
+					data, err := os.ReadFile(filepath.Join(layout, "blobs", "sha256", strings.TrimPrefix(digest, "sha256:")))
+					if err != nil || len(data) == 0 {
+						return response(http.StatusNotFound, "", nil)
+					}
+					data[0] ^= 0xff
+					return response(http.StatusOK, "", bytes.NewReader(data))
+				case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/manifests/"):
+					manifestWritten = true
+					return response(http.StatusCreated, "", nil)
+				default:
+					return response(http.StatusNotFound, "", nil)
+				}
+			})
+			target := Reference{Registry: "registry.example", Repository: "team/service", Tag: "v1"}
+			_, err := (&Client{HTTP: &http.Client{Transport: transport}, Scheme: "https"}).PushLayout(context.Background(), layout, target, "")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v", err)
+			}
+			if manifestWritten {
+				t.Fatal("manifest or tag was written after remote blob verification failed")
+			}
+		})
 	}
 }
 
@@ -663,6 +812,112 @@ type roundTripErrorFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripErrorFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return f(request)
+}
+
+// TestGetBlobFollowsABlobRedirectWhenOptedIn covers the real Docker Hub
+// pattern this was added for: a blob GET answered with a 307 to a
+// separate content host. GetBlob's default behavior (FollowBlobRedirects
+// unset) must be completely unaffected - the shared httpClient's own
+// CheckRedirect already refuses every 3xx outright for every other
+// caller, and this test proves that isn't accidentally weakened.
+func TestGetBlobFollowsABlobRedirectWhenOptedIn(t *testing.T) {
+	content := []byte("blob content")
+	digest := "sha256:" + hex.EncodeToString(sha256Sum(content))
+	hops := 0
+	// 203.0.113.1 is TEST-NET-3 (RFC 5737): a real, safe public IP
+	// literal requiring no DNS resolution or real network access,
+	// matching internal/marketplace's catalog-fetcher tests' own
+	// convention for the same class of hermetic SSRF test. A hostname
+	// (even a fake, obviously-nonexistent one) would trigger a genuine
+	// DNS lookup before the request ever reaches this fake transport,
+	// since checkRedirectHostSafe validates the redirect target
+	// independently of how the eventual HTTP request is transported.
+	transport := roundTripFunc(func(r *http.Request) *http.Response {
+		if r.URL.Host == "registry.example" {
+			hops++
+			return response(http.StatusTemporaryRedirect, "https://203.0.113.1/blob-content", nil)
+		}
+		if r.URL.Host == "203.0.113.1" {
+			return response(http.StatusOK, "", bytes.NewReader(content))
+		}
+		t.Fatalf("unexpected request to %s", r.URL.Host)
+		return nil
+	})
+	target := Reference{Registry: "registry.example", Repository: "team/service"}
+
+	optedOut := &Client{HTTP: &http.Client{Transport: transport}}
+	if _, err := optedOut.GetBlob(context.Background(), target, digest); err == nil {
+		t.Fatal("GetBlob without FollowBlobRedirects must still refuse a 3xx, exactly as before")
+	}
+
+	hops = 0
+	optedIn := &Client{HTTP: &http.Client{Transport: transport}, FollowBlobRedirects: true}
+	got, err := optedIn.GetBlob(context.Background(), target, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("got=%q", got)
+	}
+	if hops != 1 {
+		t.Fatalf("hops=%d", hops)
+	}
+}
+
+// TestGetBlobRejectsRedirectToABlockedAddress proves the redirect target
+// is validated like any other network-returned, untrusted destination
+// (the same threat model internal/marketplace's catalog fetcher already
+// applies) rather than followed blindly once opted in.
+func TestGetBlobRejectsRedirectToABlockedAddress(t *testing.T) {
+	content := []byte("blob content")
+	digest := "sha256:" + hex.EncodeToString(sha256Sum(content))
+	for name, location := range map[string]string{
+		"non-https":      "http://cdn.example/blob",
+		"loopback":       "https://127.0.0.1/blob",
+		"link-local":     "https://169.254.169.254/blob",
+		"unresolvable":   "https://this-host-does-not-resolve.invalid/blob",
+		"missing-header": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			transport := roundTripFunc(func(r *http.Request) *http.Response {
+				return response(http.StatusFound, location, nil)
+			})
+			client := &Client{HTTP: &http.Client{Transport: transport}, FollowBlobRedirects: true}
+			target := Reference{Registry: "registry.example", Repository: "team/service"}
+			if _, err := client.GetBlob(context.Background(), target, digest); err == nil {
+				t.Fatalf("expected %s redirect target to be rejected", name)
+			}
+		})
+	}
+}
+
+// TestGetBlobBoundsRedirectHops proves an (accidental or malicious)
+// infinite redirect loop cannot hang or resource-exhaust the caller.
+func TestGetBlobBoundsRedirectHops(t *testing.T) {
+	content := []byte("blob content")
+	digest := "sha256:" + hex.EncodeToString(sha256Sum(content))
+	hops := 0
+	// Every hop must itself resolve safely (203.0.113.1, TEST-NET-3 -
+	// see the success test above) so the walk actually reaches and is
+	// stopped by the hop-count bound, rather than failing early on an
+	// unrelated DNS lookup and passing this test for the wrong reason.
+	transport := roundTripFunc(func(r *http.Request) *http.Response {
+		hops++
+		return response(http.StatusFound, "https://203.0.113.1/blob", nil)
+	})
+	client := &Client{HTTP: &http.Client{Transport: transport}, FollowBlobRedirects: true}
+	target := Reference{Registry: "registry.example", Repository: "team/service"}
+	if _, err := client.GetBlob(context.Background(), target, digest); err == nil {
+		t.Fatal("expected an unbounded redirect chain to be rejected")
+	}
+	if hops > maxBlobRedirectHops+1 {
+		t.Fatalf("followed %d hops, expected the walk to stop at the %d-hop bound", hops, maxBlobRedirectHops)
+	}
+}
+
+func sha256Sum(data []byte) []byte {
+	sum := sha256.Sum256(data)
+	return sum[:]
 }
 
 func response(status int, location string, body io.Reader) *http.Response {

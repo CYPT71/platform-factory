@@ -8,7 +8,7 @@ import (
 
 // FuzzLoad feeds arbitrary bytes as a project config file (YAML or JSON -
 // the decoder accepts both) at Load. A project config is user-authored and
-// checked into an arbitrary repository secure-oci is pointed at, so it is
+// checked into an arbitrary repository platform-factory is pointed at, so it is
 // untrusted input by construction.
 func FuzzLoad(f *testing.F) {
 	dir := f.TempDir()

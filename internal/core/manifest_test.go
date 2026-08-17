@@ -7,10 +7,7 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// exampleManifestYAML mirrors Sanetizer-todo.md item 11's own example
-// verbatim, so this test proves the schema actually accepts the manifest
-// shape the roadmap specifies, not just a shape convenient to the
-// implementation.
+// exampleManifestYAML exercises the public manifest contract.
 const exampleManifestYAML = `
 id: kubevirt
 version: 1.2.0
@@ -29,13 +26,13 @@ permissions:
     - kubeconfig
 `
 
-func TestPluginManifestDecodesTheRoadmapExampleYAML(t *testing.T) {
+func TestPluginManifestDecodesPublicExample(t *testing.T) {
 	var manifest PluginManifest
 	if err := yaml.Unmarshal([]byte(exampleManifestYAML), &manifest); err != nil {
 		t.Fatal(err)
 	}
 	if err := manifest.Validate(); err != nil {
-		t.Fatalf("expected the roadmap's own example to validate, got: %v", err)
+		t.Fatalf("expected public example to validate, got: %v", err)
 	}
 	if manifest.ID != "kubevirt" || manifest.Version != "1.2.0" || manifest.ProtocolVersion != 1 {
 		t.Fatalf("manifest=%+v", manifest)
