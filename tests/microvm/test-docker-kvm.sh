@@ -42,13 +42,29 @@ cleanup() {
   # platform-factory-runtime's own supervisor.log is the only place a
   # start-time crash (e.g. "supervisor died before responding to start")
   # explains itself - see test-podman-kvm.sh's identical capture for why.
-  # dockerd normally runs as root, so its store lives under /run/user/0;
-  # sudo covers that without assuming which UID actually launched it.
-  for log in /run/user/*/platform-factory-runtime/*.supervisor.log; do
-    [ -e "$log" ] || continue
-    sudo cp "$log" "$evidence_dir/docker-microvm-$(basename "$log")" 2>/dev/null || true
-    sudo chown "$(id -u):$(id -g)" "$evidence_dir/docker-microvm-$(basename "$log")" 2>/dev/null || true
-  done
+  #
+  # Docker never falls back to platform-factory-runtime's own
+  # XDG_RUNTIME_DIR/euid default (/run/user/0/platform-factory-runtime):
+  # dockerd's own containerd passes an explicit --root to every OCI
+  # runtime it drives, always under /run/docker/runtime-<name>/moby
+  # regardless of which runtime is actually configured (verified against
+  # a real dockerd: platform-factory-runtime still lands under
+  # /run/docker/runtime-runc/moby, not a "runtime-platform-factory"
+  # directory) - so search there, with /run/user as a fallback in case a
+  # differently-configured dockerd (e.g. rootless) resolves it
+  # differently.
+  #
+  # Neither root argument may itself be a glob: /run/docker and
+  # /run/user/0 are both root-only (mode 0700), and a pattern like
+  # /run/user/*/platform-factory-runtime expands in *this* unprivileged
+  # shell before sudo ever runs a single command - it can never see
+  # inside a directory it cannot read, no matter how the command it's
+  # building gets sudo'd. Starting the traversal from the plain,
+  # unprivileged-readable /run and letting `find` (now running as root)
+  # descend from there is the only way to actually reach it.
+  sudo find /run/docker /run/user -maxdepth 6 -name '*.supervisor.log' \
+    -exec sh -c 'cp "$1" "'"$evidence_dir"'/docker-microvm-$(basename "$1")" && chown "'"$(id -u)"':'"$(id -g)"'" "'"$evidence_dir"'/docker-microvm-$(basename "$1")"' _ {} \; \
+    2>/dev/null || true
   docker rm --force "$container_name" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -90,34 +106,39 @@ echo "$container_id"
 # function's own SIGPIPE-avoidance comment for why). Poll the
 # supervisor.log directly for the same evidence instead - this is not a
 # workaround for a bug, it is the only place this information has ever
-# existed. dockerd normally runs as root, so its store lives under
-# /run/user/0, but sudo-globbing every /run/user/*/platform-factory-runtime
-# (same glob the cleanup trap above already uses successfully) avoids
-# hardcoding that assumption.
+# existed. Search under both /run/docker and /run/user (see the cleanup
+# trap above's own comment for why: dockerd's containerd always passes
+# an explicit --root under /run/docker/runtime-*/moby to the OCI
+# runtime, bypassing platform-factory-runtime's own XDG_RUNTIME_DIR/euid
+# default, but /run/user is kept as a fallback for differently
+# configured dockerds). Both roots are root-only (mode 0700), so finding
+# the file needs `sudo find` to do the traversal itself starting from
+# the plain, unprivileged-readable /run (see the cleanup trap above's
+# own comment on why a glob here doesn't work: it would expand in this
+# unprivileged shell before sudo ever runs, and can never see inside a
+# directory it cannot read no matter how the command built from it gets
+# sudo'd).
 supervisor_log=""
-find_supervisor_log() {
-  for log in /run/user/*/platform-factory-runtime/"$container_id".supervisor.log; do
-    sudo test -e "$log" || continue
-    supervisor_log=$log
-    return 0
-  done
-  return 1
-}
-
+found=0
 for _ in $(seq 1 90); do
   docker ps --filter "name=^${container_name}\$" --format json \
     >"$evidence_dir/docker-microvm-ps.json"
   docker logs "$container_name" >"$evidence_dir/docker-microvm-logs.txt" 2>&1 || true
-  if { [ -n "$supervisor_log" ] || find_supervisor_log; } \
-    && sudo grep -Fq '"component":"example-service"' "$supervisor_log"; then
-    break
+  if [ -z "$supervisor_log" ]; then
+    supervisor_log=$(sudo find /run/docker /run/user -maxdepth 6 \
+      -name "$container_id.supervisor.log" 2>/dev/null | head -1)
+  fi
+  if [ -n "$supervisor_log" ]; then
+    if sudo grep -Fq '"component":"example-service"' "$supervisor_log"; then
+      found=1
+      break
+    fi
   fi
   sleep 1
 done
 running_name=$(docker ps --filter "name=^${container_name}\$" --format '{{.Names}}')
 [ "$running_name" = "$container_name" ]
-[ -n "$supervisor_log" ]
-sudo grep -Fq '"component":"example-service"' "$supervisor_log"
+[ "$found" -eq 1 ]
 
 docker stop --time 20 "$container_name" | tee "$evidence_dir/docker-microvm-stop.txt"
 test "$(docker inspect --format '{{.State.Status}}' "$container_name")" = exited

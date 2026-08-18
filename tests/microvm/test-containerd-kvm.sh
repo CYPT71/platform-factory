@@ -68,7 +68,16 @@ cleanup() {
   # here, since this whole script runs the shim as root via sudo - not
   # under $work/state at all. Same start-time-crash rationale as
   # test-podman-kvm.sh's identical capture.
-  sudo find /run/user/*/platform-factory-runtime -maxdepth 1 -name '*.supervisor.log' \
+  #
+  # find's root argument must not itself be a glob: /run/user/0 is
+  # root-only (mode 0700), and a pattern like /run/user/*/platform-factory-runtime
+  # expands in *this* unprivileged shell before sudo ever runs a single
+  # command - it can never see inside a directory it cannot read, no
+  # matter how the command it's building gets sudo'd. Starting the
+  # traversal from the plain, unprivileged-readable /run/user and letting
+  # `find` (now running as root) descend from there is the only way to
+  # actually reach it.
+  sudo find /run/user -mindepth 3 -maxdepth 3 -name '*.supervisor.log' \
     -exec sh -c 'install -o "'"$invoking_uid"'" -g "'"$invoking_gid"'" -m 0644 "$1" "'"$evidence_dir"'/containerd-microvm-$(basename "$1")"' _ {} \; \
     2>/dev/null || true
   crictl -r "unix://$sock" rmp -a -f >/dev/null 2>&1 || true
@@ -248,23 +257,28 @@ log_path="$work/logs/example-service.log"
 # same as the podman/docker proofs - see test-podman-kvm.sh's identical
 # check for why. Poll that instead of, not just in addition to, $log_path.
 supervisor_log=""
-find_supervisor_log() {
-  for log in /run/user/*/platform-factory-runtime/"$container_id".supervisor.log; do
-    sudo test -e "$log" || continue
-    supervisor_log=$log
-    return 0
-  done
-  return 1
-}
-
+found=0
 for _ in $(seq 1 90); do
   crictl -r "unix://$sock" ps -a >"$evidence_dir/containerd-microvm-ps.txt" 2>&1 || true
-  if { [ -n "$supervisor_log" ] || find_supervisor_log; } \
-    && sudo grep -Fq '"component":"example-service"' "$supervisor_log"; then
-    break
+  if [ -z "$supervisor_log" ]; then
+    # /run/user/0 is root-only (mode 0700): a glob like
+    # /run/user/*/platform-factory-runtime/... expands in *this*
+    # unprivileged shell before sudo ever runs, so it can never see
+    # inside it - sudo on the existence check alone (the bug this
+    # replaced) was already too late. `sudo find` does the traversal
+    # itself under root, the only way to actually reach it.
+    supervisor_log=$(sudo find /run/user -mindepth 3 -maxdepth 3 \
+      -name "$container_id.supervisor.log" 2>/dev/null | head -1)
+  fi
+  if [ -n "$supervisor_log" ]; then
+    if sudo grep -Fq '"component":"example-service"' "$supervisor_log"; then
+      found=1
+      break
+    fi
   fi
   sleep 1
 done
+[ "$found" -eq 1 ]
 # install -o/-g/-m, not cp: see the cleanup() trap's comment on why a plain
 # cp of a root-owned log breaks actions/upload-artifact, which runs
 # unprivileged.
@@ -272,8 +286,8 @@ sudo install -o "$invoking_uid" -g "$invoking_gid" -m 0644 \
   "$log_path" "$evidence_dir/containerd-microvm-logs.txt" 2>/dev/null || true
 [ -n "$supervisor_log" ] && sudo install -o "$invoking_uid" -g "$invoking_gid" -m 0644 \
   "$supervisor_log" "$evidence_dir/containerd-microvm-supervisor.log" 2>/dev/null || true
-[ -n "$supervisor_log" ]
-sudo grep -Fq '"component":"example-service"' "$supervisor_log"
+# found=1 (asserted above, right after the loop) already guarantees both
+# supervisor_log is set and it contains the expected line.
 running_state=$(crictl -r "unix://$sock" inspect "$container_id" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"]["state"])')
 [ "$running_state" = CONTAINER_RUNNING ]
