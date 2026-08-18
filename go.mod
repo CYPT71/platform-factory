@@ -2,7 +2,7 @@ module github.com/CYPT71/platform-factory
 
 go 1.25.12
 
-require go.yaml.in/yaml/v3 v3.0.4
+require go.yaml.in/yaml/v3 v3.0.5
 
 require (
 	github.com/CYPT71/platform-factory/cmd/tui v0.0.0-00010101000000-000000000000
@@ -12,11 +12,19 @@ require (
 )
 
 require (
+	github.com/catppuccin/go v0.3.0 // indirect
+	github.com/charmbracelet/x/exp/strings v0.0.0-20240722160745-212f7b056ed0 // indirect
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/mitchellh/hashstructure/v2 v2.0.2 // indirect
+)
+
+require (
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/bubbles v1.0.0 // indirect
 	github.com/charmbracelet/bubbletea v1.3.10 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect
+	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.0 // indirect
 	github.com/charmbracelet/x/ansi v0.11.6 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.15 // indirect
@@ -34,7 +42,7 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sahilm/fuzzy v0.1.1 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/text v0.3.8 // indirect
+	golang.org/x/text v0.23.0 // indirect
 )
 
 replace github.com/CYPT71/platform-factory/cmd/tui => ./cmd/tui

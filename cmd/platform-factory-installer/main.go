@@ -21,13 +21,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/CYPT71/platform-factory/internal/app/installer"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-isatty"
-
-	"github.com/CYPT71/platform-factory/internal/app/installer"
 )
 
 // stepView is installer.BuildStep plus the presentation-only progress

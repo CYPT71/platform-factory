@@ -53,19 +53,31 @@ cp "$repo_root/demo/hello-world/main.go" "$work_root/intermediate/app/main.go"
 )
 test -f "$work_root/intermediate/oci/index.json"
 
-mkdir -p "$work_root/senior/examples/hello-pipeline"
-cp -R "$repo_root/examples/hello-pipeline/app" "$work_root/senior/examples/hello-pipeline/app"
-cp "$repo_root/examples/pipeline.json" "$work_root/senior/pipeline.json"
+mkdir -p "$work_root/senior/app"
+cp -R "$repo_root/examples/hello-pipeline/app/." \
+  "$work_root/senior/app/"
+cp "$repo_root/examples/pipeline.json" \
+  "$work_root/senior/pipeline.json"
 (
   cd "$work_root/senior"
+
   "$work_root/pf" pipeline plan --format text pipeline.json
-  PLATFORM_FACTORY_TRACE_ID=senior-empty-repo "$work_root/pf" pipeline run \
-    --sandbox auto --parallelism 2 --workdir "$work_root/senior/run" \
-    --format text pipeline.json || {
-      sed -n '1,240p' "$work_root/senior/run/journal.json"
+
+  PLATFORM_FACTORY_TRACE_ID=senior-empty-repo \
+  "$work_root/pf" pipeline run \
+    --sandbox auto \
+    --parallelism 2 \
+    --workdir "$work_root/senior/run" \
+    --format text \
+    pipeline.json || {
+      if test -f "$work_root/senior/run/journal.json"; then
+        sed -n '1,240p' "$work_root/senior/run/journal.json"
+      fi
       exit 1
     }
 )
+
+
 test -f "$work_root/senior/run/journal.json"
 test -x "$work_root/senior/run/out/dist/hello-pipeline"
 "$work_root/senior/run/out/dist/hello-pipeline" | grep -q 'hello, world'

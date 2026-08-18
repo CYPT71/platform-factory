@@ -65,7 +65,7 @@ jobs:
         env: {GOTOOLCHAIN: local}
         run: |
           set -euo pipefail
-          go test -c ./internal/ociruntime -o /tmp/ociruntime.test
+          go test -c ./internal/ociruntimeruntime -o /tmp/ociruntime.test
           sudo systemd-run --scope --property=Delegate=yes \
             env "PATH=$PATH" GOTOOLCHAIN=local \
             /tmp/ociruntime.test \

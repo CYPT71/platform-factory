@@ -27,7 +27,7 @@ jobs:
           LC_ALL: C.UTF-8
         run: |
           set -euo pipefail
-          go test ./internal/oci ./internal/runtime ./internal/hypervisor/... ./cmd/platform-factory \
+          go test ./internal/ociruntime ./internal/runtime ./internal/hypervisor/... ./cmd/platform-factory \
             -run "Test(BuildIsDeterministic|BuildSemanticLayersIsDeterministic|RunBuildRebuildVerifiesReproducibility|ProjectDoubleBuildProducesIdenticalDigest|ProbeNativeIsActionable)" \
             -count=1
       - name: Verify the local macOS install includes the native VMM

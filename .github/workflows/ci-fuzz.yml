@@ -25,12 +25,12 @@ jobs:
         env: {GOTOOLCHAIN: local}
         run: |
           set -euo pipefail
-          go test ./internal/oci -fuzz=FuzzLabelsFromPairs -fuzztime="$FUZZTIME" -timeout=15m
+          go test ./internal/ociruntime -fuzz=FuzzLabelsFromPairs -fuzztime="$FUZZTIME" -timeout=15m
       - name: Fuzz entrypoint validation boundaries
         env: {GOTOOLCHAIN: local}
         run: |
           set -euo pipefail
-          go test ./internal/oci -fuzz=FuzzEntrypointValidation -fuzztime="$FUZZTIME" -timeout=15m
+          go test ./internal/ociruntime -fuzz=FuzzEntrypointValidation -fuzztime="$FUZZTIME" -timeout=15m
       - name: Fuzz the example application HTTP boundary
         env: {GOTOOLCHAIN: local}
         run: |

@@ -104,7 +104,7 @@ jobs:
         run: |
           set -euo pipefail
           go test ./cmd/oci-builder -run 'TestRunWithoutArgumentsShowsUsage|TestRunArgumentErrors|TestRunBuildsLayout'
-          go test ./internal/oci -run 'TestBuildWritesValidLayout|TestBuildRejectsUnsafeInputs|TestBuildErrors|TestNormalizeValidation|TestWriteLayoutErrors'
+          go test ./internal/ociruntime -run 'TestBuildWritesValidLayout|TestBuildRejectsUnsafeInputs|TestBuildErrors|TestNormalizeValidation|TestWriteLayoutErrors'
           go test ./internal/mtls -count=1
       - name: Build local Linux and Windows command environments
         if: matrix.target == 'amd64'

@@ -8,7 +8,7 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 export GOTOOLCHAIN=local SOURCE_DATE_EPOCH=0 TZ=UTC LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 echo "--- Verify deterministic rebuilds on the host OS ---"
-go test ./internal/oci ./internal/runtime ./internal/hypervisor/... ./cmd/platform-factory \
+go test ./internal/ociruntime ./internal/runtime ./internal/hypervisor/... ./cmd/platform-factory \
   -run "Test(BuildIsDeterministic|BuildSemanticLayersIsDeterministic|RunBuildRebuildVerifiesReproducibility|ProjectDoubleBuildProducesIdenticalDigest|ProbeNativeIsActionable)" \
   -count=1
 echo "NOTE: the macOS-only 'native VMM' step was skipped (this is not macOS)"
