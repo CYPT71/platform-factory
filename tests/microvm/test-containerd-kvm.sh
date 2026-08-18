@@ -238,9 +238,29 @@ crictl -r "unix://$sock" --timeout=60s start "$container_id" \
   | tee "$evidence_dir/containerd-microvm-start.txt"
 
 log_path="$work/logs/example-service.log"
+# $log_path only ever captures whatever platform-factory-runtime's own
+# short-lived "create" invocation writes to its own stdout/stderr (see
+# task_service.go's runtimeCreateCommand and this script's own cleanup()
+# trap comment on it) - real create-time failure text, not the guest's
+# own output. The guest's serial console (kernel boot log, and this
+# service's own JSON log line) only ever reaches LaunchSupervisor's
+# dedicated on-disk supervisor.log (internal/ociruntime/supervisor_linux.go),
+# same as the podman/docker proofs - see test-podman-kvm.sh's identical
+# check for why. Poll that instead of, not just in addition to, $log_path.
+supervisor_log=""
+find_supervisor_log() {
+  for log in /run/user/*/platform-factory-runtime/"$container_id".supervisor.log; do
+    sudo test -e "$log" || continue
+    supervisor_log=$log
+    return 0
+  done
+  return 1
+}
+
 for _ in $(seq 1 90); do
   crictl -r "unix://$sock" ps -a >"$evidence_dir/containerd-microvm-ps.txt" 2>&1 || true
-  if sudo test -s "$log_path" && sudo grep -Fq '"component":"example-service"' "$log_path"; then
+  if { [ -n "$supervisor_log" ] || find_supervisor_log; } \
+    && sudo grep -Fq '"component":"example-service"' "$supervisor_log"; then
     break
   fi
   sleep 1
@@ -250,7 +270,10 @@ done
 # unprivileged.
 sudo install -o "$invoking_uid" -g "$invoking_gid" -m 0644 \
   "$log_path" "$evidence_dir/containerd-microvm-logs.txt" 2>/dev/null || true
-sudo grep -Fq '"component":"example-service"' "$log_path"
+[ -n "$supervisor_log" ] && sudo install -o "$invoking_uid" -g "$invoking_gid" -m 0644 \
+  "$supervisor_log" "$evidence_dir/containerd-microvm-supervisor.log" 2>/dev/null || true
+[ -n "$supervisor_log" ]
+sudo grep -Fq '"component":"example-service"' "$supervisor_log"
 running_state=$(crictl -r "unix://$sock" inspect "$container_id" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"]["state"])')
 [ "$running_state" = CONTAINER_RUNNING ]

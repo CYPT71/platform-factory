@@ -284,10 +284,20 @@ func serveTestStart(t *testing.T, store *Store, state State, started bool, cause
 		if !started {
 			response.Error = cause.Error()
 		}
-		_ = json.NewEncoder(connection).Encode(response)
+		// Persist "running" before writing the response, mirroring
+		// ServeSupervisor's own OnStarted callback
+		// (supervisor_linux.go) - it calls store.SetStatus before
+		// writeStartResponse for exactly this reason: a caller whose
+		// Start() has returned must already observe "running" in the
+		// store, never a window where the client thinks the start
+		// succeeded but a concurrent store.Get sees stale state. Doing
+		// it the other way around here (write the response, then set
+		// the status) raced this goroutine against Start()'s own
+		// caller and failed intermittently under -race.
 		if started {
 			_ = store.SetStatus(context.Background(), state.ID, "running")
 		}
+		_ = json.NewEncoder(connection).Encode(response)
 		if stopBeforeClose {
 			_ = store.SetStatus(context.Background(), state.ID, "stopped")
 		}
