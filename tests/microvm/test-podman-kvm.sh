@@ -31,6 +31,18 @@ done
 cleanup() {
   podman logs "$container_name" >"$evidence_dir/podman-microvm-logs-final.txt" 2>&1 || true
   podman inspect "$container_name" >"$evidence_dir/podman-microvm-inspect-final.json" 2>&1 || true
+  # platform-factory-runtime's own supervisor.log is the only place a
+  # start-time crash (e.g. "supervisor died before responding to start")
+  # explains itself - runtime.go's error message points here, but nothing
+  # else on this path (podman logs/inspect) ever sees it, since the
+  # supervisor died before the guest could produce any container output.
+  # Copy every one found rather than parsing the container ID out of podman's
+  # own output, since exactly one container runs per invocation of this
+  # script.
+  for log in /run/user/*/platform-factory-runtime/*.supervisor.log; do
+    [ -e "$log" ] || continue
+    cp "$log" "$evidence_dir/podman-microvm-$(basename "$log")" 2>/dev/null || true
+  done
   podman rm --force "$container_name" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT

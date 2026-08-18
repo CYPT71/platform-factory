@@ -212,6 +212,16 @@ func DefaultSeccompProfile() SeccompProfile {
 			// scheduler before it gets locked - see syscallNumberX8664
 			// in syscalls_linux.go for how these were verified.
 			"accept4", "getsockname", "capget", "capset",
+			// tgkill backs Go's asynchronous goroutine preemption
+			// (runtime sysmon's SIGURG signal since Go 1.14) - it can
+			// fire at any point in this thread's execution once it has
+			// run long enough without reaching a safepoint, independent
+			// of which call path is running. Its absence here was found
+			// by straceing a real create -> start lifecycle until it
+			// reproduced an intermittent SIGSYS kill and bisecting the
+			// trace to the exact tgkill call SECCOMP_RET_KILL_PROCESS
+			// fired on - see syscallNumberX8664 in syscalls_linux.go.
+			"tgkill",
 		},
 		DefaultAction: SeccompActionKill,
 	}

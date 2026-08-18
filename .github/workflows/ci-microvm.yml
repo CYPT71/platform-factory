@@ -1,6 +1,6 @@
 name: microvm-boot
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
 
 permissions: {contents: read}
 
@@ -352,8 +352,7 @@ jobs:
             kernel-build.txt
             native-kvm-linux-boot.txt
             native-initramfs-assembly.json
-            podman-microvm-*.txt
-            podman-microvm-*.json
+            podman-microvm-*
             docker-microvm-*
             containerd-microvm-*
             kernel-evidence/kernel.config.resolved

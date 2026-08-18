@@ -39,6 +39,16 @@ done
 cleanup() {
   docker logs "$container_name" >"$evidence_dir/docker-microvm-logs-final.txt" 2>&1 || true
   docker inspect "$container_name" >"$evidence_dir/docker-microvm-inspect-final.json" 2>&1 || true
+  # platform-factory-runtime's own supervisor.log is the only place a
+  # start-time crash (e.g. "supervisor died before responding to start")
+  # explains itself - see test-podman-kvm.sh's identical capture for why.
+  # dockerd normally runs as root, so its store lives under /run/user/0;
+  # sudo covers that without assuming which UID actually launched it.
+  for log in /run/user/*/platform-factory-runtime/*.supervisor.log; do
+    [ -e "$log" ] || continue
+    sudo cp "$log" "$evidence_dir/docker-microvm-$(basename "$log")" 2>/dev/null || true
+    sudo chown "$(id -u):$(id -g)" "$evidence_dir/docker-microvm-$(basename "$log")" 2>/dev/null || true
+  done
   docker rm --force "$container_name" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT

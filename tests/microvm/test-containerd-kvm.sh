@@ -61,6 +61,16 @@ cleanup() {
   sudo find "$work/state" -name config.json \
     -exec sh -c 'install -o "'"$invoking_uid"'" -g "'"$invoking_gid"'" -m 0644 "$1" "'"$evidence_dir"'/containerd-microvm-bundle-$(basename "$(dirname "$1")").json"' _ {} \; \
     2>/dev/null || true
+  # platform-factory-shim invokes platform-factory-runtime as a plain OCI
+  # runtime subprocess (create/start/... over argv, not a direct Go call
+  # into internal/ociruntime), so its supervisor.log lands wherever that
+  # binary's own defaultStateRoot() puts it - /run/user/0/platform-factory-runtime
+  # here, since this whole script runs the shim as root via sudo - not
+  # under $work/state at all. Same start-time-crash rationale as
+  # test-podman-kvm.sh's identical capture.
+  sudo find /run/user/*/platform-factory-runtime -maxdepth 1 -name '*.supervisor.log' \
+    -exec sh -c 'install -o "'"$invoking_uid"'" -g "'"$invoking_gid"'" -m 0644 "$1" "'"$evidence_dir"'/containerd-microvm-$(basename "$1")"' _ {} \; \
+    2>/dev/null || true
   crictl -r "unix://$sock" rmp -a -f >/dev/null 2>&1 || true
   sudo pkill -9 -f "containerd --config $work/containerd.toml" >/dev/null 2>&1 || true
   sudo ip link delete "$bridge_name" >/dev/null 2>&1 || true
