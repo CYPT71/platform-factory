@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/CYPT71/platform-factory/cmd/tui/kit"
 	"github.com/CYPT71/platform-factory/internal/marketplace"
 )
 
@@ -83,15 +84,14 @@ func Run(config Config) error {
 		m.installed[plugin.Name] = plugin
 	}
 	m.refresh()
-	_, err = tea.NewProgram(m, tea.WithAltScreen()).Run()
-	return err
+	return kit.LaunchVoid(m, tea.WithAltScreen())
 }
 
 func (m *model) Init() tea.Cmd { return textinput.Blink }
 
 func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	var commands []tea.Cmd
-	if key, ok := message.(tea.KeyMsg); ok && key.String() == "ctrl+c" {
+	if kit.IsQuitKey(message) {
 		return m, tea.Quit
 	}
 	switch message := message.(type) {

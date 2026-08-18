@@ -574,7 +574,7 @@ func TestPipelineCheckpointAdapterRun(t *testing.T) {
 
 	// Test normal run without checkpoints
 	definition := api.Pipeline{
-		APIVersion: "platform-factory.dev/v1alpha1",
+		APIVersion: "secure-oci.dev/v1alpha1",
 		Name:       "test-pipeline",
 		Stages: []api.Stage{
 			{
@@ -636,7 +636,7 @@ func TestPipelineCheckpointAdapterResumeFromCheckpoint(t *testing.T) {
 	adapter := WithCheckpoints(scheduler, manager)
 
 	definition := api.Pipeline{
-		APIVersion: "platform-factory.dev/v1alpha1",
+		APIVersion: "secure-oci.dev/v1alpha1",
 		Name:       "test-pipeline",
 		Stages: []api.Stage{
 			{ID: "stage-1", Command: api.Command{Executable: "/bin/true"}},

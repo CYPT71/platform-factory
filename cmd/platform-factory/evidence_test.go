@@ -11,7 +11,7 @@ import (
 func TestRunEvidenceDerivesPinsAndHardening(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	pipeline := `{
-	  "api_version":"platform-factory.dev/v1beta1",
+	  "api_version":"secure-oci.dev/v1beta1",
 	  "name":"release",
 	  "inputs":[{"id":"source","kind":"directory","source":".","digest":"` + digest + `"}],
 	  "stages":[{
@@ -63,7 +63,7 @@ func TestRunEvidenceFailsClosedForInvalidOrUnpinnedInputs(t *testing.T) {
 	}
 	unpinned := filepath.Join(root, "unpinned.json")
 	if err := os.WriteFile(unpinned, []byte(`{
-	  "api_version":"platform-factory.dev/v1beta1",
+	  "api_version":"secure-oci.dev/v1beta1",
 	  "name":"unpinned",
 	  "stages":[{"id":"build","command":{"executable":"/bin/build"}}]
 	}`), 0o600); err != nil {

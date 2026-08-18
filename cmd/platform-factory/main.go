@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,8 +20,8 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/CYPT71/platform-factory/cmd/tui/buildtui"
+	buildapp "github.com/CYPT71/platform-factory/internal/app/build"
 	"github.com/CYPT71/platform-factory/internal/atomicfile"
-	"github.com/CYPT71/platform-factory/internal/attestation"
 	"github.com/CYPT71/platform-factory/internal/budget"
 	"github.com/CYPT71/platform-factory/internal/detect"
 	"github.com/CYPT71/platform-factory/internal/dockerarchive"
@@ -30,12 +29,9 @@ import (
 	"github.com/CYPT71/platform-factory/internal/layout"
 	"github.com/CYPT71/platform-factory/internal/networking"
 	"github.com/CYPT71/platform-factory/internal/observability"
-	"github.com/CYPT71/platform-factory/internal/oci"
 	"github.com/CYPT71/platform-factory/internal/plugin"
-	"github.com/CYPT71/platform-factory/internal/policy"
 	"github.com/CYPT71/platform-factory/internal/project"
-	"github.com/CYPT71/platform-factory/internal/sbom"
-	"github.com/CYPT71/platform-factory/internal/signing"
+	"github.com/CYPT71/platform-factory/oci"
 	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
 
@@ -995,7 +991,7 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		}
 		*imageName, *tagName = confirmed.Image, confirmed.Tag
 	}
-	memoryLimit, err := parseByteLimit(*maxMemory)
+	memoryLimit, err := buildapp.ParseByteLimit(*maxMemory)
 	if err != nil || *maxWallClock < 0 || *maxCPU < 0 {
 		if err == nil {
 			err = errors.New("time budgets cannot be negative")
@@ -1031,37 +1027,37 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		}
 	}
 	traceID := observability.TraceIDFromContext(commandContext(ctx, "build"))
-	targets, code, err := buildTargets(platforms, flags.Args(), *osName, *architecture)
+	targets, code, err := buildapp.Targets(platforms, flags.Args(), *osName, *architecture)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory build: %v\n", err)
 		return code
 	}
-	settings := buildSettings{
-		entrypoint: *entrypointName, profile: *profileName,
-		image: *imageName, tag: *tagName, compression: *compression,
-		created: createdAt, labels: parsedLabels, extraFiles: extraFiles,
-		config: config, traceID: traceID, observer: cliObserver(stderr),
-		semanticLayers: *semanticLayers || config.SemanticLayers,
-		budget:         budget.Budget{WallClock: *maxWallClock, CPU: *maxCPU, Memory: memoryLimit},
+	settings := buildapp.Settings{
+		Entrypoint: *entrypointName, Profile: *profileName,
+		Image: *imageName, Tag: *tagName, Compression: *compression,
+		Created: createdAt, Labels: parsedLabels, ExtraFiles: extraFiles,
+		Config: config, TraceID: traceID, Observer: cliObserver(stderr),
+		SemanticLayers: *semanticLayers || config.SemanticLayers,
+		Budget:         budget.Budget{WallClock: *maxWallClock, CPU: *maxCPU, Memory: memoryLimit},
 	}
 	if *dryRun {
 		planned := make([]map[string]any, 0, len(targets))
 		for _, target := range targets {
-			entrypoint, profile, err := resolveBuildTarget(target, settings)
+			entrypoint, profile, err := buildapp.ResolveTarget(target, settings)
 			if err != nil {
 				fmt.Fprintf(stderr, "platform-factory build: %v\n", err)
 				return 2
 			}
 			planned = append(planned, map[string]any{
-				"platform": target.os + "/" + target.architecture, "input": target.input,
+				"platform": target.OS + "/" + target.Architecture, "input": target.Input,
 				"entrypoint": entrypoint, "profile": profile,
 			})
 		}
 		result, _ := json.MarshalIndent(map[string]any{
 			"api_version": cliOutputAPIVersion,
 			"dry_run":     true, "layout": output, "reference": *imageName + ":" + *tagName,
-			"platforms": planned, "semantic_layers": settings.semanticLayers,
-			"resource_budget": resourceBudgetPlan(settings.budget), "valid": true,
+			"platforms": planned, "semantic_layers": settings.SemanticLayers,
+			"resource_budget": buildapp.ResourceBudgetPlan(settings.Budget), "valid": true,
 		}, "", "  ")
 		fmt.Fprintln(stdout, string(result))
 		return 0
@@ -1079,7 +1075,7 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	results := make([]map[string]any, 0, len(targets))
 	if len(targets) == 1 {
-		result, code, err := buildCLIImage(targets[0], output, settings)
+		result, code, err := buildapp.BuildImage(targets[0], output, settings)
 		if err != nil {
 			fmt.Fprintf(stderr, "platform-factory build: %v\n", err)
 			return code
@@ -1099,7 +1095,7 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		inputLayouts := make([]string, 0, len(targets))
 		for index, target := range targets {
 			targetOutput := filepath.Join(temporary, strconv.Itoa(index))
-			result, code, err := buildCLIImage(target, targetOutput, settings)
+			result, code, err := buildapp.BuildImage(target, targetOutput, settings)
 			if err != nil {
 				fmt.Fprintf(stderr, "platform-factory build: %v\n", err)
 				return code
@@ -1123,19 +1119,19 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		}
 	}
 	if *reportsDir != "" {
-		if err := writeReportJSON(*reportsDir, "build.json", result); err != nil {
+		if err := atomicfile.WriteJSON(*reportsDir, "build.json", result); err != nil {
 			fmt.Fprintf(stderr, "platform-factory build: write build report: %v\n", err)
 			return 1
 		}
 	}
 	if *distDir != "" && len(targets) == 1 {
-		if err := writeSBOMToDist(*distDir, targets[0], settings); err != nil {
+		if err := buildapp.WriteSBOMToDist(*distDir, targets[0], settings); err != nil {
 			fmt.Fprintf(stderr, "platform-factory build: write SBOM: %v\n", err)
 			return 1
 		}
 	}
 	if len(targets) == 1 && (*distDir != "" || *reportsDir != "") {
-		if err := writeBuildEvidence(*distDir, *reportsDir, *signKeyDir, *signKeyName, result, targets[0], settings); err != nil {
+		if err := buildapp.WriteBuildEvidence(*distDir, *reportsDir, *signKeyDir, *signKeyName, version, result, targets[0], settings); err != nil {
 			fmt.Fprintf(stderr, "platform-factory build: write release evidence: %v\n", err)
 			return 1
 		}
@@ -1148,12 +1144,12 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		}
 		metrics := map[string]any{
 			"api_version": "platform-factory.dev/metrics/v1",
-			"operation":   "build", "trace_id": settings.traceID,
+			"operation":   "build", "trace_id": settings.TraceID,
 			"duration_ms": time.Since(startedAt).Milliseconds(),
 			"platforms":   len(verified.Platforms), "manifests": verified.Manifests,
 			"blobs": verified.Blobs, "success": true,
 		}
-		if err := writeReportJSON(*reportsDir, "metrics.json", metrics); err != nil {
+		if err := atomicfile.WriteJSON(*reportsDir, "metrics.json", metrics); err != nil {
 			fmt.Fprintf(stderr, "platform-factory build: write metrics: %v\n", err)
 			return 1
 		}
@@ -1174,155 +1170,8 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	return 0
 }
 
-func resourceBudgetPlan(value budget.Budget) map[string]any {
-	return map[string]any{
-		"max_wall_clock":   value.WallClock.String(),
-		"max_cpu":          value.CPU.String(),
-		"max_memory_bytes": value.Memory,
-	}
-}
-
-type buildTarget struct {
-	os, architecture, input string
-}
-
-type buildSettings struct {
-	entrypoint, profile, image, tag, compression, traceID string
-	created                                               time.Time
-	labels                                                map[string]string
-	extraFiles                                            []oci.ExtraFile
-	config                                                oci.BuildConfig
-	observer                                              func(oci.Event)
-	semanticLayers                                        bool
-	budget                                                budget.Budget
-}
-
-func parseByteLimit(value string) (int64, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return 0, errors.New("memory budget must not be empty")
-	}
-	multipliers := map[string]int64{"": 1, "B": 1, "KiB": 1 << 10, "MiB": 1 << 20, "GiB": 1 << 30}
-	suffix := ""
-	for _, candidate := range []string{"KiB", "MiB", "GiB", "B"} {
-		if strings.HasSuffix(value, candidate) {
-			suffix = candidate
-			value = strings.TrimSuffix(value, candidate)
-			break
-		}
-	}
-	number, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || number < 0 {
-		return 0, errors.New("memory budget must be a non-negative integer with optional B, KiB, MiB, or GiB suffix")
-	}
-	multiplier := multipliers[suffix]
-	if number > (1<<63-1)/multiplier {
-		return 0, errors.New("memory budget overflows int64")
-	}
-	return number * multiplier, nil
-}
-
-func buildTargets(platforms, positional []string, defaultOS, defaultArchitecture string) ([]buildTarget, int, error) {
-	if len(platforms) == 0 {
-		if len(positional) != 1 {
-			return nil, 2, errors.New("provide one EXECUTABLE, or repeat --platform linux/ARCH=EXECUTABLE")
-		}
-		return []buildTarget{{os: defaultOS, architecture: defaultArchitecture, input: positional[0]}}, 0, nil
-	}
-	if len(platforms) == 1 && !strings.Contains(platforms[0], "=") {
-		if len(positional) != 1 {
-			return nil, 2, errors.New("--platform linux/ARCH requires one EXECUTABLE")
-		}
-		osName, architecture, err := parsePlatform(platforms[0])
-		if err != nil {
-			return nil, 2, err
-		}
-		return []buildTarget{{os: osName, architecture: architecture, input: positional[0]}}, 0, nil
-	}
-	if len(positional) != 0 || len(platforms) < 2 {
-		return nil, 2, errors.New("multi-platform syntax is --platform linux/ARCH=EXECUTABLE repeated at least twice")
-	}
-	targets := make([]buildTarget, 0, len(platforms))
-	for _, value := range platforms {
-		platformName, input, found := strings.Cut(value, "=")
-		if !found || input == "" {
-			return nil, 2, fmt.Errorf("invalid platform input %q; expected linux/ARCH=EXECUTABLE", value)
-		}
-		osName, architecture, err := parsePlatform(platformName)
-		if err != nil {
-			return nil, 2, err
-		}
-		targets = append(targets, buildTarget{os: osName, architecture: architecture, input: input})
-	}
-	return targets, 0, nil
-}
-
-func parsePlatform(value string) (string, string, error) {
-	parts := strings.Split(value, "/")
-	if len(parts) != 2 || parts[0] != "linux" || (parts[1] != "amd64" && parts[1] != "arm64") {
-		return "", "", errors.New("platform must be linux/amd64 or linux/arm64")
-	}
-	return parts[0], parts[1], nil
-}
-
-// resolveBuildTarget is the shared side-effect-free build planner.
-func resolveBuildTarget(target buildTarget, settings buildSettings) (string, string, error) {
-	detected, err := detect.Path(target.input)
-	if err != nil {
-		return "", "", err
-	}
-	if detected.Ambiguous || (detected.Kind != "elf" && detected.Kind != "unknown") {
-		return "", "", fmt.Errorf("detected %s input %s; provide a compiled executable", detected.Kind, target.input)
-	}
-	entrypoint := "/app/" + filepath.Base(target.input)
-	profile := detected.Profile
-	if profile == "" || profile == "unknown" {
-		profile = "static"
-	}
-	if settings.config.Entrypoint != "" {
-		entrypoint = settings.config.Entrypoint
-	}
-	if settings.config.Profile != "" {
-		profile = settings.config.Profile
-	}
-	if settings.entrypoint != "" {
-		entrypoint = settings.entrypoint
-	}
-	if settings.profile != "" {
-		profile = settings.profile
-	}
-	return entrypoint, profile, nil
-}
-
-func buildCLIImage(target buildTarget, output string, settings buildSettings) (map[string]any, int, error) {
-	entrypoint, profile, err := resolveBuildTarget(target, settings)
-	if err != nil {
-		return nil, 2, err
-	}
-	digest, err := oci.Build(oci.Options{
-		Binary: target.input, Output: output, Architecture: target.architecture, OS: target.os,
-		Entrypoint: entrypoint, Profile: profile, Created: settings.created,
-		ImageName: settings.image, Tag: settings.tag, Labels: settings.labels,
-		ExtraFiles: settings.extraFiles, Args: settings.config.Args, WorkingDir: settings.config.WorkingDir,
-		Env: settings.config.Env, User: settings.config.User, Home: settings.config.Home,
-		IdentityFiles: settings.config.IdentityFiles, Ports: settings.config.Ports,
-		Volumes: settings.config.Volumes, WritablePaths: settings.config.WritablePaths,
-		Healthcheck: settings.config.Healthcheck, TraceID: settings.traceID,
-		Compression: settings.compression, Observer: settings.observer,
-		SemanticLayers: settings.semanticLayers,
-		Budget:         settings.budget,
-	})
-	if err != nil {
-		return nil, 1, err
-	}
-	return map[string]any{
-		"architecture": target.architecture, "digest": digest,
-		"platform": target.os + "/" + target.architecture, "profile": profile,
-	}, 0, nil
-}
-
 // runReproducibleBuild compares isolated builds and installs only identical output.
-func runReproducibleBuild(target buildTarget, output string, settings buildSettings, rebuilds int, requireIdentical bool, outputFormat, distDir, reportsDir string, stdout, stderr io.Writer) int {
+func runReproducibleBuild(target buildapp.Target, output string, settings buildapp.Settings, rebuilds int, requireIdentical bool, outputFormat, distDir, reportsDir string, stdout, stderr io.Writer) int {
 	if _, err := os.Stat(output); err == nil {
 		fmt.Fprintf(stderr, "platform-factory build: output already exists: %s\n", output)
 		return 1
@@ -1345,7 +1194,7 @@ func runReproducibleBuild(target buildTarget, output string, settings buildSetti
 	digests := make([]string, 0, rebuilds)
 	for index := 0; index < rebuilds; index++ {
 		rebuildOutput := filepath.Join(temporary, strconv.Itoa(index))
-		result, _, err := buildCLIImage(target, rebuildOutput, settings)
+		result, _, err := buildapp.BuildImage(target, rebuildOutput, settings)
 		if err != nil {
 			fmt.Fprintf(stderr, "platform-factory build: rebuild %d: %v\n", index, err)
 			return 1
@@ -1371,15 +1220,15 @@ func runReproducibleBuild(target buildTarget, output string, settings buildSetti
 			return 1
 		}
 		if distDir != "" {
-			if err := writeSBOMToDist(distDir, target, settings); err != nil {
+			if err := buildapp.WriteSBOMToDist(distDir, target, settings); err != nil {
 				fmt.Fprintf(stderr, "platform-factory build: write SBOM: %v\n", err)
 				return 1
 			}
 		}
 	}
 	return emitRebuildResult(rebuildOutcome{
-		reference: settings.image + ":" + settings.tag,
-		platform:  target.os + "/" + target.architecture,
+		reference: settings.Image + ":" + settings.Tag,
+		platform:  target.OS + "/" + target.Architecture,
 		rebuilds:  rebuilds, digest: digests[0], output: output,
 		divergences: divergences, requireIdentical: requireIdentical,
 	}, outputFormat, reportsDir, stdout, stderr)
@@ -1407,7 +1256,7 @@ func emitRebuildResult(outcome rebuildOutcome, outputFormat, reportsDir string, 
 		result["divergences"] = outcome.divergences
 	}
 	if reportsDir != "" {
-		if err := writeReportJSON(reportsDir, "reproducibility.json", result); err != nil {
+		if err := atomicfile.WriteJSON(reportsDir, "reproducibility.json", result); err != nil {
 			fmt.Fprintf(stderr, "platform-factory build: write reproducibility report: %v\n", err)
 			return 1
 		}
@@ -1431,132 +1280,6 @@ func emitRebuildResult(outcome rebuildOutcome, outputFormat, reportsDir string, 
 		return 1
 	}
 	return 0
-}
-
-// writeReportJSON writes data as pretty-printed JSON to dir/name,
-// creating dir if needed - the "reports/" side of v6.4's "Sorties"
-// contract (build.json, reproducibility.json), reusing the exact result
-// map already computed for stdout rather than a second representation.
-func writeReportJSON(dir, name string, data any) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
-	}
-	encoded, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return err
-	}
-	encoded = append(encoded, '\n')
-	return atomicfile.Write(dir, name, encoded, 0o644, true)
-}
-
-// writeSBOMToDist generates a native SBOM (internal/sbom) over exactly
-// the files this build actually embedded - the resolved entrypoint plus
-// every --extra-file - and writes it to dist/sbom.json. This is the
-// build's own real inputs, not a guess: the same paths oci.Build itself
-// just read.
-func writeSBOMToDist(distDir string, target buildTarget, settings buildSettings) error {
-	entrypoint, _, err := resolveBuildTarget(target, settings)
-	if err != nil {
-		return err
-	}
-	paths := map[string]string{entrypoint: target.input}
-	for _, extra := range settings.extraFiles {
-		paths[extra.Dest] = extra.Source
-	}
-	document, err := sbom.Generate(paths)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(distDir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", distDir, err)
-	}
-	file, err := os.Create(filepath.Join(distDir, "sbom.json"))
-	if err != nil {
-		return err
-	}
-	writeErr := sbom.Write(file, document)
-	closeErr := file.Close()
-	if writeErr != nil {
-		return writeErr
-	}
-	return closeErr
-}
-
-func writeBuildEvidence(distDir, reportsDir, signKeyDir, signKeyName string, result map[string]any, target buildTarget, settings buildSettings) error {
-	digest, _ := result["digest"].(string)
-	if digest == "" {
-		return errors.New("build result has no subject digest")
-	}
-	provenance := map[string]any{
-		"api_version": "platform-factory.dev/provenance/v1", "builder": "platform-factory/" + version,
-		"subject_digest": digest, "platform": target.os + "/" + target.architecture,
-		"entrypoint": settings.entrypoint, "created": settings.created.UTC().Format(time.RFC3339),
-	}
-	if distDir != "" {
-		if err := writeReportJSON(distDir, "provenance.json", provenance); err != nil {
-			return err
-		}
-		if signKeyDir != "" {
-			store, err := signing.NewFileKeyStore(signKeyDir)
-			if err != nil {
-				return err
-			}
-			publicKey, err := store.PublicKey(signKeyName)
-			if err != nil {
-				return err
-			}
-			keyID := "ed25519:" + base64.RawURLEncoding.EncodeToString(publicKey)
-			provenanceEnvelope, err := attestation.Sign(store, signKeyName, keyID, "application/vnd.in-toto+json", provenance)
-			if err != nil {
-				return err
-			}
-			if err := writeReportJSON(filepath.Join(distDir, "attestations"), "provenance.dsse.json", provenanceEnvelope); err != nil {
-				return err
-			}
-			subjectEnvelope, err := attestation.Sign(store, signKeyName, keyID,
-				"application/vnd.platform-factory.subject.v1+json",
-				map[string]string{"digest": digest, "reference": settings.image + ":" + settings.tag})
-			if err != nil {
-				return err
-			}
-			if err := writeReportJSON(filepath.Join(distDir, "signatures"), "subject.dsse.json", subjectEnvelope); err != nil {
-				return err
-			}
-		}
-	}
-	evidence := policy.Evidence{
-		SubjectDigest: digest, NonRoot: true, ReadOnlyRootFS: true,
-		CapabilitiesDropped: true, SecretsAbsent: true, SBOM: distDir != "",
-		Provenance: distDir != "", Signature: signKeyDir != "", Reproducible: true,
-	}
-	rules := policy.Rules{
-		APIVersion: policy.APIVersion, RequireHardening: true,
-		RequireSBOM: distDir != "", RequireProvenance: distDir != "",
-		RequireReproducible: true,
-	}
-	decision, err := policy.Evaluate(rules, evidence)
-	if err != nil {
-		return err
-	}
-	if reportsDir != "" {
-		if err := writeReportJSON(reportsDir, "policy-rules.json", rules); err != nil {
-			return err
-		}
-		if err := writeReportJSON(reportsDir, "evidence.json", evidence); err != nil {
-			return err
-		}
-		if err := writeReportJSON(reportsDir, "policy.json", map[string]any{
-			"rules": rules, "evidence": evidence, "decision": decision,
-		}); err != nil {
-			return err
-		}
-		summary := fmt.Sprintf("Build complete\nSubject: %s\nPlatform: %s/%s\nPolicy: allowed=%t\n",
-			digest, target.os, target.architecture, decision.Allowed)
-		if err := atomicfile.Write(reportsDir, "summary.txt", []byte(summary), 0o644, true); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func main() {

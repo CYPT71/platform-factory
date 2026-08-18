@@ -15,7 +15,7 @@ import (
 
 // canonicalInterpreterName is the entrypoint basename the host's own
 // profile validation requires for a "python" profile (see
-// internal/oci/buildconfig.go's Validate - the plugin can't import that
+// oci/buildconfig.go's Validate - the plugin can't import that
 // package, so this is stated here as the one piece of cross-cutting
 // knowledge this plugin must independently keep in sync with).
 const canonicalInterpreterName = "python3"
@@ -67,7 +67,7 @@ func runRuntime(args []string) error {
 	if err != nil {
 		return fmt.Errorf("locate Python standard library: %w", err)
 	}
-	// internal/oci's own build validation checks every staged ELF's
+	// oci's own build validation checks every staged ELF's
 	// DT_NEEDED is actually satisfied - verified by hand that this
 	// includes lib-dynload's C extension modules (_hashlib.so,
 	// _sqlite3.so, and the like), which have real external dependencies
@@ -84,7 +84,7 @@ func runRuntime(args []string) error {
 	// unixODBC for the database modules, and so on) - the .so is present
 	// but was already unloadable in the original image; Python only
 	// fails on it if the user's code actually imports that specific
-	// module. internal/oci's own build validator has no such lazy-import
+	// module. oci's own build validator has no such lazy-import
 	// concept though: it checks every staged ELF's dependencies are
 	// satisfied, unconditionally. So an extension module that can't
 	// fully resolve is excluded from the stdlib copy entirely (probed
@@ -402,7 +402,7 @@ type resolvedDependency struct {
 // the default search path and keep their real absolute location.
 // alreadyProvided files are explored for their own DT_NEEDED (a C
 // extension module's real, external library dependencies - libcrypt,
-// libssl, libsqlite3, zlib and the like, none of which internal/oci's
+// libssl, libsqlite3, zlib and the like, none of which oci's
 // own ELF-completeness check will let slide) but never themselves added
 // to the returned closure: the caller already stages them as part of a
 // larger tree copy (the standard library's lib-dynload directory), and

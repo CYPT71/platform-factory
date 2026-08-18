@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 func writePipelineFile(t *testing.T, dir string) string {
@@ -164,100 +162,6 @@ func TestRunPipelinePlanRejectsMissingFile(t *testing.T) {
 	code := runPipeline([]string{"plan", filepath.Join(t.TempDir(), "missing.json")}, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
-	}
-}
-
-func TestMaterializePlainMountsCopiesDeclaredSources(t *testing.T) {
-	root := t.TempDir()
-	source := t.TempDir()
-	if err := os.WriteFile(filepath.Join(source, "file.txt"), []byte("content"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	definition := core.Pipeline{
-		Inputs: []core.Input{{ID: "src", Source: source}},
-		Stages: []core.Stage{{
-			ID:     "compile",
-			Mounts: []core.Mount{{Source: "src", Target: "/in"}},
-		}},
-	}
-	if err := materializePlainMounts(root, definition); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	copied, err := os.ReadFile(filepath.Join(root, "in", "file.txt"))
-	if err != nil {
-		t.Fatalf("expected the source to be copied into root/in: %v", err)
-	}
-	if string(copied) != "content" {
-		t.Fatalf("copied content = %q", copied)
-	}
-}
-
-func TestMaterializePlainMountsAllowsRepeatedIdenticalMount(t *testing.T) {
-	root := t.TempDir()
-	source := t.TempDir()
-	if err := os.WriteFile(filepath.Join(source, "file.txt"), []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	definition := core.Pipeline{
-		Inputs: []core.Input{{ID: "src", Source: source}},
-		Stages: []core.Stage{
-			{ID: "a", Mounts: []core.Mount{{Source: "src", Target: "/in"}}},
-			{ID: "b", Mounts: []core.Mount{{Source: "src", Target: "/in"}}},
-		},
-	}
-	if err := materializePlainMounts(root, definition); err != nil {
-		t.Fatalf("unexpected error for a repeated identical mount: %v", err)
-	}
-}
-
-func TestMaterializePlainMountsRejectsConflictingTarget(t *testing.T) {
-	root := t.TempDir()
-	sourceA, sourceB := t.TempDir(), t.TempDir()
-	definition := core.Pipeline{
-		Inputs: []core.Input{{ID: "a", Source: sourceA}, {ID: "b", Source: sourceB}},
-		Stages: []core.Stage{
-			{ID: "x", Mounts: []core.Mount{{Source: "a", Target: "/in"}}},
-			{ID: "y", Mounts: []core.Mount{{Source: "b", Target: "/in"}}},
-		},
-	}
-	if err := materializePlainMounts(root, definition); err == nil {
-		t.Fatal("expected an error when two different sources target the same mount point")
-	}
-}
-
-func TestMaterializePlainMountsRejectsUndeclaredSource(t *testing.T) {
-	root := t.TempDir()
-	definition := core.Pipeline{
-		Stages: []core.Stage{{ID: "x", Mounts: []core.Mount{{Source: "missing", Target: "/in"}}}},
-	}
-	if err := materializePlainMounts(root, definition); err == nil {
-		t.Fatal("expected an error for a mount with no declared input")
-	}
-}
-
-func TestMaterializePlainMountsRejectsMissingSourcePath(t *testing.T) {
-	root := t.TempDir()
-	definition := core.Pipeline{
-		Inputs: []core.Input{{ID: "src", Source: filepath.Join(t.TempDir(), "does-not-exist")}},
-		Stages: []core.Stage{{ID: "x", Mounts: []core.Mount{{Source: "src", Target: "/in"}}}},
-	}
-	if err := materializePlainMounts(root, definition); err == nil {
-		t.Fatal("expected an error for a nonexistent source path")
-	}
-}
-
-func TestMaterializePlainMountsRejectsNonDirectorySource(t *testing.T) {
-	root := t.TempDir()
-	file := filepath.Join(t.TempDir(), "file.txt")
-	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	definition := core.Pipeline{
-		Inputs: []core.Input{{ID: "src", Source: file}},
-		Stages: []core.Stage{{ID: "x", Mounts: []core.Mount{{Source: "src", Target: "/in"}}}},
-	}
-	if err := materializePlainMounts(root, definition); err == nil {
-		t.Fatal("expected an error when the source is a regular file, not a directory")
 	}
 }
 

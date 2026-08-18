@@ -132,6 +132,25 @@ type Unknown struct {
 
 func (u Unknown) Description() string { return fmt.Sprintf("unknown %s: %s", u.Subject, u.Reason) }
 
+// FilterResolvedUnknowns drops the unknowns a caller's own resolution
+// already answered - "build.artifact" once artifact is set, and
+// "dependencies" once dependencyMode is anything other than "unknown" -
+// so a plan never lists an unknown the interactive/flag-driven flow
+// already settled.
+func FilterResolvedUnknowns(unknowns []Unknown, artifact, dependencyMode string) []Unknown {
+	result := unknowns[:0]
+	for _, unknown := range unknowns {
+		if unknown.Subject == "build.artifact" && artifact != "" {
+			continue
+		}
+		if unknown.Subject == "dependencies" && dependencyMode != "unknown" {
+			continue
+		}
+		result = append(result, unknown)
+	}
+	return result
+}
+
 // Receipt records only state created or removed by one Execute call. Its
 // internals stay private so callers cannot forge rollback ownership.
 type Receipt struct {

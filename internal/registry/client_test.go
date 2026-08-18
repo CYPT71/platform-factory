@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CYPT71/platform-factory/internal/oci"
+	"github.com/CYPT71/platform-factory/oci"
 )
 
 func testLayout(t *testing.T) string {
@@ -410,7 +410,7 @@ func TestPushLayoutUploadsBlobsBeforeDigestAndTag(t *testing.T) {
 	}
 	artifact, err := (&Client{HTTP: &http.Client{Transport: transport}, Scheme: "https"}).PushArtifact(
 		context.Background(), target, result.Digest, result.MediaType, result.Size,
-		"application/vnd.platform-factory.sbom.v1+json", "application/json", []byte(`{"components":[]}`))
+		"application/vnd.secure-oci.sbom.v1+json", "application/json", []byte(`{"components":[]}`))
 	if err != nil {
 		t.Fatal(err)
 	}

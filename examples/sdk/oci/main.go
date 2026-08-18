@@ -1,7 +1,7 @@
 // Command oci-sdk-example builds a secure OCI image by consuming sdk/oci
 // directly, then shows both ways the resulting image can run: as an
-// ordinary container (no platform-factory code involved at all) or, opt-in, under
-// the platform-factory MicroVM runtime (sdk/microvm). Building never depends on
+// ordinary container (no secure-oci code involved at all) or, opt-in, under
+// the secure-oci MicroVM runtime (sdk/microvm). Building never depends on
 // which of the two the caller ends up choosing.
 package main
 
@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	dir, err := os.MkdirTemp("", "platform-factory-sdk-oci-example-*")
+	dir, err := os.MkdirTemp("", "secure-oci-sdk-oci-example-*")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func main() {
 	// executable; the SDK does not build application code, only the image
 	// around it.
 	binary := filepath.Join(dir, "service")
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho hello from platform-factory\n"), 0o755); err != nil {
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho hello from secure-oci\n"), 0o755); err != nil {
 		log.Fatal(err)
 	}
 
@@ -43,7 +43,7 @@ func main() {
 
 	// Mode 1: without the MicroVM - the layout is already a complete,
 	// standard OCI Image Layout. Any OCI-compatible engine (Docker, Podman,
-	// containerd) loads it directly; no further platform-factory API call is
+	// containerd) loads it directly; no further secure-oci API call is
 	// needed for this path.
 	fmt.Println("without the MicroVM: load the layout directly, e.g.")
 	fmt.Printf("  skopeo copy oci:%s docker-daemon:example/service:v1\n\n", layout)

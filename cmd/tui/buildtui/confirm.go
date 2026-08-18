@@ -1,7 +1,7 @@
 // Package buildtui is a small terminal confirmation prompt for the OCI
 // image reference (name:tag) a build is about to embed as its
 // org.opencontainers.image.ref.name annotation (see
-// internal/oci/builder.go). It is shown only on a real interactive
+// oci/builder.go). It is shown only on a real interactive
 // terminal - callers gate it on isatty themselves - and lets the person
 // running the build see and, if they want, edit the proposed reference
 // before it's baked into the layout.
@@ -13,18 +13,17 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+
+	"github.com/CYPT71/platform-factory/cmd/tui/kit"
 )
 
 var (
-	accent     = lipgloss.AdaptiveColor{Light: "25", Dark: "39"}
-	muted      = lipgloss.AdaptiveColor{Light: "243", Dark: "245"}
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	dimStyle   = lipgloss.NewStyle().Foreground(muted)
-	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "160", Dark: "203"})
-	focusStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "127", Dark: "212"})
-	helpStyle  = dimStyle
-	boxStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(muted).Padding(0, 1)
+	titleStyle = kit.TitleStyle
+	dimStyle   = kit.DimStyle
+	errorStyle = kit.ErrorStyle
+	focusStyle = kit.FocusStyle
+	helpStyle  = kit.HelpStyle
+	boxStyle   = kit.BoxStyle
 )
 
 // Result is what Confirm returns. Confirmed is false when the user
@@ -73,11 +72,10 @@ func Confirm(proposedImage, proposedTag string) (Result, error) {
 	tag.Width = 40
 
 	m := &model{image: image, tag: tag}
-	finalModel, err := tea.NewProgram(m).Run()
+	result, err := kit.Launch(m, func(m *model) Result { return m.result })
 	if err != nil {
 		return Result{}, err
 	}
-	result := finalModel.(*model).result
 	if result.Confirmed && result.Tag == "" {
 		result.Tag = "latest"
 	}
@@ -93,10 +91,11 @@ func validReference(image string) bool {
 
 func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if key, ok := message.(tea.KeyMsg); ok {
-		switch key.String() {
-		case "ctrl+c", "esc":
+		if kit.IsCancelKey(message) {
 			m.result, m.done = Result{Confirmed: false}, true
 			return m, tea.Quit
+		}
+		switch key.String() {
 		case "enter":
 			if !validReference(m.image.Value()) {
 				m.err = "image must be non-empty with no surrounding or embedded whitespace"

@@ -58,7 +58,7 @@ func TestValidateBootBundleRejectsTamperingAndNonCanonicalInputs(t *testing.T) {
 	tests := map[string]api.BootBundle{
 		"api version": func() api.BootBundle {
 			changed := bundle
-			changed.APIVersion = "platform-factory.dev/vmm/v999"
+			changed.APIVersion = "secure-oci.dev/vmm/v999"
 			return changed
 		}(),
 		"digest": func() api.BootBundle {

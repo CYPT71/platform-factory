@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/CYPT71/platform-factory/internal/oci"
+	"github.com/CYPT71/platform-factory/oci"
 )
 
 // TestMicroVMRunNativeKVMRealBoot is the real, end-to-end counterpart to

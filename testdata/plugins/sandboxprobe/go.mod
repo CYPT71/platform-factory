@@ -1,4 +1,4 @@
-module example.test/platform-factory-sandboxprobe
+module example.test/secure-oci-sandboxprobe
 
 go 1.25.12
 

@@ -5,36 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strconv"
 
-	"github.com/CYPT71/platform-factory/internal/project"
+	observeapp "github.com/CYPT71/platform-factory/internal/app/observe"
 )
-
-type deployedProject struct {
-	APIVersion string `json:"api_version"`
-	Image      string `json:"image"`
-	Name       string `json:"name"`
-	Namespace  string `json:"namespace"`
-	Workload   string `json:"workload"`
-}
-
-func loadDeployedProject() (deployedProject, error) {
-	loaded, err := project.Discover(".", "")
-	if err != nil {
-		return deployedProject{}, err
-	}
-	var state deployedProject
-	if err := decodeStrictJSON(filepath.Join(loaded.Root, ".platform-factory", "deployed.json"), &state); err != nil {
-		return deployedProject{}, err
-	}
-	if state.APIVersion != "platform-factory.dev/deployment/v1" ||
-		!validKubernetesName(state.Name) || !validKubernetesName(state.Namespace) ||
-		(state.Workload != "job" && state.Workload != "service") || !validDigestReference(state.Image) {
-		return deployedProject{}, errors.New("persisted deployment identity is invalid")
-	}
-	return state, nil
-}
 
 func runProjectObservation(command string, args []string, stdout, stderr io.Writer, execute containerExecutor) int {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -55,7 +29,7 @@ func runProjectObservation(command string, args []string, stdout, stderr io.Writ
 		fmt.Fprintln(stderr)
 		return 2
 	}
-	state, err := loadDeployedProject()
+	state, err := observeapp.LoadDeployedProject()
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory %s: no deployed project (run `pf deploy` first): %v\n", command, err)
 		return 1

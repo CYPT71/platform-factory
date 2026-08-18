@@ -47,32 +47,40 @@ type Report struct {
 	Checks []Check `json:"checks"`
 }
 
-// Service holds every dependency Run needs, all injectable so tests
-// never have to shell out to real tools or probe real hardware -
-// production code wires New() below; tests construct a Service directly
-// with fakes.
-type Service struct {
-	// LookPath reports the resolved path to an executable on PATH, or
+// Service is the narrow contract cmd/platform-factory depends on for
+// diagnostics.
+type Service interface {
+	Run(ctx context.Context) Report
+	RunScope(ctx context.Context, scope string) Report
+	RunScopeWithOptions(ctx context.Context, scope string, options Options) Report
+}
+
+// service is Service's only implementation, its dependencies all
+// unexported and injectable only from within this package - a test
+// that needs a fake constructs a service literal directly - so tests
+// never have to shell out to real tools or probe real hardware.
+type service struct {
+	// lookPath reports the resolved path to an executable on PATH, or
 	// an error if it isn't found - normally exec.LookPath.
-	LookPath func(name string) (string, error)
-	// RunCommand runs name with args and returns nil only if it exits
+	lookPath func(name string) (string, error)
+	// runCommand runs name with args and returns nil only if it exits
 	// zero within ctx's deadline - normally a short-timeout exec.
-	// Runtime checks call this only for a tool LookPath already found,
+	// Runtime checks call this only for a tool lookPath already found,
 	// never claiming a runtime is usable without actually invoking it.
-	RunCommand func(ctx context.Context, name string, args ...string) error
-	// FileExists reports whether path exists and is a regular file -
+	runCommand func(ctx context.Context, name string, args ...string) error
+	// fileExists reports whether path exists and is a regular file -
 	// normally backed by os.Stat. Used for registry-configured.
-	FileExists func(path string) bool
-	// UserHomeDir returns the current user's home directory - normally
+	fileExists func(path string) bool
+	// userHomeDir returns the current user's home directory - normally
 	// os.UserHomeDir.
-	UserHomeDir func() (string, error)
-	// ProbeNative reports native hypervisor (KVM/HVF) availability.
-	ProbeNative func(context.Context) (microvm.Capabilities, error)
-	// ProbeSandbox reports which VMM sandbox primitives this host
+	userHomeDir func() (string, error)
+	// probeNative reports native hypervisor (KVM/HVF) availability.
+	probeNative func(context.Context) (microvm.Capabilities, error)
+	// probeSandbox reports which VMM sandbox primitives this host
 	// supports (namespaces, cgroups, capability bounding-set drop).
-	ProbeSandbox  func() sandbox.Support
-	ProbeRegistry func(context.Context, string) error
-	ReadFile      func(string) ([]byte, error)
+	probeSandbox  func() sandbox.Support
+	probeRegistry func(context.Context, string) error
+	readFile      func(string) ([]byte, error)
 }
 
 // toolChecks is every external binary platform-factory's other commands
@@ -106,20 +114,20 @@ const runtimeCheckTimeout = 3 * time.Second
 // New returns a Service wired to real tools and real hardware probes -
 // what cmd/platform-factory/doctor.go uses in production.
 func New() Service {
-	return Service{
-		LookPath: exec.LookPath,
-		RunCommand: func(ctx context.Context, name string, args ...string) error {
+	return &service{
+		lookPath: exec.LookPath,
+		runCommand: func(ctx context.Context, name string, args ...string) error {
 			return exec.CommandContext(ctx, name, args...).Run()
 		},
-		FileExists: func(path string) bool {
+		fileExists: func(path string) bool {
 			info, err := os.Stat(path)
 			return err == nil && info.Mode().IsRegular()
 		},
-		UserHomeDir:   os.UserHomeDir,
-		ProbeNative:   hypervisor.ProbeNative,
-		ProbeSandbox:  sandbox.ProbeSandbox,
-		ProbeRegistry: probeRegistry,
-		ReadFile:      os.ReadFile,
+		userHomeDir:   os.UserHomeDir,
+		probeNative:   hypervisor.ProbeNative,
+		probeSandbox:  sandbox.ProbeSandbox,
+		probeRegistry: probeRegistry,
+		readFile:      os.ReadFile,
 	}
 }
 
@@ -127,16 +135,16 @@ func New() Service {
 // never applies a fix itself, only reports what's missing and, when
 // there's an obvious one, a suggestion - same contract the CLI had
 // before this extraction.
-func (s Service) Run(ctx context.Context) Report {
+func (s *service) Run(ctx context.Context) Report {
 	return s.RunScope(ctx, "all")
 }
 
 // RunScope limits diagnostics to one user task so remediation stays focused.
-func (s Service) RunScope(ctx context.Context, scope string) Report {
+func (s *service) RunScope(ctx context.Context, scope string) Report {
 	return s.RunScopeWithOptions(ctx, scope, Options{})
 }
 
-func (s Service) RunScopeWithOptions(ctx context.Context, scope string, options Options) Report {
+func (s *service) RunScopeWithOptions(ctx context.Context, scope string, options Options) Report {
 	var checks []Check
 
 	toolFound := make(map[string]bool, len(toolChecks))
@@ -169,13 +177,13 @@ func (s Service) RunScopeWithOptions(ctx context.Context, scope string, options 
 		}
 	}
 
-	if (scope == "all" || scope == "build") && s.ProbeNative != nil {
-		capabilities, err := s.ProbeNative(ctx)
+	if (scope == "all" || scope == "build") && s.probeNative != nil {
+		capabilities, err := s.probeNative(ctx)
 		checks = append(checks, hypervisorChecks(capabilities, err)...)
 	}
 
-	if (scope == "all" || scope == "build") && s.ProbeSandbox != nil {
-		support := s.ProbeSandbox()
+	if (scope == "all" || scope == "build") && s.probeSandbox != nil {
+		support := s.probeSandbox()
 		checks = append(checks,
 			Check{Name: "sandbox-namespaces", OK: support.Namespaces, Suggestion: support.Details["namespaces"]},
 			Check{Name: "sandbox-cgroups", OK: support.Cgroups, Suggestion: support.Details["cgroups"]},
@@ -192,21 +200,21 @@ func (s Service) RunScopeWithOptions(ctx context.Context, scope string, options 
 	return report
 }
 
-func (s Service) checkRegistryAccess(ctx context.Context, registry string) Check {
-	if s.ProbeRegistry == nil {
+func (s *service) checkRegistryAccess(ctx context.Context, registry string) Check {
+	if s.probeRegistry == nil {
 		return Check{Name: "registry-access", Suggestion: "registry probe is unavailable in this build"}
 	}
-	if err := s.ProbeRegistry(ctx, registry); err != nil {
+	if err := s.probeRegistry(ctx, registry); err != nil {
 		return Check{Name: "registry-access", Detail: err.Error(), Suggestion: "verify the registry URL, TLS trust, and PLATFORM_FACTORY_REGISTRY_USERNAME/PASSWORD"}
 	}
 	return Check{Name: "registry-access", OK: true, Detail: registry}
 }
 
-func (s Service) checkPolicy(path string) Check {
-	if s.ReadFile == nil {
+func (s *service) checkPolicy(path string) Check {
+	if s.readFile == nil {
 		return Check{Name: "policy", Suggestion: "policy reader is unavailable in this build"}
 	}
-	raw, err := s.ReadFile(path)
+	raw, err := s.readFile(path)
 	if err != nil {
 		return Check{Name: "policy", Detail: err.Error(), Suggestion: "provide a readable policy JSON file"}
 	}
@@ -320,8 +328,8 @@ func capabilityFeatureSummary(capabilities microvm.Capabilities) string {
 	return capabilities.Details["unavailable"]
 }
 
-func (s Service) checkTool(name, suggestion string) Check {
-	path, err := s.LookPath(name)
+func (s *service) checkTool(name, suggestion string) Check {
+	path, err := s.lookPath(name)
 	if err != nil {
 		return Check{Name: "tool-" + name, OK: false, Suggestion: suggestion}
 	}
@@ -332,13 +340,13 @@ func (s Service) checkTool(name, suggestion string) Check {
 // it succeeded - never a placeholder "available via the CLI diagnostics
 // flow" claim. If the tool wasn't found at all, this check reports that
 // plainly rather than trying to run a command that can't exist.
-func (s Service) checkRuntime(ctx context.Context, tool, name, suggestion string, toolPresent bool, args []string) Check {
+func (s *service) checkRuntime(ctx context.Context, tool, name, suggestion string, toolPresent bool, args []string) Check {
 	if !toolPresent {
 		return Check{Name: name, OK: false, Suggestion: "tool-" + tool + " is missing; install it first"}
 	}
 	timeoutCtx, cancel := context.WithTimeout(ctx, runtimeCheckTimeout)
 	defer cancel()
-	if err := s.RunCommand(timeoutCtx, tool, args...); err != nil {
+	if err := s.runCommand(timeoutCtx, tool, args...); err != nil {
 		return Check{Name: name, OK: false, Detail: err.Error(), Suggestion: suggestion}
 	}
 	return Check{Name: name, OK: true}
@@ -350,8 +358,8 @@ func (s Service) checkRuntime(ctx context.Context, tool, name, suggestion string
 // credentials inside it (that would require a network round trip to a
 // registry this command doesn't know about) - only that some
 // configuration exists to check in the first place.
-func (s Service) checkRegistryConfigured() Check {
-	home, err := s.UserHomeDir()
+func (s *service) checkRegistryConfigured() Check {
+	home, err := s.userHomeDir()
 	if err != nil {
 		return Check{Name: "registry-configured", OK: false, Detail: err.Error(), Suggestion: "could not determine home directory"}
 	}
@@ -360,7 +368,7 @@ func (s Service) checkRegistryConfigured() Check {
 		filepath.Join(home, ".config", "containers", "auth.json"),
 	}
 	for _, candidate := range candidates {
-		if s.FileExists(candidate) {
+		if s.fileExists(candidate) {
 			return Check{Name: "registry-configured", OK: true, Detail: candidate}
 		}
 	}

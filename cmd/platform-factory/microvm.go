@@ -8,17 +8,15 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 
-	"github.com/CYPT71/platform-factory/internal/atomicfile"
+	microvmapp "github.com/CYPT71/platform-factory/internal/app/microvm"
 	"github.com/CYPT71/platform-factory/internal/directboot"
 	"github.com/CYPT71/platform-factory/internal/hypervisor"
 	"github.com/CYPT71/platform-factory/internal/microvm"
 	"github.com/CYPT71/platform-factory/internal/networking"
 	"github.com/CYPT71/platform-factory/internal/vmdisk"
-	api "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 func runMicroVM(args []string, stdout, stderr io.Writer, execute microVMExecutor) int {
@@ -275,63 +273,6 @@ func runNative(action string, spec microvm.Spec, runner string, requireNative bo
 	}
 }
 
-// kubevirtParams is the JSON wire shape platform-factory-kubevirt's own
-// specParams (plugins/kubevirt/cmd/platform-factory-kubevirt/main.go)
-// decodes - kept as an independent, explicitly JSON-tagged type here rather
-// than a shared import, the same way any two independent RPC processes
-// agree on a wire contract without sharing a Go type for it.
-type kubevirtParams struct {
-	Name          string   `json:"name"`
-	Namespace     string   `json:"namespace"`
-	Image         string   `json:"image,omitempty"`
-	Arch          string   `json:"arch,omitempty"`
-	MemoryMiB     int      `json:"memory_mib,omitempty"`
-	VCPUs         int      `json:"vcpus,omitempty"`
-	ListenAddress string   `json:"listen_address,omitempty"`
-	Publishes     []string `json:"publishes,omitempty"`
-	Apply         bool     `json:"apply,omitempty"`
-}
-
-// kubevirtResult is the union of platform-factory-kubevirt's manifestResult
-// and commandResult - every field is optional because which ones a given
-// capability populates differs (a lifecycle action returns Output; create
-// and rbac return Manifest, and Applied/Output only when apply was set).
-type kubevirtResult struct {
-	Manifest string `json:"manifest,omitempty"`
-	Applied  bool   `json:"applied,omitempty"`
-	Output   string `json:"output,omitempty"`
-}
-
-// kubevirtCapability maps a microvm action to the runtime.* capability
-// platform-factory-kubevirt declares for it, and whether that capability
-// mutates cluster state - status and logs are pure observations and go
-// through pluginClient.Call; every other action can create, change or
-// delete a real VirtualMachine and must go through CallWithIdempotency so a
-// crash-and-retry can never repeat its effect, the same guarantee publish/
-// deploy/rollback already give their own (non-plugin) mutations.
-func kubevirtCapability(action string) (capability string, mutating bool, err error) {
-	switch action {
-	case "create":
-		return api.CapabilityRuntimeCreate, true, nil
-	case "start":
-		return api.CapabilityRuntimeStart, true, nil
-	case "stop":
-		return api.CapabilityRuntimeStop, true, nil
-	case "restart":
-		return api.CapabilityRuntimeRestart, true, nil
-	case "delete":
-		return api.CapabilityRuntimeDelete, true, nil
-	case "status":
-		return api.CapabilityRuntimeStatus, false, nil
-	case "logs":
-		return api.CapabilityRuntimeLogs, false, nil
-	case "rbac":
-		return api.CapabilityRuntimeRBAC, true, nil
-	default:
-		return "", false, fmt.Errorf("unsupported kubevirt action %q", action)
-	}
-}
-
 // runKubeVirt dispatches to a real, discovered, verified and sandboxed
 // KubeVirt plugin by capability, rather than shelling out to a hardcoded
 // binary name the way an earlier version of this function did (see
@@ -366,7 +307,7 @@ func runKubeVirt(ctx context.Context, action string, spec microvm.Spec, publishe
 // plugin subprocess, the same way TestPluginHostDetectFreezeAndNotes tests
 // pluginHost directly instead of through a CLI command's flag parsing.
 func dispatchKubeVirt(ctx context.Context, host *pluginHost, action string, spec microvm.Spec, publishes repeatedFlag, apply bool, stdout, stderr io.Writer) int {
-	capability, mutating, err := kubevirtCapability(action)
+	capability, mutating, err := microvmapp.Capability(action)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory microvm: %v\n", err)
 		return 2
@@ -377,12 +318,12 @@ func dispatchKubeVirt(ctx context.Context, host *pluginHost, action string, spec
 		return 1
 	}
 
-	params := kubevirtParams{
+	params := microvmapp.Params{
 		Name: spec.Name, Namespace: spec.Namespace, Image: spec.Image, Arch: spec.Arch,
 		MemoryMiB: spec.MemoryMiB, VCPUs: spec.VCPUs, ListenAddress: spec.Listen,
 		Publishes: []string(publishes), Apply: apply,
 	}
-	var result kubevirtResult
+	var result microvmapp.Result
 	if mutating {
 		operationID := cliOperationID("kubevirt-microvm", action, spec.Namespace, spec.Name, spec.Image,
 			strconv.Itoa(spec.MemoryMiB), strconv.Itoa(spec.VCPUs), strconv.FormatBool(apply))
@@ -410,55 +351,17 @@ func runInspectLegacyDisk(diskImages []string, bootDiskOverride, reportDir strin
 		fmt.Fprintln(stderr, "platform-factory microvm inspect-legacy-disk: at least one --disk is required")
 		return 2
 	}
-	report, err := vmdisk.BuildDiscoveryReport(diskImages, bootDiskOverride)
+	result, err := microvmapp.InspectLegacyDisk(diskImages, bootDiskOverride, reportDir, strategy)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: %v\n", err)
+		if errors.Is(err, microvmapp.ErrCompatibilityReport) {
+			return 2
+		}
 		return 1
 	}
-	compatibility, err := vmdisk.BuildCompatibilityReport(report, strategy)
-	if err != nil {
-		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: %v\n", err)
-		return 2
-	}
-	if err := os.MkdirAll(reportDir, 0o755); err != nil {
-		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: create %s: %v\n", reportDir, err)
-		return 1
-	}
-	encoded, err := json.MarshalIndent(report, "", "  ")
-	if err != nil {
-		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: encode report: %v\n", err)
-		return 1
-	}
-	jsonPath := filepath.Join(reportDir, "discovery.json")
-	if err := atomicfile.Write(reportDir, "discovery.json", encoded, 0o644, true); err != nil {
-		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: write %s: %v\n", jsonPath, err)
-		return 1
-	}
-	text := report.RenderText()
-	textPath := filepath.Join(reportDir, "discovery.txt")
-	if err := atomicfile.Write(reportDir, "discovery.txt", []byte(text), 0o644, true); err != nil {
-		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: write %s: %v\n", textPath, err)
-		return 1
-	}
-	compatibilityJSON, err := json.MarshalIndent(compatibility, "", "  ")
-	if err != nil {
-		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: encode compatibility report: %v\n", err)
-		return 1
-	}
-	compatibilityJSONPath := filepath.Join(reportDir, "compatibility.json")
-	if err := atomicfile.Write(reportDir, "compatibility.json", compatibilityJSON, 0o644, true); err != nil {
-		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: write %s: %v\n", compatibilityJSONPath, err)
-		return 1
-	}
-	compatibilityText := compatibility.RenderText()
-	compatibilityTextPath := filepath.Join(reportDir, "compatibility.txt")
-	if err := atomicfile.Write(reportDir, "compatibility.txt", []byte(compatibilityText), 0o644, true); err != nil {
-		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: write %s: %v\n", compatibilityTextPath, err)
-		return 1
-	}
-	fmt.Fprint(stdout, text)
-	fmt.Fprint(stdout, "\n", compatibilityText)
-	fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: wrote %s, %s, %s and %s\n", jsonPath, textPath, compatibilityJSONPath, compatibilityTextPath)
+	fmt.Fprint(stdout, result.Text)
+	fmt.Fprint(stdout, "\n", result.CompatibilityText)
+	fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: wrote %s, %s, %s and %s\n", result.JSONPath, result.TextPath, result.CompatibilityJSONPath, result.CompatibilityTextPath)
 	return 0
 }
 

@@ -147,7 +147,7 @@ FAMILY_TITLES = {
 }
 
 rows = [
-    "# platform-factory-base benchmark",
+    "# secure-oci-base benchmark",
     "",
     "Full statistics per benchmark, not just the median. Every family ran "
     "the same number of independent `-count` repetitions on this single "

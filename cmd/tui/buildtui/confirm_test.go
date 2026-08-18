@@ -4,7 +4,8 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/CYPT71/platform-factory/cmd/tui/kit"
 )
 
 func newTestModel(image, tag string) *model {
@@ -16,20 +17,7 @@ func newTestModel(image, tag string) *model {
 	return &model{image: imageInput, tag: tagInput}
 }
 
-func key(s string) tea.KeyMsg {
-	switch s {
-	case "enter":
-		return tea.KeyMsg{Type: tea.KeyEnter}
-	case "esc":
-		return tea.KeyMsg{Type: tea.KeyEsc}
-	case "ctrl+c":
-		return tea.KeyMsg{Type: tea.KeyCtrlC}
-	case "tab":
-		return tea.KeyMsg{Type: tea.KeyTab}
-	default:
-		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
-	}
-}
+var key = kit.Key
 
 func TestEnterConfirmsWithTheProposedValues(t *testing.T) {
 	m := newTestModel("myimage", "v1")

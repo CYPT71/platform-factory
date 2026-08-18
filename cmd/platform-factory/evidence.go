@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/CYPT71/platform-factory/internal/app/pipeline"
 	"github.com/CYPT71/platform-factory/internal/plugin"
 	"github.com/CYPT71/platform-factory/internal/policy"
 )
@@ -26,7 +27,7 @@ func runEvidence(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: platform-factory evidence [--plugin-dir DIR] [--reproducible] PIPELINE.json")
 		return 2
 	}
-	_, document, err := decodePipelineFile(flags.Arg(0))
+	definition, err := pipeline.New().Decode(flags.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory evidence: %v\n", err)
 		return 1
@@ -50,7 +51,7 @@ func runEvidence(args []string, stdout, stderr io.Writer) int {
 	for _, manifest := range manifests {
 		pluginDigests = append(pluginDigests, manifest.Digest)
 	}
-	evidence := policy.DerivePipelineEvidence(document.definition, pluginDigests)
+	evidence := policy.DerivePipelineEvidence(definition, pluginDigests)
 	evidence.Reproducible = *reproducible
 	encoded, _ := json.MarshalIndent(struct {
 		APIVersion string `json:"api_version"`

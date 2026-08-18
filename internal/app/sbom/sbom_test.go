@@ -32,10 +32,9 @@ func TestCollectPathsWithRealFilesystem(t *testing.T) {
 }
 
 func TestCollectPathsRejectsNonRegularNonDirArguments(t *testing.T) {
-	svc := New()
-	svc.Stat = func(name string) (os.FileInfo, error) {
+	svc := &service{stat: func(name string) (os.FileInfo, error) {
 		return fakeFileInfo{mode: os.ModeSymlink}, nil
-	}
+	}}
 	if _, err := svc.CollectPaths([]string{"whatever"}); err == nil {
 		t.Fatal("expected an error for a non-regular, non-directory argument")
 	}

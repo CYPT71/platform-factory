@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/CYPT71/platform-factory/internal/oci"
+	"github.com/CYPT71/platform-factory/oci"
 )
 
 // FuzzVerifyIndex feeds arbitrary bytes as index.json into an otherwise

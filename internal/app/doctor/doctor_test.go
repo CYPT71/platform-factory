@@ -11,23 +11,23 @@ import (
 
 // fakeService builds a Service with every dependency faked, so tests
 // never shell out to a real tool or probe real hardware.
-func fakeService() (svc Service, lookPathCalls, runCommandCalls *[]string) {
+func fakeService() (svc *service, lookPathCalls, runCommandCalls *[]string) {
 	var lookPaths, runs []string
-	svc = Service{
-		LookPath: func(name string) (string, error) {
+	svc = &service{
+		lookPath: func(name string) (string, error) {
 			lookPaths = append(lookPaths, name)
 			return "", errors.New("not found") // absent by default; tests override per case
 		},
-		RunCommand: func(ctx context.Context, name string, args ...string) error {
+		runCommand: func(ctx context.Context, name string, args ...string) error {
 			runs = append(runs, name)
 			return errors.New("should not be called for an absent tool")
 		},
-		FileExists:    func(path string) bool { return false },
-		UserHomeDir:   func() (string, error) { return "/home/test", nil },
-		ProbeNative:   func(context.Context) (microvm.Capabilities, error) { return microvm.Capabilities{}, nil },
-		ProbeSandbox:  func() sandbox.Support { return sandbox.Support{} },
-		ProbeRegistry: func(context.Context, string) error { return errors.New("unreachable") },
-		ReadFile:      func(string) ([]byte, error) { return nil, errors.New("missing") },
+		fileExists:    func(path string) bool { return false },
+		userHomeDir:   func() (string, error) { return "/home/test", nil },
+		probeNative:   func(context.Context) (microvm.Capabilities, error) { return microvm.Capabilities{}, nil },
+		probeSandbox:  func() sandbox.Support { return sandbox.Support{} },
+		probeRegistry: func(context.Context, string) error { return errors.New("unreachable") },
+		readFile:      func(string) ([]byte, error) { return nil, errors.New("missing") },
 	}
 	return svc, &lookPaths, &runs
 }
@@ -58,13 +58,13 @@ func TestRunReportsToolMissingWithoutAttemptingARuntimeCheck(t *testing.T) {
 
 func TestRunOnlyReportsRuntimeOKWhenTheCommandActuallySucceeds(t *testing.T) {
 	svc, _, _ := fakeService()
-	svc.LookPath = func(name string) (string, error) {
+	svc.lookPath = func(name string) (string, error) {
 		if name == "docker" {
 			return "/usr/bin/docker", nil
 		}
 		return "", errors.New("not found")
 	}
-	svc.RunCommand = func(ctx context.Context, name string, args ...string) error {
+	svc.runCommand = func(ctx context.Context, name string, args ...string) error {
 		if name == "docker" {
 			return nil // daemon reachable
 		}
@@ -91,13 +91,13 @@ func TestRunOnlyReportsRuntimeOKWhenTheCommandActuallySucceeds(t *testing.T) {
 
 func TestRunReportsRuntimeNotOKWhenTheCommandFailsEvenIfToolIsInstalled(t *testing.T) {
 	svc, _, _ := fakeService()
-	svc.LookPath = func(name string) (string, error) {
+	svc.lookPath = func(name string) (string, error) {
 		if name == "podman" {
 			return "/usr/bin/podman", nil
 		}
 		return "", errors.New("not found")
 	}
-	svc.RunCommand = func(ctx context.Context, name string, args ...string) error {
+	svc.runCommand = func(ctx context.Context, name string, args ...string) error {
 		return errors.New("podman machine is not running")
 	}
 	report := svc.Run(context.Background())
@@ -118,21 +118,21 @@ func TestRunReportsRuntimeNotOKWhenTheCommandFailsEvenIfToolIsInstalled(t *testi
 
 func TestRegistryConfiguredChecksRealFilesNotAPlaceholder(t *testing.T) {
 	svc, _, _ := fakeService()
-	svc.FileExists = func(path string) bool { return false }
+	svc.fileExists = func(path string) bool { return false }
 	report := svc.Run(context.Background())
 	assertCheck(t, report, "registry-configured", false)
 
-	svc.FileExists = func(path string) bool { return true }
+	svc.fileExists = func(path string) bool { return true }
 	report = svc.Run(context.Background())
 	assertCheck(t, report, "registry-configured", true)
 }
 
 func TestRunReportsOverallOKOnlyWhenEveryCheckPasses(t *testing.T) {
 	svc, _, _ := fakeService()
-	svc.ProbeNative = func(context.Context) (microvm.Capabilities, error) {
+	svc.probeNative = func(context.Context) (microvm.Capabilities, error) {
 		return microvm.Capabilities{Available: true, Architecture: "arm64"}, nil
 	}
-	svc.ProbeSandbox = func() sandbox.Support {
+	svc.probeSandbox = func() sandbox.Support {
 		return sandbox.Support{Namespaces: true, Cgroups: true, CapabilityBoundingDrop: true}
 	}
 	report := svc.Run(context.Background())
@@ -146,13 +146,13 @@ func TestRunReportsOverallOKOnlyWhenEveryCheckPasses(t *testing.T) {
 
 func TestRunAggregatesOKTrueWhenEverythingPasses(t *testing.T) {
 	svc, _, _ := fakeService()
-	svc.LookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
-	svc.RunCommand = func(context.Context, string, ...string) error { return nil }
-	svc.FileExists = func(string) bool { return true }
-	svc.ProbeNative = func(context.Context) (microvm.Capabilities, error) {
+	svc.lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	svc.runCommand = func(context.Context, string, ...string) error { return nil }
+	svc.fileExists = func(string) bool { return true }
+	svc.probeNative = func(context.Context) (microvm.Capabilities, error) {
 		return microvm.Capabilities{Available: true}, nil
 	}
-	svc.ProbeSandbox = func() sandbox.Support {
+	svc.probeSandbox = func() sandbox.Support {
 		return sandbox.Support{Namespaces: true, Cgroups: true, CapabilityBoundingDrop: true}
 	}
 	report := svc.Run(context.Background())
@@ -218,16 +218,16 @@ func TestRunScopePublishDoesNotProbeUnrelatedToolsOrHardware(t *testing.T) {
 func TestContainerdRuntimeUsesCtrClient(t *testing.T) {
 	svc, _, _ := fakeService()
 	var invoked string
-	svc.LookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
-	svc.RunCommand = func(_ context.Context, name string, args ...string) error {
+	svc.lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	svc.runCommand = func(_ context.Context, name string, args ...string) error {
 		if len(args) == 1 && args[0] == "version" {
 			invoked = name
 		}
 		return nil
 	}
-	svc.FileExists = func(string) bool { return true }
-	svc.ProbeNative = nil
-	svc.ProbeSandbox = nil
+	svc.fileExists = func(string) bool { return true }
+	svc.probeNative = nil
+	svc.probeSandbox = nil
 	report := svc.Run(context.Background())
 	assertCheck(t, report, "runtime-containerd", true)
 	if invoked != "ctr" {
@@ -256,13 +256,13 @@ func TestHypervisorChecksReportCurrentBackendAndSkipOtherPlatforms(t *testing.T)
 
 func TestSkippedPlatformChecksDoNotFailAggregate(t *testing.T) {
 	svc, _, _ := fakeService()
-	svc.LookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
-	svc.RunCommand = func(context.Context, string, ...string) error { return nil }
-	svc.FileExists = func(string) bool { return true }
-	svc.ProbeNative = func(context.Context) (microvm.Capabilities, error) {
+	svc.lookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	svc.runCommand = func(context.Context, string, ...string) error { return nil }
+	svc.fileExists = func(string) bool { return true }
+	svc.probeNative = func(context.Context) (microvm.Capabilities, error) {
 		return microvm.Capabilities{Available: true, Details: map[string]string{"backend": "darwin-native-virtualization"}}, nil
 	}
-	svc.ProbeSandbox = func() sandbox.Support {
+	svc.probeSandbox = func() sandbox.Support {
 		return sandbox.Support{Namespaces: true, Cgroups: true, CapabilityBoundingDrop: true}
 	}
 	if report := svc.Run(context.Background()); !report.OK {
@@ -273,7 +273,7 @@ func TestSkippedPlatformChecksDoNotFailAggregate(t *testing.T) {
 func TestRunScopeWithOptionsProbesNamedRegistry(t *testing.T) {
 	svc, _, _ := fakeService()
 	var address string
-	svc.ProbeRegistry = func(_ context.Context, value string) error { address = value; return nil }
+	svc.probeRegistry = func(_ context.Context, value string) error { address = value; return nil }
 	report := svc.RunScopeWithOptions(context.Background(), "publish", Options{Registry: "registry.example.com"})
 	assertCheck(t, report, "registry-access", true)
 	if address != "registry.example.com" {
@@ -288,15 +288,15 @@ func TestRunScopeWithOptionsProbesNamedRegistry(t *testing.T) {
 
 func TestPolicyCheckStrictlyValidatesSchemaAndVersion(t *testing.T) {
 	svc, _, _ := fakeService()
-	svc.ReadFile = func(string) ([]byte, error) {
+	svc.readFile = func(string) ([]byte, error) {
 		return []byte(`{"api_version":"platform-factory.dev/policy/v1","require_sbom":true}`), nil
 	}
 	assertCheck(t, svc.RunScopeWithOptions(context.Background(), "build", Options{Policy: "policy.json"}), "policy", true)
-	svc.ReadFile = func(string) ([]byte, error) {
+	svc.readFile = func(string) ([]byte, error) {
 		return []byte(`{"api_version":"platform-factory.dev/policy/v1","surprise":true}`), nil
 	}
 	assertCheck(t, svc.RunScopeWithOptions(context.Background(), "build", Options{Policy: "policy.json"}), "policy", false)
-	svc.ReadFile = func(string) ([]byte, error) {
+	svc.readFile = func(string) ([]byte, error) {
 		return []byte(`{"api_version":"unsupported/v1"}`), nil
 	}
 	assertCheck(t, svc.RunScopeWithOptions(context.Background(), "build", Options{Policy: "policy.json"}), "policy", false)

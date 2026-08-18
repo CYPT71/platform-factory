@@ -106,36 +106,6 @@ func (s *Server) releaseTenantSlot(leaseID string) {
 	}
 }
 
-// verifyCompletionProvenance enforces that a worker which registered a
-// PublicKey signs every lease it completes, and that the signature
-// actually verifies against that key for this specific worker and lease -
-// closing the gap a worker could otherwise exploit by simply omitting
-// Provenance, or by replaying a validly-signed record from a different
-// lease or a different worker's completion.
-//
-// A worker that never registered a PublicKey is unaffected either way:
-// this always succeeds for it, whether or not it sends a record, since
-// there is nothing to verify the signature against.
-func (s *Server) verifyCompletionProvenance(workerID, leaseID string, record *provenance.ProvenanceRecord) error {
-	status, ok := s.Plane.WorkerStatus(workerID)
-	if !ok || status.PublicKey == "" {
-		return nil
-	}
-	if record == nil {
-		return fmt.Errorf("worker %q registered a public key and must sign every completion", workerID)
-	}
-	if record.WorkerID != workerID {
-		return fmt.Errorf("provenance worker_id %q does not match the completing worker %q", record.WorkerID, workerID)
-	}
-	if record.BuildID != leaseID {
-		return fmt.Errorf("provenance build_id %q does not match lease %q", record.BuildID, leaseID)
-	}
-	if err := provenance.Verify(record, status.PublicKey); err != nil {
-		return fmt.Errorf("signature verification failed: %w", err)
-	}
-	return nil
-}
-
 // releaseSlotWithoutLease undoes a reserveTenantSlot reservation for a
 // submission that was refused before a lease ID existed to track it
 // against.
@@ -368,7 +338,7 @@ func (s *Server) handleCompleteLease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.verifyCompletionProvenance(workerID, req.LeaseID, req.Provenance); err != nil {
+	if err := s.Plane.VerifyCompletionProvenance(workerID, req.LeaseID, req.Provenance); err != nil {
 		observability.Warn("lease completion refused: provenance verification failed",
 			observability.Fields{"worker": workerID, "lease_id": req.LeaseID, "error": err.Error()})
 		writeError(w, http.StatusUnauthorized, err)

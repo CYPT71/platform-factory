@@ -13,18 +13,17 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+
+	"github.com/CYPT71/platform-factory/cmd/tui/kit"
 )
 
 var (
-	accent     = lipgloss.AdaptiveColor{Light: "25", Dark: "39"}
-	muted      = lipgloss.AdaptiveColor{Light: "243", Dark: "245"}
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	dimStyle   = lipgloss.NewStyle().Foreground(muted)
-	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "160", Dark: "203"})
-	focusStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "127", Dark: "212"})
-	helpStyle  = dimStyle
-	boxStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(muted).Padding(0, 1)
+	titleStyle = kit.TitleStyle
+	dimStyle   = kit.DimStyle
+	errorStyle = kit.ErrorStyle
+	focusStyle = kit.FocusStyle
+	helpStyle  = kit.HelpStyle
+	boxStyle   = kit.BoxStyle
 )
 
 // Source is which of the two provisioning options the user picked.
@@ -84,11 +83,7 @@ func Confirm(language, hostCandidate, hostArch string) (Result, error) {
 	image.Width = 50
 
 	m := &model{language: language, hostCandidate: hostCandidate, hostArch: hostArch, choices: choices, imageInput: image}
-	finalModel, err := tea.NewProgram(m).Run()
-	if err != nil {
-		return Result{}, err
-	}
-	return finalModel.(*model).result, nil
+	return kit.Launch(m, func(m *model) Result { return m.result })
 }
 
 func (m *model) Init() tea.Cmd { return textinput.Blink }
@@ -99,10 +94,11 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.editingImage {
-		switch key.String() {
-		case "ctrl+c", "esc":
+		if kit.IsCancelKey(message) {
 			m.editingImage = false
 			return m, nil
+		}
+		switch key.String() {
 		case "enter":
 			ref := strings.TrimSpace(m.imageInput.Value())
 			if ref == "" {
@@ -117,10 +113,11 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.imageInput, command = m.imageInput.Update(message)
 		return m, command
 	}
-	switch key.String() {
-	case "ctrl+c", "esc":
+	if kit.IsCancelKey(message) {
 		m.result, m.done = Result{Source: SourceSkip}, true
 		return m, tea.Quit
+	}
+	switch key.String() {
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--

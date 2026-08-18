@@ -16,11 +16,11 @@ import (
 	"github.com/CYPT71/platform-factory/internal/signing"
 )
 
-func fakeService(report layout.Report, reportErr error) Service {
-	return Service{
-		VerifyLayout: func(string) (layout.Report, error) { return report, reportErr },
-		LoadKeyStoreKey: func(dir, name string) (ed25519.PublicKey, error) {
-			return nil, errors.New("LoadKeyStoreKey should not be called unless --key-dir is set")
+func fakeService(report layout.Report, reportErr error) *service {
+	return &service{
+		verifyLayout: func(string) (layout.Report, error) { return report, reportErr },
+		loadKeyStoreKey: func(dir, name string) (ed25519.PublicKey, error) {
+			return nil, errors.New("loadKeyStoreKey should not be called unless --key-dir is set")
 		},
 	}
 }
@@ -150,9 +150,9 @@ func TestLoadTrustedKeysRejectsMalformedFlag(t *testing.T) {
 
 func TestLoadTrustedKeysCallsLoadKeyStoreKeyOnlyWhenKeyDirSet(t *testing.T) {
 	called := false
-	svc := Service{
-		VerifyLayout: func(string) (layout.Report, error) { return layout.Report{}, nil },
-		LoadKeyStoreKey: func(dir, name string) (ed25519.PublicKey, error) {
+	svc := &service{
+		verifyLayout: func(string) (layout.Report, error) { return layout.Report{}, nil },
+		loadKeyStoreKey: func(dir, name string) (ed25519.PublicKey, error) {
 			called = true
 			if dir != "somedir" || name != "somename" {
 				t.Fatalf("dir=%q name=%q", dir, name)
@@ -192,7 +192,7 @@ func TestVerifySignatureRealRoundTrip(t *testing.T) {
 	}
 	keyID := "ed25519:" + base64.RawURLEncoding.EncodeToString(publicKey)
 	envelope, err := attestation.Sign(store, "release", keyID,
-		"application/vnd.platform-factory.subject.v1+json",
+		"application/vnd.secure-oci.subject.v1+json",
 		map[string]string{"digest": "sha256:abc", "reference": "app:v1"})
 	if err != nil {
 		t.Fatal(err)

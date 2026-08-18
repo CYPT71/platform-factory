@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
 	"github.com/CYPT71/platform-factory/internal/policy"
 	"github.com/CYPT71/platform-factory/internal/project"
 	"github.com/CYPT71/platform-factory/internal/registry"
@@ -183,7 +184,7 @@ func TestLaunchPublicationJSONFailsClosed(t *testing.T) {
 	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeLaunchJSON(filepath.Join(parentFile, "evidence.json"), map[string]bool{"valid": true}); err == nil {
+	if err := atomicfile.WriteJSONSensitive(filepath.Join(parentFile, "evidence.json"), map[string]bool{"valid": true}); err == nil {
 		t.Fatal("write through a non-directory parent succeeded")
 	}
 }

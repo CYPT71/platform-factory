@@ -21,7 +21,7 @@ import (
 // thirdPartyPluginPath builds testdata/thirdparty — a separate Go module
 // that imports only the public sdk/plugin SDK — with the module proxy
 // disabled, proving the plugin builds out of tree, offline, without the
-// platform-factory core being recompiled or its internals exposed.
+// secure-oci core being recompiled or its internals exposed.
 var thirdPartyPluginPath = sync.OnceValues(func() (string, error) {
 	dir, err := os.MkdirTemp("", "platform-factory-zig-plugin-*")
 	if err != nil {

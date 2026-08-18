@@ -2,8 +2,8 @@
 // to a real OCI image layout. It does not run stages itself and does not
 // depend on internal/executor or internal/pipeline: callers supply an
 // OutputResolver shaped exactly like (*executor.CachingRunner).Output. It
-// does not depend on internal/oci either, for the same reason: Image takes
-// a Builder callback instead of calling internal/oci.Build directly, so
+// does not depend on the oci package either, for the same reason: Image
+// takes a Builder callback instead of calling oci.Build directly, so
 // this package stays pure domain logic (resolving declared outputs to local
 // paths) with the actual OCI build left to the infrastructure the caller
 // chooses to inject.
@@ -23,10 +23,10 @@ import (
 type OutputResolver func(stage, artifact string) (core.Descriptor, bool)
 
 // ExtraFile is a single non-binary file Image copies into the built image,
-// field-for-field identical to internal/oci.ExtraFile so a Builder can
+// field-for-field identical to oci.ExtraFile so a Builder can
 // convert one into the other with a plain literal - see this package's own
-// doc comment for why assemble does not import internal/oci itself to name
-// that type directly.
+// doc comment for why assemble does not import the oci package itself to
+// name that type directly.
 type ExtraFile struct {
 	Dest, Source string
 	Mode         int64
@@ -35,9 +35,9 @@ type ExtraFile struct {
 // Builder performs the actual OCI image build once Image has resolved the
 // pipeline's cached outputs into local paths and assembled binaryPath and
 // extraFiles; it returns the built image's manifest digest. Callers close
-// over their own internal/oci.Options (output directory, image name, tag,
+// over their own oci.Options (output directory, image name, tag,
 // platform, ...) and typically implement this as a two-line adapter around
-// internal/oci.Build.
+// oci.Build.
 type Builder func(binaryPath string, extraFiles []ExtraFile) (string, error)
 
 // Extract resolves every entry in definition.Outputs via resolve and

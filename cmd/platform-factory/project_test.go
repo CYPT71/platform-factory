@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	projectapp "github.com/CYPT71/platform-factory/internal/app/project"
 	"github.com/CYPT71/platform-factory/internal/layout"
 	"github.com/CYPT71/platform-factory/internal/project"
 )
@@ -689,7 +690,7 @@ func TestProjectCommandFailures(t *testing.T) {
 	for language, want := range map[string]string{
 		"python": "python", "nodejs": "node", "java": "java", "dotnet": "dotnet", "compiled": "static",
 	} {
-		if got := projectProfile(language); got != want {
+		if got := projectapp.Profile(language); got != want {
 			t.Fatalf("profile(%s)=%s", language, got)
 		}
 	}
@@ -1156,7 +1157,7 @@ func TestProjectNeedsRebuildDetectsMissingAndStaleLayouts(t *testing.T) {
 	binary := filepath.Join(loaded.Root, "app")
 	writeProjectTestFile(t, binary, "binary", 0o755)
 
-	if rebuild, err := projectNeedsRebuild(loaded); err != nil || !rebuild {
+	if rebuild, err := projectapp.NeedsRebuild(loaded); err != nil || !rebuild {
 		t.Fatalf("expected a missing layout to need a rebuild: rebuild=%v err=%v", rebuild, err)
 	}
 
@@ -1165,7 +1166,7 @@ func TestProjectNeedsRebuildDetectsMissingAndStaleLayouts(t *testing.T) {
 	if code := runProject([]string{"build", "--config", loaded.File}, &stdout, &stderr, execute, nil, nil); code != 0 {
 		t.Fatalf("build code=%d stderr=%s", code, stderr.String())
 	}
-	if rebuild, err := projectNeedsRebuild(loaded); err != nil || rebuild {
+	if rebuild, err := projectapp.NeedsRebuild(loaded); err != nil || rebuild {
 		t.Fatalf("expected a fresh layout not to need a rebuild: rebuild=%v err=%v", rebuild, err)
 	}
 
@@ -1173,7 +1174,7 @@ func TestProjectNeedsRebuildDetectsMissingAndStaleLayouts(t *testing.T) {
 	if err := os.Chtimes(binary, future, future); err != nil {
 		t.Fatal(err)
 	}
-	if rebuild, err := projectNeedsRebuild(loaded); err != nil || !rebuild {
+	if rebuild, err := projectapp.NeedsRebuild(loaded); err != nil || !rebuild {
 		t.Fatalf("expected a layout older than its binary to need a rebuild: rebuild=%v err=%v", rebuild, err)
 	}
 }
@@ -1326,11 +1327,11 @@ func TestRunConfiguredProjectWatchRebuildsOnChangeAndStopsOnCancel(t *testing.T)
 
 func TestWatchContainerNameIsStableAndSafe(t *testing.T) {
 	loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
-	name := watchContainerName(loaded)
+	name := projectapp.WatchContainerName(loaded)
 	if !validContainerName(name) {
 		t.Fatalf("watchContainerName produced an invalid container name: %q", name)
 	}
-	if watchContainerName(loaded) != name {
+	if projectapp.WatchContainerName(loaded) != name {
 		t.Fatal("expected watchContainerName to be stable across calls for the same project")
 	}
 }
@@ -1357,84 +1358,6 @@ func TestRunProjectRejectsInvalidActionsAndMissingConfig(t *testing.T) {
 		if code := runProject(args, &stdout, &stderr, execute, nil, nil); code == 0 {
 			t.Fatalf("args=%v unexpectedly succeeded", args)
 		}
-	}
-}
-
-func TestSourceNewerThanMissingPath(t *testing.T) {
-	remaining := 100
-	stale, err := sourceNewerThan(filepath.Join(t.TempDir(), "does-not-exist"), time.Now(), &remaining)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if stale {
-		t.Fatal("a missing path should never be reported stale")
-	}
-}
-
-func TestSourceNewerThanRegularFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "source.txt")
-	writeProjectTestFile(t, path, "content", 0o644)
-	builtAt := time.Now().Add(-time.Hour)
-
-	remaining := 100
-	stale, err := sourceNewerThan(path, builtAt, &remaining)
-	if err != nil {
-		t.Fatalf("newer file: unexpected error: %v", err)
-	}
-	if !stale {
-		t.Fatal("a file modified after builtAt should be reported stale")
-	}
-	if remaining != 99 {
-		t.Fatalf("remaining = %d, want 99", remaining)
-	}
-
-	remaining = 100
-	stale, err = sourceNewerThan(path, time.Now().Add(time.Hour), &remaining)
-	if err != nil {
-		t.Fatalf("older file: unexpected error: %v", err)
-	}
-	if stale {
-		t.Fatal("a file modified before builtAt should not be reported stale")
-	}
-}
-
-func TestSourceNewerThanDirectory(t *testing.T) {
-	freshDir := t.TempDir()
-	writeProjectTestFile(t, filepath.Join(freshDir, "unchanged.txt"), "content", 0o644)
-	remaining := 100
-	stale, err := sourceNewerThan(freshDir, time.Now().Add(time.Hour), &remaining)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if stale {
-		t.Fatal("a directory with only old files should not be reported stale")
-	}
-
-	staleDir := t.TempDir()
-	writeProjectTestFile(t, filepath.Join(staleDir, "nested", "changed.txt"), "content", 0o644)
-	remaining = 100
-	stale, err = sourceNewerThan(staleDir, time.Now().Add(-time.Hour), &remaining)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !stale {
-		t.Fatal("a directory with a newly modified nested file should be reported stale")
-	}
-}
-
-func TestSourceNewerThanRespectsRemainingBudget(t *testing.T) {
-	dir := t.TempDir()
-	writeProjectTestFile(t, filepath.Join(dir, "a.txt"), "content", 0o644)
-	writeProjectTestFile(t, filepath.Join(dir, "b.txt"), "content", 0o644)
-
-	remaining := 0
-	stale, err := sourceNewerThan(dir, time.Now().Add(-time.Hour), &remaining)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if stale {
-		t.Fatal("a walk with zero remaining budget should stop before finding staleness")
 	}
 }
 

@@ -7,14 +7,14 @@ import (
 
 func TestFromJournalProducesSLSAAndRejectsSecrets(t *testing.T) {
 	journal := `{
-	  "api_version":"platform-factory.dev/journal/v1",
+	  "api_version":"secure-oci.dev/journal/v1",
 	  "pipeline_fingerprint":"sha256:abc",
-	  "engine_version":"platform-factory/1",
+	  "engine_version":"secure-oci/1",
 	  "sandbox":"on",
 	  "generated":"2026-07-28T12:00:00Z",
 	  "stages":[{"id":"build","state":"succeeded"}]
 	}`
-	predicate, err := FromJournal(strings.NewReader(journal), "https://platform-factory.dev/builder/v1")
+	predicate, err := FromJournal(strings.NewReader(journal), "https://secure-oci.dev/builder/v1")
 	if err != nil {
 		t.Fatal(err)
 	}

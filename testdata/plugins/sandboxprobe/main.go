@@ -1,4 +1,4 @@
-// Command platform-factory-sandboxprobe is a separate Go module, importing only
+// Command secure-oci-sandboxprobe is a separate Go module, importing only
 // the public sdk/plugin SDK, used solely to prove from inside a plugin
 // subprocess that internal/plugin.Start's namespace sandbox actually took
 // effect: that outbound network access is cut off, and that no_new_privs is

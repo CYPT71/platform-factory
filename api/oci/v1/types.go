@@ -3,7 +3,7 @@ package v1
 import (
 	"time"
 
-	"github.com/CYPT71/platform-factory/internal/oci"
+	"github.com/CYPT71/platform-factory/oci"
 )
 
 // BuildOptions describes the image to create. This is the public API

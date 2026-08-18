@@ -1,9 +1,10 @@
 // Package verify is the application-layer service behind
 // internal/app/doctor and internal/app/sbom already did for `pf doctor`
 // and `pf sbom`. cmd/platform-factory/verify_release.go now only parses
-// flags, calls Service.Verify, formats the result, and maps the outcome
-// to an exit code; every actual verification step - layout, signature,
-// provenance, SBOM, policy - lives here, testable without the CLI.
+// flags, calls Service.Verify (Service being the interface New
+// returns), formats the result, and maps the outcome to an exit code;
+// every actual verification step - layout, signature, provenance,
+// SBOM, policy - lives here, testable without the CLI.
 package verify
 
 import (
@@ -72,22 +73,29 @@ type VerifyOptions struct {
 	KeyName         string
 }
 
-// Service holds the two real I/O dependencies Verify needs, both
-// injectable so tests never touch a real filesystem or construct a real
-// key store.
-type Service struct {
-	// VerifyLayout validates an OCI layout - normally layout.Verify.
-	VerifyLayout func(path string) (layout.Report, error)
-	// LoadKeyStoreKey loads one named key from a signing.FileKeyStore
+// Service is the narrow contract cmd/platform-factory depends on for
+// release verification.
+type Service interface {
+	Verify(opts VerifyOptions) (VerificationResult, error)
+}
+
+// service is Service's only implementation, holding the two real I/O
+// dependencies Verify needs, both unexported and injectable only from
+// within this package - a test that needs a fake constructs a service
+// literal directly.
+type service struct {
+	// verifyLayout validates an OCI layout - normally layout.Verify.
+	verifyLayout func(path string) (layout.Report, error)
+	// loadKeyStoreKey loads one named key from a signing.FileKeyStore
 	// directory - normally backed by signing.NewFileKeyStore.
-	LoadKeyStoreKey func(dir, name string) (ed25519.PublicKey, error)
+	loadKeyStoreKey func(dir, name string) (ed25519.PublicKey, error)
 }
 
 // New returns a Service wired to the real layout verifier and key store.
 func New() Service {
-	return Service{
-		VerifyLayout: layout.Verify,
-		LoadKeyStoreKey: func(dir, name string) (ed25519.PublicKey, error) {
+	return &service{
+		verifyLayout: layout.Verify,
+		loadKeyStoreKey: func(dir, name string) (ed25519.PublicKey, error) {
 			store, err := signing.NewFileKeyStore(dir)
 			if err != nil {
 				return nil, err
@@ -105,8 +113,8 @@ func New() Service {
 // err is nil. Within a successful call, VerificationResult.Valid is
 // false if any individual step failed; each step's own *Error field
 // carries why.
-func (s Service) Verify(opts VerifyOptions) (VerificationResult, error) {
-	report, err := s.VerifyLayout(opts.LayoutPath)
+func (s *service) Verify(opts VerifyOptions) (VerificationResult, error) {
+	report, err := s.verifyLayout(opts.LayoutPath)
 	if err != nil {
 		return VerificationResult{}, fmt.Errorf("verify layout: %w", err)
 	}
@@ -204,7 +212,7 @@ func SelectPlatform(report layout.Report, sourceReference string) (digest, refer
 // pinned trust set Verify checks signatures and signed provenance
 // against. Trust is never inferred from an envelope's own claimed key
 // ID (see the package doc comment's threat-model note).
-func (s Service) LoadTrustedKeys(flagged []string, keyDir, keyName string) (map[string]ed25519.PublicKey, error) {
+func (s *service) LoadTrustedKeys(flagged []string, keyDir, keyName string) (map[string]ed25519.PublicKey, error) {
 	keys := map[string]ed25519.PublicKey{}
 	for _, raw := range flagged {
 		algo, encoded, found := strings.Cut(raw, ":")
@@ -218,7 +226,7 @@ func (s Service) LoadTrustedKeys(flagged []string, keyDir, keyName string) (map[
 		keys[raw] = ed25519.PublicKey(decoded)
 	}
 	if keyDir != "" {
-		publicKey, err := s.LoadKeyStoreKey(keyDir, keyName)
+		publicKey, err := s.loadKeyStoreKey(keyDir, keyName)
 		if err != nil {
 			return nil, err
 		}
@@ -230,7 +238,7 @@ func (s Service) LoadTrustedKeys(flagged []string, keyDir, keyName string) (map[
 
 // VerifySignature checks path's DSSE envelope against trustedKeys and
 // confirms the signed subject's digest matches wantDigest.
-func (s Service) VerifySignature(path, wantDigest string, trustedKeys map[string]ed25519.PublicKey) error {
+func (s *service) VerifySignature(path, wantDigest string, trustedKeys map[string]ed25519.PublicKey) error {
 	if len(trustedKeys) == 0 {
 		return errors.New("no trusted key pinned: pass --trusted-key or --key-dir/--key-name")
 	}
@@ -259,7 +267,7 @@ func (s Service) VerifySignature(path, wantDigest string, trustedKeys map[string
 // against trustedKeys) or a raw provenance predicate (only validated as
 // well-formed JSON), matching runPublish's own --provenance contract
 // where signing provenance is controlled by --sign, not mandatory.
-func (s Service) VerifyProvenance(path string, trustedKeys map[string]ed25519.PublicKey) (signed bool, err error) {
+func (s *service) VerifyProvenance(path string, trustedKeys map[string]ed25519.PublicKey) (signed bool, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return false, err

@@ -1,4 +1,4 @@
-// Package microvm defines the public contract used to configure platform-factory
+// Package microvm defines the public contract used to configure secure-oci
 // microVM backends. Native backends and out-of-module runtime integrations
 // share these types so consumers never need to import an internal package.
 package microvm

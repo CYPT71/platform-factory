@@ -153,7 +153,7 @@ func TestOpenChunkedSurfacesFailures(t *testing.T) {
 		t.Fatal("wrong manifest api_version accepted")
 	}
 	if _, _, err := OpenChunked(&fakeContentStore{
-		getData: []byte(`{"api_version":"platform-factory.dev/chunks/v1","chunk_size":0}`),
+		getData: []byte(`{"api_version":"secure-oci.dev/chunks/v1","chunk_size":0}`),
 	}, root); err == nil {
 		t.Fatal("zero chunk_size accepted")
 	}

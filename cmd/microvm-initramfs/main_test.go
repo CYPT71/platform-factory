@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	initramfsapp "github.com/CYPT71/platform-factory/internal/app/microvminitramfs"
 )
 
 // minimalOCILayout writes a self-contained, valid single-manifest OCI image
@@ -108,7 +110,7 @@ func TestRunAssemblesInitramfsEndToEnd(t *testing.T) {
 	if err != nil || info.Size() == 0 {
 		t.Fatalf("output missing or empty: err=%v info=%v", err, info)
 	}
-	var decoded assembleResult
+	var decoded initramfsapp.Result
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode stdout %q: %v", stdout.String(), err)
 	}

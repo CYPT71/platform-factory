@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/platform-factory/internal/oci"
 	"github.com/CYPT71/platform-factory/internal/registry"
+	"github.com/CYPT71/platform-factory/oci"
 )
 
 func TestHistoricalMachineOutputV1FixturesRemainDecodable(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 
 func ExampleDecode() {
 	definition, graph, err := sdk.Decode(strings.NewReader(`{
-		"api_version":"platform-factory.dev/v1","name":"hello-sdk",
+		"api_version":"secure-oci.dev/v1","name":"hello-sdk",
 		"stages":[{"id":"build","command":{"executable":"/bin/build"}}]
 	}`))
 	if err != nil {

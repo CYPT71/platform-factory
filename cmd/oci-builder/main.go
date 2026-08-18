@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/CYPT71/platform-factory/internal/layout"
-	"github.com/CYPT71/platform-factory/internal/oci"
+	"github.com/CYPT71/platform-factory/oci"
 )
 
 func Run(args []string) int { return run(args, os.Stdout, os.Stderr) }

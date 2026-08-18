@@ -1,12 +1,12 @@
 # SecureOci.Plugin
 
-The .NET SDK for out-of-process platform-factory language plugins. It defines
+The .NET SDK for out-of-process secure-oci language plugins. It defines
 the versioned, length-prefixed JSON-RPC protocol plugins speak over
 stdin/stdout (an LSP/DAP-style header-framed message on the wire) and the
 plugin-side `Server`. This mirrors Go's `sdk/plugin` package field for
 field; a plugin written against either SDK speaks the exact same wire
 protocol and passes the exact same conformance suite
-(`platform-factory-conformance plugin`).
+(`secure-oci-conformance plugin`).
 
 `System.Text.Json` only - no third-party dependencies.
 
@@ -16,7 +16,7 @@ Reference this project from your plugin's `.csproj`:
 
 ```xml
 <ItemGroup>
-  <ProjectReference Include="path/to/platform-factory-base/sdk/plugin-csharp/SecureOci.Plugin.csproj" />
+  <ProjectReference Include="path/to/secure-oci-base/sdk/plugin-csharp/SecureOci.Plugin.csproj" />
 </ItemGroup>
 ```
 

@@ -204,17 +204,3 @@ func resolveRuntime(explicit string, assumeYes bool, stdin *bufio.Reader, stdout
 	// An explicit --runtime remains available when the operator disagrees.
 	return projectinit.RuntimeContainer, true
 }
-
-func filterResolvedUnknowns(unknowns []projectinit.Unknown, artifact, dependencyMode string) []projectinit.Unknown {
-	result := unknowns[:0]
-	for _, unknown := range unknowns {
-		if unknown.Subject == "build.artifact" && artifact != "" {
-			continue
-		}
-		if unknown.Subject == "dependencies" && dependencyMode != "unknown" {
-			continue
-		}
-		result = append(result, unknown)
-	}
-	return result
-}

@@ -59,7 +59,7 @@ func buildReleaseFixture(t *testing.T, reproducible bool) releaseFixture {
 	keyID := "ed25519:" + base64.RawURLEncoding.EncodeToString(publicKey)
 
 	envelope, err := attestation.Sign(store, "release", keyID,
-		"application/vnd.platform-factory.subject.v1+json",
+		"application/vnd.secure-oci.subject.v1+json",
 		map[string]string{"digest": digest, "reference": reference})
 	if err != nil {
 		t.Fatal(err)
@@ -191,7 +191,7 @@ func TestRunVerifyReleaseRejectsDigestMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	envelope, err := attestation.Sign(store, "release", fixture.keyID,
-		"application/vnd.platform-factory.subject.v1+json",
+		"application/vnd.secure-oci.subject.v1+json",
 		map[string]string{"digest": "sha256:" + fixtureHex, "reference": "example/release:v1"})
 	if err != nil {
 		t.Fatal(err)

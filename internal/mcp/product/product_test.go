@@ -144,57 +144,6 @@ func TestDoctorToolHandlerRejectsAnInvalidScope(t *testing.T) {
 	}
 }
 
-func TestDoctorToolHandlerRejectsInvalidJSON(t *testing.T) {
-	handler := DoctorToolHandler(t.TempDir())
-	if _, err := handler(context.Background(), json.RawMessage(`not json`)); err == nil {
-		t.Fatal("expected an error for invalid JSON arguments")
-	}
-}
-
-func TestStatusToolHandlerValidatesBeforeRunningAnything(t *testing.T) {
-	dir := t.TempDir()
-	handler := StatusToolHandler(dir)
-	if _, err := handler(context.Background(), json.RawMessage(`not json`)); err == nil {
-		t.Fatal("expected an error for invalid JSON arguments")
-	}
-	if _, err := handler(context.Background(), json.RawMessage(`{"directory":"../escape"}`)); err == nil {
-		t.Fatal("expected an error for a path-traversal directory argument")
-	}
-}
-
-func TestDetectToolHandlerValidatesBeforeRunningAnything(t *testing.T) {
-	dir := t.TempDir()
-	handler := DetectToolHandler(dir)
-	if _, err := handler(context.Background(), json.RawMessage(`not json`)); err == nil {
-		t.Fatal("expected an error for invalid JSON arguments")
-	}
-	if _, err := handler(context.Background(), json.RawMessage(`{"path":"../escape"}`)); err == nil {
-		t.Fatal("expected an error for a path-traversal path argument")
-	}
-}
-
-func TestInspectToolHandlerRequiresALayout(t *testing.T) {
-	handler := InspectToolHandler(t.TempDir())
-	if _, err := handler(context.Background(), json.RawMessage(`{}`)); err == nil {
-		t.Fatal("expected an error when layout is missing")
-	}
-}
-
-func TestLayoutToolHandlersValidateBeforeRunningAnything(t *testing.T) {
-	dir := t.TempDir()
-	for _, newHandler := range []func(string) func(context.Context, json.RawMessage) (string, error){
-		VerifyToolHandler, InspectToolHandler,
-	} {
-		handler := newHandler(dir)
-		if _, err := handler(context.Background(), json.RawMessage(`not json`)); err == nil {
-			t.Fatal("expected an error for invalid JSON arguments")
-		}
-		if _, err := handler(context.Background(), json.RawMessage(`{"layout":"../escape"}`)); err == nil {
-			t.Fatal("expected an error for a path-traversal layout argument")
-		}
-	}
-}
-
 func TestDetectToolHandlerRequiresAPath(t *testing.T) {
 	handler := DetectToolHandler(t.TempDir())
 	_, err := handler(context.Background(), json.RawMessage(`{}`))
@@ -232,37 +181,6 @@ func TestProjectToolHandlerRejectsAnInvalidAction(t *testing.T) {
 	_, err := handler(context.Background(), json.RawMessage(`{"action":"delete"}`))
 	if err == nil {
 		t.Fatal("expected an error for an invalid action")
-	}
-}
-
-// TestDeployToolHandlerValidatesBeforeRunningAnything covers every
-// error branch DeployToolHandler reaches before its own call to run() -
-// invalid JSON, unsafe extra_args, and each of the three
-// repository-scoped path arguments. It deliberately never supplies
-// arguments that pass every validation, since a successful call would
-// reach run()'s self-re-exec of os.Executable() - the running `go test`
-// binary itself, not platform-factory - and re-run this entire test
-// binary recursively (see realPFBinary's own doc comment above for why
-// these handlers can only be driven end-to-end via a real, separately
-// built binary).
-func TestDeployToolHandlerValidatesBeforeRunningAnything(t *testing.T) {
-	dir := t.TempDir()
-	handler := DeployToolHandler(dir)
-
-	if _, err := handler(context.Background(), json.RawMessage(`not json`)); err == nil {
-		t.Fatal("expected an error for invalid JSON arguments")
-	}
-	if _, err := handler(context.Background(), json.RawMessage(`{"extra_args":["a\u0000b"]}`)); err == nil {
-		t.Fatal("expected an error for a NUL byte in extra_args")
-	}
-	if _, err := handler(context.Background(), json.RawMessage(`{"reports":"../escape"}`)); err == nil {
-		t.Fatal("expected an error for a path-traversal reports argument")
-	}
-	if _, err := handler(context.Background(), json.RawMessage(`{"policy":"../escape"}`)); err == nil {
-		t.Fatal("expected an error for a path-traversal policy argument")
-	}
-	if _, err := handler(context.Background(), json.RawMessage(`{"evidence":"../escape"}`)); err == nil {
-		t.Fatal("expected an error for a path-traversal evidence argument")
 	}
 }
 

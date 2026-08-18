@@ -9,9 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"github.com/CYPT71/platform-factory/internal/app/languageplugin"
 	"github.com/CYPT71/platform-factory/internal/detect"
 	plugin "github.com/CYPT71/platform-factory/sdk/plugin"
 )
@@ -52,55 +52,11 @@ func handleFreeze(_ context.Context, raw json.RawMessage) (any, error) {
 	if params.Root == "" {
 		return nil, errors.New("params.root is required")
 	}
-	exists := func(name string) bool {
-		info, err := os.Stat(filepath.Join(params.Root, name))
-		return err == nil && info.Mode().IsRegular()
+	steps, err := languageplugin.FreezeSteps(params.Language, params.Root)
+	if err != nil {
+		return nil, err
 	}
-	var steps [][]string
-	switch strings.ToLower(params.Language) {
-	case "go", "golang":
-		steps = [][]string{{"go", "mod", "tidy"}, {"go", "mod", "vendor"}}
-	case "node", "nodejs", "javascript", "typescript":
-		if exists("package-lock.json") || exists("npm-shrinkwrap.json") {
-			steps = [][]string{{"npm", "ci", "--ignore-scripts"}}
-		} else {
-			steps = [][]string{{"npm", "install", "--package-lock-only", "--ignore-scripts"}, {"npm", "ci", "--ignore-scripts"}}
-		}
-	case "python":
-		requirements := "requirements.lock"
-		if !exists(requirements) {
-			requirements = "requirements.txt"
-		}
-		if !exists(requirements) {
-			return nil, errors.New("python requires requirements.lock or requirements.txt")
-		}
-		steps = [][]string{
-			{"python", "-m", "pip", "install", "--requirement", requirements, "--target", ".platform-factory/deps/python"},
-			{"python", "-m", "pip", "freeze", "--path", ".platform-factory/deps/python"},
-		}
-	case "java":
-		switch {
-		case exists("mvnw"):
-			steps = [][]string{{"./mvnw", "-B", "dependency:go-offline"}}
-		case exists("gradlew"):
-			steps = [][]string{{"./gradlew", "dependencies", "--write-locks"}}
-		case exists("pom.xml"):
-			steps = [][]string{{"mvn", "-B", "dependency:go-offline"}}
-		default:
-			return nil, errors.New("java requires Maven or Gradle project files")
-		}
-	case "dotnet", "csharp", "fsharp":
-		steps = [][]string{{"dotnet", "restore", "--use-lock-file"}}
-	case "rust":
-		steps = [][]string{{"cargo", "generate-lockfile"}, {"cargo", "fetch", "--locked"}}
-	case "ruby":
-		steps = [][]string{{"bundle", "lock"}, {"bundle", "cache", "--all"}}
-	case "php":
-		steps = [][]string{{"composer", "install", "--no-dev", "--prefer-dist", "--no-interaction"}}
-	default:
-		return nil, fmt.Errorf("unsupported language %q", params.Language)
-	}
-	return plugin.FreezeResult{Steps: steps, Profile: profile(params.Language)}, nil
+	return plugin.FreezeResult{Steps: steps, Profile: languageplugin.Profile(params.Language)}, nil
 }
 
 func handlePlan(_ context.Context, raw json.RawMessage) (any, error) {
@@ -115,17 +71,4 @@ func handlePlan(_ context.Context, raw json.RawMessage) (any, error) {
 		"official adapter selected for " + strings.ToLower(params.Language),
 		"dependency commands are returned to the host and never executed by the plugin",
 	}}, nil
-}
-
-func profile(language string) string {
-	switch strings.ToLower(language) {
-	case "go", "golang", "rust":
-		return "static"
-	case "node", "nodejs", "javascript", "typescript":
-		return "node"
-	case "dotnet", "csharp", "fsharp":
-		return "dotnet"
-	default:
-		return strings.ToLower(language)
-	}
 }
