@@ -126,7 +126,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 cpio build-essential flex bison bc libssl-dev libelf-dev podman \
-            containernetworking-plugins apparmor-utils
+            containernetworking-plugins apparmor-utils skopeo
       - name: Prove the OCI runtime can apply a loaded AppArmor profile
         # internal/ociruntime/apparmor_linux_test.go's own integration
         # coverage (TestApplyApparmorProfileTransitionsCurrentThread and the

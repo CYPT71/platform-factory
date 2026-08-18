@@ -32,7 +32,7 @@ container_name=${PLATFORM_FACTORY_DOCKER_NAME:-secure-img}
 for path in "$layout/index.json" "$kernel" "$microvm_init"; do
   test -r "$path"
 done
-for command in go docker sha256sum tar; do
+for command in go docker sha256sum skopeo; do
   command -v "$command" >/dev/null
 done
 
@@ -76,11 +76,27 @@ echo "reloading dockerd to pick up the new runtime registration"
 sudo systemctl reload docker
 docker info --format '{{json .Runtimes}}' >"$evidence_dir/docker-microvm-info.json"
 
-archive=$(mktemp "${TMPDIR:-/tmp}/platform-factory-docker-layout.XXXXXX.tar")
-trap 'rm -f "$archive"; cleanup' EXIT
-tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-  -C "$layout" -cf "$archive" .
-docker load --input "$archive" | tee "$evidence_dir/docker-microvm-load.txt"
+# `docker load` only reliably understands Docker's own legacy save/export
+# tar formats. Whether it also accepts a raw OCI Image Layout tar (what
+# test-podman-kvm.sh happily hands to `podman load`, since Podman has
+# always understood both) depends on whether this dockerd's image store
+# is backed by the containerd snapshotter: with it, `docker load` routes
+# through containerd's importer and OCI works fine (this is what this
+# local sandbox's dockerd does); without it - the classic overlay2
+# graphdriver, which is what a stock `docker-ce` install on a GitHub
+# Actions runner uses - the tar loader falls back to legacy-format
+# parsing, doesn't recognize oci-layout/index.json, and misreads the
+# top-level "blobs" directory as if it were a legacy per-image-ID
+# directory, failing with "open .../blobs/json: no such file or
+# directory". `skopeo copy` sidesteps that entirely: its docker-daemon:
+# destination pushes the image straight through the Docker Engine API,
+# the same path `docker pull`/`docker build` use, so it never depends on
+# `docker load`'s own tar-format detection. oci-builder always sets the
+# OCI index's org.opencontainers.image.ref.name annotation to
+# "$image_name:$tag" (internal/oci/builder.go), which is exactly $image
+# here, so it addresses the same manifest skopeo's oci: source needs.
+skopeo copy "oci:$layout:$image" "docker-daemon:$image" \
+  | tee "$evidence_dir/docker-microvm-load.txt"
 docker image inspect "$image" >/dev/null
 
 kernel_digest=sha256:$(sha256sum "$kernel" | awk '{print $1}')
@@ -147,6 +163,5 @@ if docker inspect "$container_name" >/dev/null 2>&1; then
   echo "error: Docker retained $container_name after rm" >&2
   exit 1
 fi
-trap 'rm -f "$archive"' EXIT
 printf 'DOCKER_MICROVM_E2E_OK name=%s runtime=platform-factory-runtime vmm=kvm\n' "$container_name" \
   | tee "$evidence_dir/docker-microvm-result.txt"
