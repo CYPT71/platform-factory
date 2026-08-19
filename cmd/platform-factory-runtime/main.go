@@ -274,6 +274,19 @@ func waitForExit(ctx context.Context, store *ociruntime.Store, id string, stdout
 }
 
 func defaultStateRoot() string {
+	// NOTE: os.Geteuid() is not a reliable "is this really privileged
+	// root" signal here: rootless Podman re-execs into a new user
+	// namespace where the invoking unprivileged host user is mapped to
+	// uid 0 *inside* the namespace, so this process legitimately sees
+	// euid 0 while still only holding that host user's real privileges -
+	// and its own XDG_RUNTIME_DIR (that host user's real /run/user/<uid>)
+	// is exactly the directory it can actually write to. A euid-based
+	// distrust of XDG_RUNTIME_DIR breaks that common case; see
+	// ensureStateRootWritable in runtime.go for how the different
+	// containerd-via-sudo scenario (a real root process, no namespace
+	// remap, with a foreign uid's XDG_RUNTIME_DIR leaking through
+	// unreliably-reset sudo environment) is handled instead, without
+	// touching this function's own trust of a caller-provided value.
 	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); filepath.IsAbs(runtimeDir) {
 		return filepath.Join(runtimeDir, "platform-factory-runtime")
 	}

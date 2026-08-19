@@ -61,6 +61,49 @@ func TestStoreLifecycleAndStartAcknowledgement(t *testing.T) {
 	}
 }
 
+// TestStoreOperatesAfterStateRootAncestorLosesTraversalPermission reproduces
+// the CI failure this test guards against without needing real root or
+// capability manipulation: an unprivileged process denied every permission
+// bit on a directory it owns is refused traversal exactly the same way a
+// capability-dropped root process is (see applyVMMSandbox's own doc comment
+// in supervisor_linux.go). withLock and put must resolve through the
+// Store's pre-opened root handle - obtained back when the whole ancestor
+// chain was still traversable - rather than re-walking dir from "/", or
+// this fails the same way tests/microvm/test-containerd-kvm.sh's own
+// non-root-owned work directory made the real supervisor fail once
+// applyVMMSandbox had already dropped CAP_DAC_OVERRIDE by the time
+// OnStarted called SetStatus.
+func TestStoreOperatesAfterStateRootAncestorLosesTraversalPermission(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("ancestor directory permissions do not restrict root")
+	}
+	ctx := context.Background()
+	ancestor := filepath.Join(t.TempDir(), "ancestor")
+	store, err := OpenStore(filepath.Join(ancestor, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	t.Cleanup(func() { _ = os.Chmod(ancestor, 0o700) })
+	if err := os.Chmod(ancestor, 0); err != nil {
+		t.Fatal(err)
+	}
+	bundle := testBundle(t)
+	if _, err := store.Create(ctx, "secure-img", bundle); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := store.SetStatus(ctx, "secure-img", "running"); err != nil {
+		t.Fatalf("set status: %v", err)
+	}
+	if err := store.SetSupervisor(ctx, "secure-img", os.Getpid()); err != nil {
+		t.Fatalf("set supervisor: %v", err)
+	}
+	state, found, err := store.Get(ctx, "secure-img")
+	if err != nil || !found || state.Status != "running" {
+		t.Fatalf("state=%+v found=%t err=%v", state, found, err)
+	}
+}
+
 func TestSupervisorRequestIdentityIsIndependentFromNamespacePID(t *testing.T) {
 	launched := State{ID: "isolated-vmm", PID: 424242, Created: time.Unix(100, 0).UTC()}
 	incarnation := stateIncarnation(launched)

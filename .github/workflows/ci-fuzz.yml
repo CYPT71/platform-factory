@@ -18,18 +18,19 @@ jobs:
       FUZZTIME: ${{ github.event_name == 'schedule' && '10m' || '45s' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Initialize the CI environment
-        uses: ./.github/actions/env-init
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version-file: go.mod, cache: true}
       - name: Fuzz label parser boundaries
         env: {GOTOOLCHAIN: local}
         run: |
           set -euo pipefail
-          go test ./internal/ociruntime -fuzz=FuzzLabelsFromPairs -fuzztime="$FUZZTIME" -timeout=15m
+          go test ./oci -fuzz=FuzzLabelsFromPairs -fuzztime="$FUZZTIME" -timeout=15m
       - name: Fuzz entrypoint validation boundaries
         env: {GOTOOLCHAIN: local}
         run: |
           set -euo pipefail
-          go test ./internal/ociruntime -fuzz=FuzzEntrypointValidation -fuzztime="$FUZZTIME" -timeout=15m
+          go test ./oci -fuzz=FuzzEntrypointValidation -fuzztime="$FUZZTIME" -timeout=15m
       - name: Fuzz the example application HTTP boundary
         env: {GOTOOLCHAIN: local}
         run: |

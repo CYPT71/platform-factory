@@ -19,6 +19,8 @@ Options:
   --arch GOARCH          target architecture (default: host)
   --yes                skip the confirmation prompt
   --list               print available components and exit
+  --rosetta         skip Rosetta 2 verification of darwin/amd64 binaries
+                       when cross-building from an Apple Silicon host
   -h, --help           show this help
 
 With no options, and when attached to a terminal, runs an interactive menu.
@@ -142,6 +144,7 @@ flag_os=$(go env GOHOSTOS)
 flag_arch=$(go env GOHOSTARCH)
 flag_yes=false
 flag_list=false
+flag_rosetta_verify=false
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -151,6 +154,7 @@ while [ "$#" -gt 0 ]; do
     --arch) [ "$#" -ge 2 ] || { echo "error: --arch requires a value" >&2; exit 2; }; flag_arch=$2; shift 2 ;;
     --yes) flag_yes=true; shift ;;
     --list) flag_list=true; shift ;;
+    --rosetta) flag_rosetta_verify=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -379,6 +383,48 @@ esac
 
 if [ "$build_failed" = true ]; then
   exit 1
+fi
+
+# A successful cross-build only proves `go build` accepted the target
+# triple - it says nothing about whether the result can actually launch.
+# darwin/amd64 on an Apple Silicon host is the one target this repo can
+# actually execute and verify locally, through Rosetta 2 - so do that, on
+# everything with a plain, side-effect-free entry point: the two commands
+# respond to `-h`, and every language plugin prints its usage and exits
+# on a bare invocation with no args (sdk/langplugin.Dispatch /
+# plugins/lang-go's own check). The rest are a guest-only init process, a
+# long-running daemon, or a distributed-mode binary not meant for direct
+# invocation on the host. Skippable with --no-rosetta.
+if [ "$flag_rosetta_verify" = true ] && [ "$flag_os/$flag_arch" = darwin/amd64 ] && [ "$host_goos/$host_goarch" = darwin/arm64 ]; then
+  if ! arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+    echo "error: Rosetta 2 is required to verify darwin/amd64 binaries on this Apple Silicon host; install it with: softwareupdate --install-rosetta --agree-to-license" >&2
+    exit 1
+  fi
+  for name in platform-factory oci-builder; do
+    out="$flag_prefix/$name$suffix"
+    [ -e "$out" ] || continue
+    echo "verifying $name runs under Rosetta 2 (darwin/amd64 on $host_goos/$host_goarch)..." >&2
+    output=$(arch -x86_64 "$out" -h 2>&1) || true
+    if [ -z "$output" ]; then
+      echo "error: $name (darwin/amd64) produced no output under Rosetta 2 - it did not actually run" >&2
+      exit 1
+    fi
+  done
+  case " $final_keys " in
+    *" core "*)
+      for language in go python node java dotnet rust ruby php; do
+        name="platform-factory-lang-$language"
+        out="$flag_prefix/$name$suffix"
+        [ -e "$out" ] || continue
+        echo "verifying $name runs under Rosetta 2 (darwin/amd64 on $host_goos/$host_goarch)..." >&2
+        output=$(arch -x86_64 "$out" 2>&1) || true
+        if [ -z "$output" ]; then
+          echo "error: $name (darwin/amd64) produced no output under Rosetta 2 - it did not actually run" >&2
+          exit 1
+        fi
+      done
+      ;;
+  esac
 fi
 
 # pf is a plain alias for platform-factory. Only created if

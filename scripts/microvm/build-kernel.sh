@@ -190,9 +190,30 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-base-kernel.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
 log "cache=miss version=$KERNEL_VERSION architecture=$arch"
-log "phase=download url=$KERNEL_URL"
-curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
-  --connect-timeout 10 --max-time 300 --output "$work/linux.tar.xz" "$KERNEL_URL"
+# The downloaded source tarball is the same bytes for every target
+# architecture (only the build below differs by arch), so an optional
+# shared cache directory lets two independent CI jobs building different
+# architectures - e.g. ci-microvm.yml's prepare-hvf-guest (arm64) and
+# boot-under-kvm (amd64) - reuse one already-downloaded, already
+# checksum-verified copy instead of each fetching it from the network.
+# Unset (the default for every caller outside CI) preserves the exact
+# prior behavior: always download.
+source_cache=${MICROVM_KERNEL_SOURCE_CACHE:-}
+cached_archive="$source_cache/linux-${KERNEL_VERSION}.tar.xz"
+if [ -n "$source_cache" ] && [ -f "$cached_archive" ] &&
+   echo "${KERNEL_SHA256}  $cached_archive" | sha256sum --check --status 2>/dev/null; then
+  log "phase=download source=cache path=$cached_archive"
+  cp "$cached_archive" "$work/linux.tar.xz"
+else
+  log "phase=download source=network url=$KERNEL_URL"
+  curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+    --connect-timeout 10 --max-time 300 --output "$work/linux.tar.xz" "$KERNEL_URL"
+  if [ -n "$source_cache" ]; then
+    mkdir -p "$source_cache"
+    cp "$work/linux.tar.xz" "$cached_archive.tmp"
+    mv "$cached_archive.tmp" "$cached_archive"
+  fi
+fi
 log "phase=checksum archive_bytes=$(wc -c < "$work/linux.tar.xz")"
 echo "${KERNEL_SHA256}  $work/linux.tar.xz" | sha256sum --check
 

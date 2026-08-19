@@ -12,6 +12,14 @@
 [![Benchmark](https://github.com/CYPT71/platform-factory/actions/workflows/ci-benchmark.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-benchmark.yml?query=branch%3Amain)
 [![OCI compatibility](https://github.com/CYPT71/platform-factory/actions/workflows/ci-compatibility.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-compatibility.yml?query=branch%3Amain)
 [![Supply-chain E2E](https://github.com/CYPT71/platform-factory/actions/workflows/ci-supply-chain-e2e.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-supply-chain-e2e.yml?query=branch%3Amain)
+[![DAST validation](https://github.com/CYPT71/platform-factory/actions/workflows/ci-dast.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-dast.yml?query=branch%3Amain)
+[![Sandbox](https://github.com/CYPT71/platform-factory/actions/workflows/ci-sandbox.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-sandbox.yml?query=branch%3Amain)
+[![System library scan](https://github.com/CYPT71/platform-factory/actions/workflows/ci-system-libraries.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-system-libraries.yml?query=branch%3Amain)
+[![Launch matrix](https://github.com/CYPT71/platform-factory/actions/workflows/ci-launch.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-launch.yml?query=branch%3Amain)
+[![Multi-arch OCI](https://github.com/CYPT71/platform-factory/actions/workflows/ci-multiarch.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-multiarch.yml?query=branch%3Amain)
+[![pf init experience](https://github.com/CYPT71/platform-factory/actions/workflows/ci-pf-init-experience.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-pf-init-experience.yml?query=branch%3Amain)
+[![Kind multi-node runtime](https://github.com/CYPT71/platform-factory/actions/workflows/ci-kind-multinode.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-kind-multinode.yml?query=branch%3Amain)
+[![MCP server image](https://github.com/CYPT71/platform-factory/actions/workflows/ci-mcp-image.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-mcp-image.yml?query=branch%3Amain)
 
 Platform Factory turns a compiled executable into a deterministic OCI image,
 attaches native supply-chain evidence, and runs the result as a hardened

@@ -7,6 +7,7 @@ package ociruntime
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -836,11 +837,25 @@ func processStartTicks(pid int) (int64, error) {
 	return ticks, nil
 }
 
+// withLock and put resolve every path through s.root (an *os.Root opened
+// once, at Store-creation time, while the caller still held every DAC
+// capability - see OpenStore) rather than a fresh absolute os.OpenFile off
+// s.dir. A container's supervisor process calls both again well into its
+// own lifetime, from inside OnStarted, after applyVMMSandbox
+// (supervisor_linux.go) has already dropped CAP_DAC_OVERRIDE/
+// CAP_DAC_READ_SEARCH; a fresh absolute-path open at that point has to
+// re-walk every ancestor directory down from "/", including a
+// caller-supplied, non-root-owned state root parent (e.g.
+// tests/microvm/test-containerd-kvm.sh's own work directory) that root can
+// no longer traverse without those capabilities. Reusing s.root's
+// already-open directory descriptor (openat relative to it) needs no such
+// traversal - only permission on the state directory itself, which root
+// still owns.
 func (s *Store) withLock(id string, action func() error) error {
 	if !idPattern.MatchString(id) {
 		return fmt.Errorf("oci runtime: invalid container id %q", id)
 	}
-	lock, err := os.OpenFile(filepath.Join(s.dir, "."+id+".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := s.root.OpenFile("."+id+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
@@ -857,16 +872,16 @@ func (s *Store) put(state State) error {
 	if err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(s.dir, ".state-*")
+	var suffix [16]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return err
+	}
+	name := fmt.Sprintf(".state-%x", suffix)
+	temporary, err := s.root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
+	defer func() { _ = s.root.Remove(name) }()
 	if _, err := temporary.Write(data); err != nil {
 		temporary.Close()
 		return err
@@ -878,7 +893,7 @@ func (s *Store) put(state State) error {
 	if err := temporary.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(name, filepath.Join(s.dir, state.ID+".json")); err != nil {
+	if err := s.root.Rename(name, state.ID+".json"); err != nil {
 		return err
 	}
 	if err := s.dirHandle.Sync(); err != nil {

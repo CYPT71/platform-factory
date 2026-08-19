@@ -64,20 +64,19 @@ cleanup() {
   # platform-factory-shim invokes platform-factory-runtime as a plain OCI
   # runtime subprocess (create/start/... over argv, not a direct Go call
   # into internal/ociruntime), so its supervisor.log lands wherever that
-  # binary's own defaultStateRoot() puts it - /run/user/0/platform-factory-runtime
-  # here, since this whole script runs the shim as root via sudo - not
-  # under $work/state at all. Same start-time-crash rationale as
-  # test-podman-kvm.sh's identical capture.
+  # binary's own defaultStateRoot() puts it - $work/xdg-runtime/platform-factory-runtime
+  # here, since this script pins XDG_RUNTIME_DIR there explicitly (see
+  # the containerd launch above for why). Same start-time-crash rationale
+  # as test-podman-kvm.sh's identical capture.
   #
-  # find's root argument must not itself be a glob: /run/user/0 is
-  # root-only (mode 0700), and a pattern like /run/user/*/platform-factory-runtime
-  # expands in *this* unprivileged shell before sudo ever runs a single
-  # command - it can never see inside a directory it cannot read, no
-  # matter how the command it's building gets sudo'd. Starting the
-  # traversal from the plain, unprivileged-readable /run/user and letting
-  # `find` (now running as root) descend from there is the only way to
-  # actually reach it.
-  sudo find /run/user -mindepth 3 -maxdepth 3 -name '*.supervisor.log' \
+  # find's root argument must not itself be a glob for the same reason
+  # as $work/state and $work/logs above: this whole directory tree is
+  # root-owned (containerd and everything it spawns run as root via
+  # sudo), so a pattern here would expand in *this* unprivileged shell
+  # before sudo ever runs a single command - it can never see inside a
+  # directory it cannot read, no matter how the command it's building
+  # gets sudo'd.
+  sudo find "$work/xdg-runtime" -mindepth 2 -maxdepth 2 -name '*.supervisor.log' \
     -exec sh -c 'install -o "'"$invoking_uid"'" -g "'"$invoking_gid"'" -m 0644 "$1" "'"$evidence_dir"'/containerd-microvm-$(basename "$1")"' _ {} \; \
     2>/dev/null || true
   crictl -r "unix://$sock" rmp -a -f >/dev/null 2>&1 || true
@@ -157,7 +156,22 @@ EOF
 # script just built and installed to /usr/local/bin would silently run
 # stale binaries under every process containerd spawns from here on.
 runtime_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-sudo env PATH="$runtime_path" setsid containerd --config "$work/containerd.toml" \
+# platform-factory-shim invokes platform-factory-runtime with no explicit
+# --root (see task_service.go), so it falls back to defaultStateRoot()
+# (cmd/platform-factory-runtime/main.go), which trusts XDG_RUNTIME_DIR
+# verbatim - correct for Podman's rootless user-namespace remap (see that
+# function's own doc comment), but this containerd instance runs as real
+# root via sudo, which does not reliably strip an inherited
+# XDG_RUNTIME_DIR depending on the host's sudoers env_keep list. An
+# inherited /run/user/<invoking_uid> would point platform-factory-runtime's
+# state at a directory root doesn't own, which applyVMMSandbox
+# (supervisor_linux.go) then can't write into once it drops
+# CAP_DAC_OVERRIDE - and /run/user/0 is often not creatable at all for a
+# sudo'd root with no real login session. Pin it explicitly under $work
+# instead, a plain root-owned directory this same sudo'd root already
+# writes into without issue (containerd's own root/state above).
+sudo env PATH="$runtime_path" XDG_RUNTIME_DIR="$work/xdg-runtime" \
+  setsid containerd --config "$work/containerd.toml" \
   >"$evidence_dir/containerd-microvm-daemon.log" 2>&1 &
 for _ in $(seq 1 30); do
   test -S "$sock" && break
@@ -261,13 +275,14 @@ found=0
 for _ in $(seq 1 90); do
   crictl -r "unix://$sock" ps -a >"$evidence_dir/containerd-microvm-ps.txt" 2>&1 || true
   if [ -z "$supervisor_log" ]; then
-    # /run/user/0 is root-only (mode 0700): a glob like
-    # /run/user/*/platform-factory-runtime/... expands in *this*
+    # $work/xdg-runtime/platform-factory-runtime is root-owned (mode
+    # 0700, same as the /run/user/<uid> it stands in for - see the
+    # containerd launch above): a glob here expands in *this*
     # unprivileged shell before sudo ever runs, so it can never see
     # inside it - sudo on the existence check alone (the bug this
     # replaced) was already too late. `sudo find` does the traversal
     # itself under root, the only way to actually reach it.
-    supervisor_log=$(sudo find /run/user -mindepth 3 -maxdepth 3 \
+    supervisor_log=$(sudo find "$work/xdg-runtime" -mindepth 2 -maxdepth 2 \
       -name "$container_id.supervisor.log" 2>/dev/null | head -1)
   fi
   if [ -n "$supervisor_log" ]; then

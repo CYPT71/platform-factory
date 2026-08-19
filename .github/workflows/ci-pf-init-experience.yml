@@ -12,8 +12,9 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Initialize the CI environment
-        uses: ./.github/actions/env-init
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version-file: go.mod, cache: true}
       - name: Validate the complete empty-repository and TUI experience
         env: {GOTOOLCHAIN: local}
         run: |
@@ -39,9 +40,14 @@ jobs:
             test: TestJuniorDeploysHelloWorldToRealLocalPodman
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Initialize the CI environment
-        uses: ./.github/actions/env-init
-        with: {podman: "${{ matrix.engine == 'podman' }}"}
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version-file: go.mod, cache: true}
+      - name: Install Podman
+        if: matrix.engine == 'podman'
+        run: |
+          set -euo pipefail
+          scripts/ci/install-tools.sh podman
       - name: Validate the junior launch against a real local engine
         env: {GOTOOLCHAIN: local, PF_REQUIRE_REAL_RUNTIME: '1'}
         run: |

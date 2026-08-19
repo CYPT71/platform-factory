@@ -13,6 +13,8 @@ Options:
   --env DIR           isolated environment directory (default: .platform-factory-env)
   --install PREFIX    also copy commands into PREFIX/bin
   --clean             replace an existing environment
+  --rosetta        skip Rosetta 2 verification of darwin/amd64 binaries
+                       when cross-building from an Apple Silicon host
   -h, --help          show this help
 
 Examples:
@@ -40,6 +42,7 @@ host_goarch=$(go env GOHOSTARCH)
 environment="$repo_root/.platform-factory-env"
 install_prefix=
 clean=false
+rosetta_verify=false
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -60,6 +63,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --clean)
       clean=true
+      shift
+      ;;
+    --rosetta)
+      rosetta_verify=true
       shift
       ;;
     -h|--help)
@@ -143,6 +150,43 @@ for language in $language_plugins; do
       -o "$environment/bin/$plugin_name$suffix" .
   )
 done
+
+# A successful cross-build only proves `go build` accepted the target
+# triple - it says nothing about whether the result can actually launch
+# (a stray CGO/framework dependency invalid for the target arch would
+# fail here, not at build time). darwin/amd64 on an Apple Silicon host is
+# the one target this repo can actually execute and verify locally,
+# through Rosetta 2 - so do that, on everything with a plain,
+# side-effect-free entry point: the two commands respond to `-h`, and
+# every language plugin prints its usage and exits on a bare invocation
+# with no args (sdk/langplugin.Dispatch / plugins/lang-go's own check).
+# Every other command here is a guest-only init process, a long-running
+# daemon, or an HTTP server not meant for direct invocation on the host.
+# Skippable with --rosetta for callers who don't want the extra
+# per-binary launch cost (e.g. a fast inner dev loop).
+if [ "$rosetta_verify" = true ] && [ "$goos/$goarch" = darwin/amd64 ] && [ "$host_goos/$host_goarch" = darwin/arm64 ]; then
+  if ! arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+    echo "error: Rosetta 2 is required to verify darwin/amd64 binaries on this Apple Silicon host; install it with: softwareupdate --install-rosetta --agree-to-license" >&2
+    exit 1
+  fi
+  for command_name in platform-factory oci-builder; do
+    echo "verifying $command_name runs under Rosetta 2 (darwin/amd64 on $host_goos/$host_goarch)..." >&2
+    output=$(arch -x86_64 "$environment/bin/$command_name" -h 2>&1) || true
+    if [ -z "$output" ]; then
+      echo "error: $command_name (darwin/amd64) produced no output under Rosetta 2 - it did not actually run" >&2
+      exit 1
+    fi
+  done
+  for language in $language_plugins; do
+    plugin_name="platform-factory-lang-$language"
+    echo "verifying $plugin_name runs under Rosetta 2 (darwin/amd64 on $host_goos/$host_goarch)..." >&2
+    output=$(arch -x86_64 "$environment/bin/$plugin_name" 2>&1) || true
+    if [ -z "$output" ]; then
+      echo "error: $plugin_name (darwin/amd64) produced no output under Rosetta 2 - it did not actually run" >&2
+      exit 1
+    fi
+  done
+fi
 
 cat >"$environment/activate" <<'EOF'
 # Source this file from Bash or Zsh.

@@ -13,14 +13,15 @@ jobs:
       PLATFORM_FACTORY_CONTAINER_ENGINE: podman
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Initialize the CI environment
-        uses: ./.github/actions/env-init
-        with: {kind: true}
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version-file: go.mod, cache: true}
       - name: Create the common one-plus-two kind cluster
         env: {GOTOOLCHAIN: local}
         run: |
           set -euo pipefail
           podman info
+          scripts/ci/install-tools.sh kind
           "$(go env GOPATH)/bin/kind" create cluster --name platform-factory-distributed \
             --wait 90s --config scripts/ci/kind-multinode.yaml \
             --image kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
