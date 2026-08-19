@@ -139,7 +139,7 @@ jobs:
         env: { GOTOOLCHAIN: local }
         run: |
           set -euo pipefail
-          sudo env "PATH=$PATH" go test ./internal/ociruntimeruntime/... \
+          sudo env "PATH=$PATH" go test ./internal/ociruntime/... \
             -run 'AppArmor|Apparmor|Selinux' -v -count=1
       - name: Install crictl (pinned)
         env: { GOTOOLCHAIN: local }
@@ -314,138 +314,139 @@ jobs:
             fi
 
             exit "$status"
-          fi- name: Prove containerd owns the native-KVM MicroVM lifecycle
-              env:
-                GOTOOLCHAIN: local
-                PLATFORM_FACTORY_EVIDENCE_DIR: ${{ github.workspace }}
-              run: |
-                set -euo pipefail
-                tests/microvm/test-containerd-kvm.sh \
-                  /tmp/oci-image platform-factory:latest \
-                  "${{ github.workspace }}/.cache/microvm/amd64/kernel" \
-                  /tmp/native-microvm-init
-            - name: Install kernel-hardening-checker (pinned)
-              run: |
-                set -euo pipefail
-                sudo python3 -m pip install --break-system-packages --quiet \
-                  "git+https://github.com/a13xp0p0v/kernel-hardening-checker@afc376f2a935994793343cfeb05953583cc30191"
-            - name: Scan the built kernel's resolved config for hardening gaps
-              # Informational, not a hard gate yet: this is a general-purpose Linux
-              # hardening baseline, and scripts/microvm builds a deliberately
-              # minimal, single-purpose, single-tenant kernel (no modules, no
-              # untrusted local users) that intentionally omits large parts of
-              # what the checker expects of a general-purpose distro kernel. The
-              # report is still real evidence that the config was analyzed; a
-              # future change can turn specific checks into a gate once an
-              # accepted baseline for this kernel profile exists.
-              run: |
-                set -euo pipefail
-                echo "::group::Kernel hardening report"
-                set +e
-                kernel-hardening-checker -c .cache/microvm/amd64/kernel.config.resolved -m verbose \
-                  | tee kernel-hardening-report.txt
-                verbose_status=${PIPESTATUS[0]}
-                set -e
-                echo "::endgroup::"
-                echo "kernel-hardening-checker verbose exit status: ${verbose_status}"
-                set +e
-                kernel-hardening-checker -c .cache/microvm/amd64/kernel.config.resolved -m json \
-                  > kernel-hardening-report.json
-                json_status=$?
-                set -e
-                echo "kernel-hardening-checker JSON exit status: ${json_status}"
-                test -s kernel-hardening-report.txt
-                test -s kernel-hardening-report.json
-            - name: Verify the native initramfs assembly is byte-reproducible
-              env: {GOTOOLCHAIN: local}
-              run: |
-                set -euo pipefail
-                CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /tmp/microvm-init ./cmd/microvm-init
-                go build -trimpath -ldflags='-s -w' -o /tmp/microvm-initramfs ./cmd/microvm-initramfs
-                /tmp/microvm-initramfs -layout /tmp/oci-image -init /tmp/microvm-init -output /tmp/initramfs-a.cpio.gz
-                sleep 2
-                /tmp/microvm-initramfs -layout /tmp/oci-image -init /tmp/microvm-init -output /tmp/initramfs-b.cpio.gz
-                sha256sum /tmp/initramfs-a.cpio.gz /tmp/initramfs-b.cpio.gz | tee initramfs-reproducibility.txt
-                cmp /tmp/initramfs-a.cpio.gz /tmp/initramfs-b.cpio.gz
-            - name: Boot the image under KVM and smoke-test it
-              env:
-                GOTOOLCHAIN: local
-                MICROVM_KERNEL: ${{ github.workspace }}/.cache/microvm/amd64/kernel
-                MICROVM_SMOKE_TEST_PATH: /healthz
-                MICROVM_BOOT_MANIFEST: boot-manifest.json
-              run: |
-                set -euo pipefail
-                echo "::group::KVM boot and guest console"
-                timeout --signal=TERM 5m scripts/microvm/run-microvm.sh \
-                  /tmp/oci-image 2>&1 | tee microvm-boot.txt
-                echo "::endgroup::"
-                test -s boot-manifest.json
-            - name: Boot the image again and verify a guest-initiated graceful shutdown
-              env:
-                GOTOOLCHAIN: local
-                MICROVM_KERNEL: ${{ github.workspace }}/.cache/microvm/amd64/kernel
-                MICROVM_SHUTDOWN_TEST_PATH: /debug/exit
-              run: |
-                set -euo pipefail
-                echo "::group::KVM graceful-shutdown test"
-                timeout --signal=TERM 5m scripts/microvm/run-microvm.sh \
-                  /tmp/oci-image 2>&1 | tee microvm-shutdown.txt
-                echo "::endgroup::"
-            - name: Stage kernel evidence outside the hidden cache directory
-              run: |
-                set -euo pipefail
-                mkdir kernel-evidence
-                cp .cache/microvm/amd64/kernel.config.resolved kernel-evidence/
-                cp .cache/microvm/amd64/kernel.provenance.json kernel-evidence/
-                cp .cache/microvm/amd64/kernel.sbom.cdx.json kernel-evidence/
-                test -s kernel-evidence/kernel.config.resolved
-                test -s kernel-evidence/kernel.provenance.json
-                test -s kernel-evidence/kernel.sbom.cdx.json
-            - name: Link boot evidence to this workflow run
-              if: always()
-              run: |
-                set -euo pipefail
-                python3 scripts/ci/write-traceability.py traceability.json \
-                  kernel-build.txt native-kvm-linux-boot.txt microvm-boot.txt microvm-shutdown.txt \
-                  podman-microvm-result.txt podman-microvm-ps.json podman-microvm-logs.txt \
-                  docker-microvm-result.txt docker-microvm-ps.json docker-microvm-logs.txt \
-                  docker-microvm-info.txt docker-microvm-inspect-final.json docker-microvm-daemon.log \
-                  containerd-microvm-result.txt containerd-microvm-logs.txt \
-                  .cache/microvm/amd64/kernel.config.resolved .cache/microvm/amd64/kernel.provenance.json \
-                  .cache/microvm/amd64/kernel.sbom.cdx.json \
-                  kernel-hardening-report.json initramfs-reproducibility.txt boot-manifest.json \
-                  native-initramfs-assembly.json
-            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-              if: always()
-              with:
-                name: microvm-boot-evidence
-                path: |
-                  microvm-boot.txt
-                  microvm-shutdown.txt
-                  kernel-build.txt
-                  native-kvm-linux-boot.txt
-                  native-initramfs-assembly.json
-                  podman-microvm-*
-                  docker-microvm-*
-                  containerd-microvm-*
-                  kernel-evidence/kernel.config.resolved
-                  kernel-evidence/kernel.sbom.cdx.json
-                  kernel-hardening-report.txt
-                  kernel-hardening-report.json
-                  initramfs-reproducibility.txt
-                  traceability.json
-                if-no-files-found: warn
-                retention-days: 14
-            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-              with:
-                name: microvm-signable-evidence
-                path: |
-                  kernel-evidence/kernel.provenance.json
-                  kernel-evidence/kernel.sbom.cdx.json
-                  kernel-hardening-report.json
-                  boot-manifest.json
-                if-no-files-found: error
-                retention-days: 14
+          fi
+      - name: Prove containerd owns the native-KVM MicroVM lifecycle
+        env:
+          GOTOOLCHAIN: local
+          PLATFORM_FACTORY_EVIDENCE_DIR: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          tests/microvm/test-containerd-kvm.sh \
+            /tmp/oci-image platform-factory:latest \
+            "${{ github.workspace }}/.cache/microvm/amd64/kernel" \
+            /tmp/native-microvm-init
+      - name: Install kernel-hardening-checker (pinned)
+        run: |
+          set -euo pipefail
+          sudo python3 -m pip install --break-system-packages --quiet \
+            "git+https://github.com/a13xp0p0v/kernel-hardening-checker@afc376f2a935994793343cfeb05953583cc30191"
+      - name: Scan the built kernel's resolved config for hardening gaps
+        # Informational, not a hard gate yet: this is a general-purpose Linux
+        # hardening baseline, and scripts/microvm builds a deliberately
+        # minimal, single-purpose, single-tenant kernel (no modules, no
+        # untrusted local users) that intentionally omits large parts of
+        # what the checker expects of a general-purpose distro kernel. The
+        # report is still real evidence that the config was analyzed; a
+        # future change can turn specific checks into a gate once an
+        # accepted baseline for this kernel profile exists.
+        run: |
+          set -euo pipefail
+          echo "::group::Kernel hardening report"
+          set +e
+          kernel-hardening-checker -c .cache/microvm/amd64/kernel.config.resolved -m verbose \
+            | tee kernel-hardening-report.txt
+          verbose_status=${PIPESTATUS[0]}
+          set -e
+          echo "::endgroup::"
+          echo "kernel-hardening-checker verbose exit status: ${verbose_status}"
+          set +e
+          kernel-hardening-checker -c .cache/microvm/amd64/kernel.config.resolved -m json \
+            > kernel-hardening-report.json
+          json_status=$?
+          set -e
+          echo "kernel-hardening-checker JSON exit status: ${json_status}"
+          test -s kernel-hardening-report.txt
+          test -s kernel-hardening-report.json
+      - name: Verify the native initramfs assembly is byte-reproducible
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o /tmp/microvm-init ./cmd/microvm-init
+          go build -trimpath -ldflags='-s -w' -o /tmp/microvm-initramfs ./cmd/microvm-initramfs
+          /tmp/microvm-initramfs -layout /tmp/oci-image -init /tmp/microvm-init -output /tmp/initramfs-a.cpio.gz
+          sleep 2
+          /tmp/microvm-initramfs -layout /tmp/oci-image -init /tmp/microvm-init -output /tmp/initramfs-b.cpio.gz
+          sha256sum /tmp/initramfs-a.cpio.gz /tmp/initramfs-b.cpio.gz | tee initramfs-reproducibility.txt
+          cmp /tmp/initramfs-a.cpio.gz /tmp/initramfs-b.cpio.gz
+      - name: Boot the image under KVM and smoke-test it
+        env:
+          GOTOOLCHAIN: local
+          MICROVM_KERNEL: ${{ github.workspace }}/.cache/microvm/amd64/kernel
+          MICROVM_SMOKE_TEST_PATH: /healthz
+          MICROVM_BOOT_MANIFEST: boot-manifest.json
+        run: |
+          set -euo pipefail
+          echo "::group::KVM boot and guest console"
+          timeout --signal=TERM 5m scripts/microvm/run-microvm.sh \
+            /tmp/oci-image 2>&1 | tee microvm-boot.txt
+          echo "::endgroup::"
+          test -s boot-manifest.json
+      - name: Boot the image again and verify a guest-initiated graceful shutdown
+        env:
+          GOTOOLCHAIN: local
+          MICROVM_KERNEL: ${{ github.workspace }}/.cache/microvm/amd64/kernel
+          MICROVM_SHUTDOWN_TEST_PATH: /debug/exit
+        run: |
+          set -euo pipefail
+          echo "::group::KVM graceful-shutdown test"
+          timeout --signal=TERM 5m scripts/microvm/run-microvm.sh \
+            /tmp/oci-image 2>&1 | tee microvm-shutdown.txt
+          echo "::endgroup::"
+      - name: Stage kernel evidence outside the hidden cache directory
+        run: |
+          set -euo pipefail
+          mkdir kernel-evidence
+          cp .cache/microvm/amd64/kernel.config.resolved kernel-evidence/
+          cp .cache/microvm/amd64/kernel.provenance.json kernel-evidence/
+          cp .cache/microvm/amd64/kernel.sbom.cdx.json kernel-evidence/
+          test -s kernel-evidence/kernel.config.resolved
+          test -s kernel-evidence/kernel.provenance.json
+          test -s kernel-evidence/kernel.sbom.cdx.json
+      - name: Link boot evidence to this workflow run
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/write-traceability.py traceability.json \
+            kernel-build.txt native-kvm-linux-boot.txt microvm-boot.txt microvm-shutdown.txt \
+            podman-microvm-result.txt podman-microvm-ps.json podman-microvm-logs.txt \
+            docker-microvm-result.txt docker-microvm-ps.json docker-microvm-logs.txt \
+            docker-microvm-info.txt docker-microvm-inspect-final.json docker-microvm-daemon.log \
+            containerd-microvm-result.txt containerd-microvm-logs.txt \
+            .cache/microvm/amd64/kernel.config.resolved .cache/microvm/amd64/kernel.provenance.json \
+            .cache/microvm/amd64/kernel.sbom.cdx.json \
+            kernel-hardening-report.json initramfs-reproducibility.txt boot-manifest.json \
+            native-initramfs-assembly.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: microvm-boot-evidence
+          path: |
+            microvm-boot.txt
+            microvm-shutdown.txt
+            kernel-build.txt
+            native-kvm-linux-boot.txt
+            native-initramfs-assembly.json
+            podman-microvm-*
+            docker-microvm-*
+            containerd-microvm-*
+            kernel-evidence/kernel.config.resolved
+            kernel-evidence/kernel.sbom.cdx.json
+            kernel-hardening-report.txt
+            kernel-hardening-report.json
+            initramfs-reproducibility.txt
+            traceability.json
+          if-no-files-found: warn
+          retention-days: 14
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: microvm-signable-evidence
+          path: |
+            kernel-evidence/kernel.provenance.json
+            kernel-evidence/kernel.sbom.cdx.json
+            kernel-hardening-report.json
+            boot-manifest.json
+          if-no-files-found: error
+          retention-days: 14
 
   sign-kernel-evidence:
     needs: boot-under-kvm
