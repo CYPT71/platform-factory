@@ -41,12 +41,16 @@ func TestMain(m *testing.M) {
 }
 
 // runAsHelperProcess makes this test binary stand in for the real
-// platform-factory binary: it echoes its own argv to stdout/stderr and
-// exits with helperExitCodeEnv's value, then stops - it never calls
-// m.Run(), so a chain of these never recurses.
+// platform-factory binary: it echoes its own argv (and its own working
+// directory, so project_root-override tests can assert exactly what
+// cmd.Dir the handler under test set) to stdout/stderr and exits with
+// helperExitCodeEnv's value, then stops - it never calls m.Run(), so a
+// chain of these never recurses.
 func runAsHelperProcess() {
 	argv := strings.Join(os.Args[1:], "|")
+	cwd, _ := os.Getwd()
 	fmt.Fprintf(os.Stdout, "stdout-argv:%s\n", argv)
+	fmt.Fprintf(os.Stdout, "stdout-cwd:%s\n", cwd)
 	fmt.Fprintf(os.Stderr, "stderr-argv:%s\n", argv)
 	code := 0
 	if v := os.Getenv(helperExitCodeEnv); v != "" {
@@ -144,6 +148,88 @@ func TestValidExtraArgsRejectsNULBytes(t *testing.T) {
 	}
 	if err := validExtraArgs([]string{"--flag", "value"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// cwdFromStdout extracts the "stdout-cwd:" line runAsHelperProcess wrote,
+// so a test can assert exactly which directory the subprocess actually
+// ran in (i.e. what cmd.Dir the handler under test set), not just the
+// argv it built.
+func cwdFromStdout(t *testing.T, stdout string) string {
+	t.Helper()
+	for _, line := range strings.Split(stdout, "\n") {
+		if rest, ok := strings.CutPrefix(line, "stdout-cwd:"); ok {
+			return rest
+		}
+	}
+	t.Fatalf("no stdout-cwd line found in %q", stdout)
+	return ""
+}
+
+// evalSymlinksOrFatal resolves symlinks the same way resolveProjectRoot's
+// callers ultimately do when the OS itself resolves cmd.Dir (macOS's
+// TempDir, for one, lives under a symlinked /var -> /private/var), so
+// comparing a raw project_root argument against a subprocess's reported
+// os.Getwd() needs both sides normalized the same way.
+func evalSymlinksOrFatal(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", path, err)
+	}
+	return resolved
+}
+
+func TestResolveProjectRootDefaultsToRepoRootWhenEmpty(t *testing.T) {
+	repoRoot := t.TempDir()
+	got, err := resolveProjectRoot(repoRoot, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != repoRoot {
+		t.Fatalf("got=%q want=%q", got, repoRoot)
+	}
+}
+
+func TestResolveProjectRootRejectsARelativePath(t *testing.T) {
+	repoRoot := t.TempDir()
+	if _, err := resolveProjectRoot(repoRoot, "relative/path"); err == nil {
+		t.Fatal("expected an error for a relative project_root")
+	}
+}
+
+func TestResolveProjectRootRejectsANonexistentDirectory(t *testing.T) {
+	repoRoot := t.TempDir()
+	missing := filepath.Join(repoRoot, "does-not-exist")
+	if _, err := resolveProjectRoot(repoRoot, missing); err == nil {
+		t.Fatal("expected an error for a nonexistent project_root")
+	}
+}
+
+func TestResolveProjectRootRejectsAFile(t *testing.T) {
+	repoRoot := t.TempDir()
+	file := filepath.Join(repoRoot, "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveProjectRoot(repoRoot, file); err == nil {
+		t.Fatal("expected an error for a project_root that is a file, not a directory")
+	}
+}
+
+// TestResolveProjectRootAcceptsAnIndependentAbsoluteDirectory is the core
+// of F3: project_root deliberately does NOT need to be a Go module root
+// and does NOT need to live inside repoRoot - it can be any existing
+// absolute directory elsewhere on disk.
+func TestResolveProjectRootAcceptsAnIndependentAbsoluteDirectory(t *testing.T) {
+	repoRoot := t.TempDir()
+	independent := t.TempDir()
+	got, err := resolveProjectRoot(repoRoot, independent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if evalSymlinksOrFatal(t, got) != evalSymlinksOrFatal(t, independent) {
+		t.Fatalf("got=%q want=%q", got, independent)
 	}
 }
 

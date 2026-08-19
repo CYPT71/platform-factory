@@ -8,6 +8,7 @@ import (
 
 	"github.com/CYPT71/platform-factory/internal/mcp/git"
 	"github.com/CYPT71/platform-factory/internal/mcp/plugins"
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 const classifySystemPrompt = `You are the planning step of platform-factory's pf_implement tool. Given a ` +
@@ -87,12 +88,12 @@ func classify(ctx context.Context, client *Client, request string) (Plan, error)
 	text = strings.TrimSuffix(text, "```")
 	var plan Plan
 	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &plan); err != nil {
-		return Plan{}, fmt.Errorf("model reply was not a valid plan JSON object: %w", err)
+		return Plan{}, toolerror.New(toolerror.ErrValidationFailed, "model reply was not a valid plan JSON object: %v", err)
 	}
 	switch plan.Strategy {
 	case "plugin_only", "core_only", "core_and_plugin":
 	default:
-		return Plan{}, fmt.Errorf("model returned an unrecognized strategy %q", plan.Strategy)
+		return Plan{}, toolerror.New(toolerror.ErrValidationFailed, "model returned an unrecognized strategy %q", plan.Strategy)
 	}
 	return plan, nil
 }
@@ -320,7 +321,7 @@ func ImplementToolHandler(repoRoot string) func(context.Context, json.RawMessage
 		}
 		var args implementArguments
 		if err := json.Unmarshal(arguments, &args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 		}
 		result, err := Implement(ctx, client, repoRoot, args.Request)
 		if err != nil {

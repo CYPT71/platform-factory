@@ -3,6 +3,8 @@ package git
 import (
 	"context"
 	"fmt"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 // Push pushes the current branch to remote (typically "origin"),
@@ -17,10 +19,10 @@ func (r *Repo) Push(ctx context.Context, remote string) error {
 		return err
 	}
 	if status.Branch == "" || status.Branch == "HEAD" {
-		return fmt.Errorf("refusing to push a detached HEAD")
+		return toolerror.New(toolerror.ErrConflict, "refusing to push a detached HEAD")
 	}
 	if IsProtectedBranch(status.Branch) {
-		return fmt.Errorf("refusing to push directly to protected branch %q", status.Branch)
+		return toolerror.New(toolerror.ErrBranchProtected, "refusing to push directly to protected branch %q", status.Branch)
 	}
 	// --no-verify is never used here: the request's explicit prohibitions
 	// list forbids bypassing verification, and pre-push hooks are exactly

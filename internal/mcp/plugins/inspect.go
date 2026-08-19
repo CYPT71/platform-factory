@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 	hostplugin "github.com/CYPT71/platform-factory/internal/plugin"
 )
 
@@ -121,7 +122,7 @@ func InspectPlugin(repoRoot, name string) (Detail, error) {
 	dir := filepath.Join(pluginsDir(repoRoot), name)
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
-		return Detail{}, fmt.Errorf("plugin %q not found under plugins/", name)
+		return Detail{}, toolerror.New(toolerror.ErrNotFound, "plugin %q not found under plugins/", name)
 	}
 	detail := Detail{
 		Summary:   summarize(repoRoot, name),
@@ -131,7 +132,7 @@ func InspectPlugin(repoRoot, name string) (Detail, error) {
 	if detail.Kind == "rpc" {
 		manifest, err := hostplugin.LoadManifest(dir)
 		if err != nil {
-			return Detail{}, fmt.Errorf("plugin %q: %w", name, err)
+			return Detail{}, toolerror.New(toolerror.ErrValidationFailed, "plugin %q manifest: %v", name, err)
 		}
 		detail.Manifest = &manifest
 	}
@@ -146,18 +147,18 @@ func InspectPlugin(repoRoot, name string) (Detail, error) {
 // cannot escape the plugins/ directory.
 func validPluginName(name string) error {
 	if name == "" {
-		return fmt.Errorf("plugin name must not be empty")
+		return toolerror.New(toolerror.ErrInvalidArgument, "plugin name must not be empty")
 	}
 	for _, r := range name {
 		if !(r == '-' || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
-			return fmt.Errorf("invalid plugin name %q: must match ^[a-z][a-z0-9-]{0,62}$", name)
+			return toolerror.New(toolerror.ErrInvalidArgument, "invalid plugin name %q: must match ^[a-z][a-z0-9-]{0,62}$", name)
 		}
 	}
 	if name[0] < 'a' || name[0] > 'z' {
-		return fmt.Errorf("invalid plugin name %q: must start with a lowercase letter", name)
+		return toolerror.New(toolerror.ErrInvalidArgument, "invalid plugin name %q: must start with a lowercase letter", name)
 	}
 	if len(name) > 63 {
-		return fmt.Errorf("invalid plugin name %q: must be at most 63 characters", name)
+		return toolerror.New(toolerror.ErrInvalidArgument, "invalid plugin name %q: must be at most 63 characters", name)
 	}
 	return nil
 }
@@ -186,7 +187,7 @@ func InspectToolHandler(repoRoot string) func(context.Context, json.RawMessage) 
 	return func(ctx context.Context, arguments json.RawMessage) (string, error) {
 		var args inspectArguments
 		if err := json.Unmarshal(arguments, &args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 		}
 		detail, err := InspectPlugin(repoRoot, args.Plugin)
 		if err != nil {

@@ -50,7 +50,7 @@ if [ ! -r "$ca_certificates" ] && [ -r /etc/ssl/cert.pem ]; then
 fi
 cat >"$config_file" <<JSON
 {
-  "entrypoint": "/app/platform-factory",
+  "entrypoint": "/usr/local/bin/platform-factory",
   "system_files": {"ca_certificates": "$ca_certificates"}
 }
 JSON

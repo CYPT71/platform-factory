@@ -82,6 +82,39 @@ image works:
 }
 ```
 
+> **Pulling by digest?** GHCR also lists a `sha256-<hex>` *tag* for this
+> image - that's cosign's tag-based storage for the image's signature
+> bundle, not the image itself, and it will not `pull`/`run`. Pin to a
+> real digest with the `@sha256:<hex>` manifest-digest form instead
+> (`docker pull ghcr.io/<owner>/<repo>-mcp@sha256:<hex>`), never the
+> `:sha256-<hex>` tag form.
+
+To build/publish/deploy a project that *isn't* platform-factory itself (an
+end-user app), mount it as a second, independent volume and pass its
+in-container path as `project_root` on the individual `pf_init`/`pf_build`/...
+tool calls - `--repo /workspace` still points at the platform-factory
+checkout for the introspection/git/plugin tools, it just no longer has to
+also contain the target project:
+
+```json
+{
+  "mcpServers": {
+    "platform-factory": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-v", "/path/to/platform-factory:/workspace",
+        "-v", "/path/to/my-app:/app",
+        "ghcr.io/cypt71/secure-oci-base-mcp:latest",
+        "mcp", "serve", "--repo", "/workspace"
+      ]
+    }
+  }
+}
+```
+
+then call, for example, `pf_build {"project_root": "/app", ...}`.
+
 ## Two tiers of mutating tools
 
 Every tool that only reads (`pf_project_inspect`, `pf_plugin_list`,
@@ -123,6 +156,18 @@ terminal, exposed as MCP tools so a client can
 Each accepts an `extra_args` array for flags the schema doesn't model by
 name; it is still one argument per array element handed straight to
 `exec.Command`, never shell-interpreted.
+
+Every product tool also accepts an optional `project_root`: an absolute path
+to the project being built/published/deployed. It defaults to `--repo`'s
+value (the platform-factory checkout the server was started against), which
+is exactly today's behavior if you never pass it. Pass `project_root` to
+target an independent project directory instead - unlike `--repo`, it does
+not need a `go.mod` at its root (it can be a plain Node/Python/whatever app)
+and is not required to live inside the platform-factory checkout; its own
+relative arguments (`directory`, `output`, `config`, `layout`, ...) resolve
+against it rather than against `--repo` for that call. It must be an
+absolute path to an existing directory - a relative path is rejected, since
+"relative to what" is ambiguous for a stateless tool call.
 
 `pf_build`/`pf_publish`/`pf_deploy` operate on a standalone executable or an
 already-built OCI layout. `pf_project` is the other half: it drives a

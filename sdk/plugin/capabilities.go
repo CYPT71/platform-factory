@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"encoding/json"
 	"fmt"
 )
 
@@ -167,4 +168,84 @@ type PlanParams struct {
 // what the host executes.
 type PlanResult struct {
 	Notes []string `json:"notes,omitempty"`
+}
+
+// DeploymentApplyParams asks a deployment plugin (e.g. plugins/kubernetes)
+// to apply a Kubernetes manifest - a single object or a "kind":"List"
+// wrapper, exactly what internal/publicationtarget.KubernetesManifest
+// already produces - to the cluster. This is a mutating capability: a
+// caller drives it through Client.CallWithIdempotency, not Client.Call,
+// and (per that method's own contract) should pass a nil result so a
+// crash-and-retry safely observes success without requiring the plugin
+// to persist and replay a response body.
+type DeploymentApplyParams struct {
+	Manifest json.RawMessage `json:"manifest"`
+}
+
+// DeploymentApplyResult is what deployment.apply returns on success. A
+// caller using CallWithIdempotency's replay-safe nil-result convention
+// (see DeploymentApplyParams) never decodes this directly; it exists so
+// the plugin side has a typed, self-documenting return value and so a
+// caller using the plain Call path (e.g. a --dry-run preview or a test)
+// can still inspect it.
+type DeploymentApplyResult struct {
+	Applied   bool     `json:"applied"`
+	Resources []string `json:"resources,omitempty"`
+}
+
+// DeploymentObserveParams asks a deployment plugin to read cluster state
+// without mutating it - always dispatched through Client.Call, never
+// CallWithIdempotency. Kind selects which observation:
+//
+//   - "wait-job": block (up to Timeout) until Job Namespace/Name reaches
+//     condition Complete, equivalent to `kubectl wait
+//     --for=condition=complete job/NAME --timeout T`.
+//   - "get-cronjob": a point-in-time summary of CronJob Namespace/Name,
+//     equivalent to `kubectl get cronjob/NAME`.
+//   - "rollout-status": block (up to Timeout) until ResourceType
+//     ("deployment", "statefulset" or "daemonset") Namespace/Name is
+//     fully rolled out, equivalent to `kubectl rollout status
+//     RESOURCE/NAME --timeout T`.
+//   - "logs": Namespace/Name's pod logs (ResourceType selects which
+//     owning workload's pods: "deployment" or "job"), optionally
+//     following and/or tailing the last Tail lines.
+//   - "events": Namespace's events involving Name, newest first.
+type DeploymentObserveParams struct {
+	Kind         string `json:"kind"`
+	Namespace    string `json:"namespace"`
+	Name         string `json:"name"`
+	ResourceType string `json:"resource_type,omitempty"`
+	Timeout      string `json:"timeout,omitempty"`
+	Tail         int    `json:"tail,omitempty"`
+	Follow       bool   `json:"follow,omitempty"`
+}
+
+// DeploymentObserveResult is deployment.observe's result: Output is a
+// human-readable rendering equivalent to what the kubectl subcommand it
+// replaces would have printed; Ready reports whether the observed
+// condition (job completion, rollout completion) was actually reached
+// before Timeout elapsed - callers that only fetch point-in-time state
+// (get-cronjob, logs, events) always get Ready true.
+type DeploymentObserveResult struct {
+	Output string `json:"output"`
+	Ready  bool   `json:"ready"`
+}
+
+// DeploymentRollbackParams asks a deployment plugin to roll Deployment
+// Namespace/Name back to ToRevision (0 selects the previous revision),
+// equivalent to `kubectl rollout undo deployment/NAME
+// [--to-revision=N]`. This is a mutating capability, dispatched through
+// Client.CallWithIdempotency with a nil result the same way
+// DeploymentApplyParams is (see its own doc comment).
+type DeploymentRollbackParams struct {
+	Namespace  string `json:"namespace"`
+	Name       string `json:"name"`
+	ToRevision int    `json:"to_revision,omitempty"`
+}
+
+// DeploymentRollbackResult is what deployment.rollback returns on
+// success - see DeploymentApplyResult's own doc comment for why a
+// CallWithIdempotency caller normally never decodes this directly.
+type DeploymentRollbackResult struct {
+	RevisionApplied int `json:"revision_applied"`
 }

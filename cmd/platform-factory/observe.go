@@ -1,20 +1,31 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"strconv"
 
 	observeapp "github.com/CYPT71/platform-factory/internal/app/observe"
+	api "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
-func runProjectObservation(command string, args []string, stdout, stderr io.Writer, execute containerExecutor) int {
+// runProjectObservation backs `platform-factory logs`/`events`: both are
+// read-only cluster observations, dispatched through the deployment
+// plugin's observe capability (see plugins/kubernetes) the same way
+// deploy/rollback now dispatch their own Kubernetes operations -
+// lifecycle.go's deployToCluster/rollbackCluster - rather than shelling
+// out to a kubectl binary that platform-factory-mcp's distroless
+// container image does not ship. Read-only, so this uses
+// pluginFlags.start (no operation journal) rather than startWithJournal,
+// the same split detect/freeze/plan already use.
+func runProjectObservation(ctx context.Context, command string, args []string, stdout, stderr io.Writer, execute containerExecutor) int {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	follow := flags.Bool("follow", false, "follow log output")
 	tail := flags.Int("tail", 200, "maximum initial log lines")
+	pluginFlags := registerPluginFlags(flags)
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -34,23 +45,46 @@ func runProjectObservation(command string, args []string, stdout, stderr io.Writ
 		fmt.Fprintf(stderr, "platform-factory %s: no deployed project (run `pf deploy` first): %v\n", command, err)
 		return 1
 	}
-	var runtimeArgs []string
-	if command == "logs" {
-		resource := "deployment/" + state.Name
-		if state.Workload == "job" {
-			resource = "job/" + state.Name
-		}
-		runtimeArgs = []string{"logs", resource, "--namespace", state.Namespace, "--tail", strconv.Itoa(*tail)}
-		if *follow {
-			runtimeArgs = append(runtimeArgs, "--follow")
-		}
-	} else {
-		runtimeArgs = []string{"get", "events", "--namespace", state.Namespace,
-			"--field-selector", "involvedObject.name=" + state.Name, "--sort-by=.lastTimestamp"}
-	}
-	if err := execute("kubectl", runtimeArgs, nil, stdout, stderr); err != nil {
+	// Kubernetes operations now go through the deployment plugin (see
+	// below), not a shelled-out kubectl; execute stays in the signature
+	// only so callers/tests across the CLI command boundary don't churn.
+	_ = execute
+	host, err := pluginFlags.start(ctx)
+	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory %s: %v\n", command, err)
 		return 1
 	}
+	defer host.Close()
+	output, err := dispatchObservation(ctx, host, command, state.Namespace, state.Name, *tail, *follow)
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory %s: %v\n", command, err)
+		return 1
+	}
+	fmt.Fprint(stdout, output)
 	return 0
+}
+
+// dispatchObservation is runProjectObservation's testable core: given an
+// already discovered-and-started pluginHost (real, or in tests a stub -
+// the same separation dispatchKubeVirt/deployToCluster/rollbackCluster
+// already use), it calls the deployment plugin's observe capability for
+// command ("logs" or "events") and returns its rendered output.
+func dispatchObservation(ctx context.Context, host *pluginHost, command, namespace, name string, tail int, follow bool) (string, error) {
+	client, found := host.findCapability(api.CapabilityDeploymentObserve)
+	if !found {
+		return "", fmt.Errorf("no installed plugin provides %s; pass --plugin-dir pointing at a directory containing the kubernetes plugin (see docs/containerd-kubernetes.md)", api.CapabilityDeploymentObserve)
+	}
+	params := api.DeploymentObserveParams{Namespace: namespace, Name: name}
+	if command == "logs" {
+		params.Kind = "logs"
+		params.Tail = tail
+		params.Follow = follow
+	} else {
+		params.Kind = "events"
+	}
+	var result api.DeploymentObserveResult
+	if err := client.Call(ctx, "v1."+api.CapabilityDeploymentObserve, params, &result); err != nil {
+		return "", err
+	}
+	return result.Output, nil
 }

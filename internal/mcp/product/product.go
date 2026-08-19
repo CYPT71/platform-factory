@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/CYPT71/platform-factory/internal/mcp/core"
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 // commandTimeout bounds every product-command invocation - generous for
@@ -114,6 +115,43 @@ func scopedRelative(repoRoot, relative string) (string, error) {
 	return relative, nil
 }
 
+// resolveProjectRoot returns the effective root a single tool call
+// should operate against: repoRoot unchanged when projectRoot is empty
+// (today's behavior, preserved exactly for backward compatibility - see
+// this package's doc comment and cmd/platform-factory/mcp.go's go.mod
+// gate, neither of which apply here), or projectRoot itself - validated
+// and resolved to an absolute, cleaned path - when a caller supplies it.
+//
+// Unlike repoRoot, projectRoot is deliberately NOT required to be a Go
+// module root and NOT confined to live inside repoRoot: the whole point
+// of this argument is letting a caller target an independent end-user
+// project (a plain Node/Python/whatever app with no go.mod at all,
+// anywhere on disk) rather than platform-factory's own checkout. Its
+// only safety check is that it resolves to an existing directory - a
+// relative path is rejected outright, since "relative to what" is
+// ambiguous for a stateless tool call with no notion of a client-side
+// working directory.
+func resolveProjectRoot(repoRoot, projectRoot string) (string, error) {
+	if projectRoot == "" {
+		return repoRoot, nil
+	}
+	if !filepath.IsAbs(projectRoot) {
+		return "", toolerror.New(toolerror.ErrInvalidArgument, "project_root %q must be an absolute path", projectRoot)
+	}
+	abs, err := filepath.Abs(filepath.Clean(projectRoot))
+	if err != nil {
+		return "", toolerror.New(toolerror.ErrInvalidArgument, "resolve project_root %q: %v", projectRoot, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", toolerror.New(toolerror.ErrInvalidArgument, "project_root %q: %v", projectRoot, err)
+	}
+	if !info.IsDir() {
+		return "", toolerror.New(toolerror.ErrInvalidArgument, "project_root %q is not a directory", projectRoot)
+	}
+	return abs, nil
+}
+
 func encode(result Result) (string, error) {
 	data, err := json.MarshalIndent(result, "", "  ")
 	if err != nil {
@@ -146,7 +184,7 @@ func stringFlag(args []string, name, value string) []string {
 func validExtraArgs(args []string) error {
 	for _, a := range args {
 		if strings.ContainsRune(a, 0) {
-			return fmt.Errorf("extra_args entries must not contain NUL bytes")
+			return toolerror.New(toolerror.ErrInvalidArgument, "extra_args entries must not contain NUL bytes")
 		}
 	}
 	return nil

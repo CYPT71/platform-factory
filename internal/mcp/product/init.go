@@ -3,6 +3,8 @@ package product
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 type initArguments struct {
@@ -21,6 +23,7 @@ type initArguments struct {
 	ArchiveFormat  string   `json:"archive_format"`
 	FilenameStyle  string   `json:"filename_style"`
 	ExtraArgs      []string `json:"extra_args"`
+	ProjectRoot    string   `json:"project_root"`
 }
 
 // InitToolHandler returns the pf_init handler: `platform-factory init`,
@@ -30,17 +33,21 @@ func InitToolHandler(repoRoot string) func(context.Context, json.RawMessage) (st
 		var a initArguments
 		if len(arguments) > 0 && string(arguments) != "{}" {
 			if err := json.Unmarshal(arguments, &a); err != nil {
-				return "", err
+				return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 			}
 		}
 		if err := validExtraArgs(a.ExtraArgs); err != nil {
 			return "", err
 		}
-		directory, err := scopedRelative(repoRoot, a.Directory)
+		root, err := resolveProjectRoot(repoRoot, a.ProjectRoot)
 		if err != nil {
 			return "", err
 		}
-		extractTo, err := scopedRelative(repoRoot, a.ExtractTo)
+		directory, err := scopedRelative(root, a.Directory)
+		if err != nil {
+			return "", err
+		}
+		extractTo, err := scopedRelative(root, a.ExtractTo)
 		if err != nil {
 			return "", err
 		}
@@ -66,7 +73,7 @@ func InitToolHandler(repoRoot string) func(context.Context, json.RawMessage) (st
 			args = append(args, directory)
 		}
 
-		result, err := run(ctx, repoRoot, "init", args)
+		result, err := run(ctx, root, "init", args)
 		if err != nil {
 			return "", err
 		}

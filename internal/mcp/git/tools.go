@@ -3,8 +3,9 @@ package git
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 // StatusToolHandler returns the pf_git_status handler.
@@ -31,7 +32,7 @@ func PrepareBranchToolHandler(repoDir string) func(context.Context, json.RawMess
 	return func(ctx context.Context, arguments json.RawMessage) (string, error) {
 		var args prepareBranchArguments
 		if err := json.Unmarshal(arguments, &args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 		}
 		startedFrom, err := New(repoDir).PrepareBranch(ctx, args.Name)
 		if err != nil {
@@ -57,7 +58,7 @@ func CommitToolHandler(repoDir string) func(context.Context, json.RawMessage) (s
 	return func(ctx context.Context, arguments json.RawMessage) (string, error) {
 		var args commitArguments
 		if err := json.Unmarshal(arguments, &args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 		}
 		if err := New(repoDir).Commit(ctx, args.Paths, args.Message); err != nil {
 			return "", err
@@ -92,7 +93,7 @@ func CreatePRToolHandler(repoDir string) func(context.Context, json.RawMessage) 
 	return func(ctx context.Context, arguments json.RawMessage) (string, error) {
 		var args createPRArguments
 		if err := json.Unmarshal(arguments, &args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 		}
 		repo := New(repoDir)
 		status, err := repo.Status(ctx)

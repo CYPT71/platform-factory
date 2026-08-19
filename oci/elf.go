@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -49,6 +50,9 @@ func validateELFClosure(binary, architecture, profile string, extras []ExtraFile
 	}
 	required := append([]string(nil), entry.needed...)
 	for source, destination := range bySource {
+		if stat, statErr := os.Stat(source); statErr == nil && !stat.Mode().IsRegular() {
+			return fmt.Errorf("extra file %s source %s must be a regular file", destination, source)
+		}
 		info, inspectErr := inspectELF(source)
 		if inspectErr != nil {
 			return fmt.Errorf("inspect ELF dependency %s: %w", destination, inspectErr)

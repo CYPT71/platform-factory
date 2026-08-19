@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 // branchNamePattern accepts a conservative subset of valid git ref
@@ -19,16 +21,16 @@ var branchNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9/_.-]*$`)
 func ValidBranchName(name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return fmt.Errorf("branch name must not be empty")
+		return toolerror.New(toolerror.ErrInvalidArgument, "branch name must not be empty")
 	}
 	if IsProtectedBranch(name) {
-		return fmt.Errorf("branch name %q is protected", name)
+		return toolerror.New(toolerror.ErrBranchProtected, "branch name %q is protected", name)
 	}
 	if strings.Contains(name, "..") || strings.HasPrefix(name, "-") || strings.HasSuffix(name, "/") {
-		return fmt.Errorf("branch name %q is not a safe git ref", name)
+		return toolerror.New(toolerror.ErrInvalidArgument, "branch name %q is not a safe git ref", name)
 	}
 	if !branchNamePattern.MatchString(name) {
-		return fmt.Errorf("branch name %q contains characters that are not allowed", name)
+		return toolerror.New(toolerror.ErrInvalidArgument, "branch name %q contains characters that are not allowed", name)
 	}
 	return nil
 }
@@ -48,10 +50,10 @@ func (r *Repo) PrepareBranch(ctx context.Context, name string) (startedFrom stri
 		return "", err
 	}
 	if status.Dirty {
-		return "", fmt.Errorf("refusing to branch from a dirty working tree; commit or stash first")
+		return "", toolerror.New(toolerror.ErrDirtyWorkingTree, "refusing to branch from a dirty working tree; commit or stash first")
 	}
 	if _, err := r.run(ctx, "rev-parse", "--verify", "--quiet", "refs/heads/"+name); err == nil {
-		return "", fmt.Errorf("branch %q already exists", name)
+		return "", toolerror.New(toolerror.ErrAlreadyExists, "branch %q already exists", name)
 	}
 	if _, err := r.run(ctx, "checkout", "-b", name); err != nil {
 		return "", fmt.Errorf("create branch %q: %w", name, err)

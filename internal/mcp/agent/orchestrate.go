@@ -8,6 +8,7 @@ import (
 
 	"github.com/CYPT71/platform-factory/internal/mcp/core"
 	"github.com/CYPT71/platform-factory/internal/mcp/plugins"
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 // maxIterations bounds every orchestration loop in this package: the
@@ -51,7 +52,7 @@ func parseEdits(reply string) ([]fileEdit, error) {
 // naming the client-orchestrated primitives to use instead, never a
 // silent no-op.
 func unavailableError(primitives ...string) error {
-	return fmt.Errorf("agent_unavailable: %s is not set; drive this change yourself with: %s",
+	return toolerror.New(toolerror.ErrAgentUnavailable, "%s is not set; drive this change yourself with: %s",
 		apiKeyEnv, strings.Join(primitives, ", "))
 }
 
@@ -87,7 +88,7 @@ const pluginModifySystemPrompt = `You are modifying one existing plugin inside t
 // being written.
 func ModifyPlugin(ctx context.Context, client *Client, repoRoot string, req ModifyPluginRequest) (ModifyResult, error) {
 	if strings.TrimSpace(req.Request) == "" {
-		return ModifyResult{}, fmt.Errorf("request must not be empty")
+		return ModifyResult{}, toolerror.New(toolerror.ErrInvalidArgument, "request must not be empty")
 	}
 	detail, err := plugins.InspectPlugin(repoRoot, req.Plugin)
 	if err != nil {
@@ -148,7 +149,7 @@ func ModifyPlugin(ctx context.Context, client *Client, repoRoot string, req Modi
 		result.Issues = report.Issues
 		feedback = strings.Join(report.Issues, "; ")
 	}
-	return result, fmt.Errorf("did not reach a valid state in %d iterations; last issues: %s", maxIterations, strings.Join(result.Issues, "; "))
+	return result, toolerror.New(toolerror.ErrValidationFailed, "did not reach a valid state in %d iterations; last issues: %s", maxIterations, strings.Join(result.Issues, "; "))
 }
 
 type modifyPluginArguments struct {
@@ -168,7 +169,7 @@ func ModifyPluginToolHandler(repoRoot string) func(context.Context, json.RawMess
 		}
 		var args modifyPluginArguments
 		if err := json.Unmarshal(arguments, &args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 		}
 		result, err := ModifyPlugin(ctx, client, repoRoot, ModifyPluginRequest{Plugin: args.Plugin, Request: args.Request})
 		if err != nil {
@@ -207,10 +208,10 @@ const corePatchSystemPrompt = `You are proposing a scoped change to the platform
 // same pre-PR gate pf_core_self_check exposes directly.
 func PatchCore(ctx context.Context, client *Client, repoRoot string, req PatchCoreRequest) (ModifyResult, error) {
 	if strings.TrimSpace(req.Request) == "" {
-		return ModifyResult{}, fmt.Errorf("request must not be empty")
+		return ModifyResult{}, toolerror.New(toolerror.ErrInvalidArgument, "request must not be empty")
 	}
 	if len(req.AllowedPaths) == 0 {
-		return ModifyResult{}, fmt.Errorf("allowed_paths must name at least one file this patch may touch")
+		return ModifyResult{}, toolerror.New(toolerror.ErrInvalidArgument, "allowed_paths must name at least one file this patch may touch")
 	}
 	allowed := make(map[string]bool, len(req.AllowedPaths))
 	for _, p := range req.AllowedPaths {
@@ -274,7 +275,7 @@ func PatchCore(ctx context.Context, client *Client, repoRoot string, req PatchCo
 		result.Issues = []string{step.Output}
 		feedback = step.Output
 	}
-	return result, fmt.Errorf("did not reach a valid state in %d iterations; last issues: %s", maxIterations, strings.Join(result.Issues, "; "))
+	return result, toolerror.New(toolerror.ErrValidationFailed, "did not reach a valid state in %d iterations; last issues: %s", maxIterations, strings.Join(result.Issues, "; "))
 }
 
 type patchCoreArguments struct {
@@ -294,7 +295,7 @@ func PatchCoreToolHandler(repoRoot string) func(context.Context, json.RawMessage
 		}
 		var args patchCoreArguments
 		if err := json.Unmarshal(arguments, &args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 		}
 		result, err := PatchCore(ctx, client, repoRoot, PatchCoreRequest{
 			Request: args.Request, Reason: args.Reason, AllowedPaths: args.AllowedPaths,

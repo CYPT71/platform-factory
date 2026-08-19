@@ -2,17 +2,78 @@ package main
 
 import (
 	"bytes"
-	"io"
+	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/CYPT71/platform-factory/internal/atomicfile"
+	api "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
-func TestProjectLogsAndEventsUsePersistedDeploymentIdentity(t *testing.T) {
+// TestDispatchObservationSelectsLogsOrEvents drives dispatchObservation
+// directly against a stub deployment plugin (the same separation
+// TestDeployToClusterAppliesThenObservesPerWorkload/
+// TestRollbackClusterUndoesThenObservesRolloutStatus use in
+// lifecycle_test.go), covering what a real `pf logs`/`pf events` cannot
+// exercise without a live cluster: which observe Kind/Tail/Follow get
+// requested for each command.
+func TestDispatchObservationSelectsLogsOrEvents(t *testing.T) {
+	stub := &stubDeploymentPlugin{
+		capabilities:  allDeploymentCapabilities(),
+		observeResult: api.DeploymentObserveResult{Output: "log/event output", Ready: true},
+	}
+	host := &pluginHost{clients: []pluginClient{stub}}
+
+	output, err := dispatchObservation(context.Background(), host, "logs", "prod", "hello", 50, true)
+	if err != nil || output != "log/event output" {
+		t.Fatalf("output=%q err=%v", output, err)
+	}
+	var logsParams api.DeploymentObserveParams
+	if decodeErr := json.Unmarshal(stub.lastParams["v1."+api.CapabilityDeploymentObserve], &logsParams); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if logsParams.Kind != "logs" || logsParams.Tail != 50 || !logsParams.Follow || logsParams.Namespace != "prod" || logsParams.Name != "hello" {
+		t.Fatalf("logsParams=%+v", logsParams)
+	}
+
+	output, err = dispatchObservation(context.Background(), host, "events", "prod", "hello", 0, false)
+	if err != nil || output != "log/event output" {
+		t.Fatalf("output=%q err=%v", output, err)
+	}
+	var eventsParams api.DeploymentObserveParams
+	if decodeErr := json.Unmarshal(stub.lastParams["v1."+api.CapabilityDeploymentObserve], &eventsParams); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if eventsParams.Kind != "events" || eventsParams.Namespace != "prod" || eventsParams.Name != "hello" {
+		t.Fatalf("eventsParams=%+v", eventsParams)
+	}
+}
+
+func TestDispatchObservationSurfacesMissingCapabilityAndErrors(t *testing.T) {
+	empty := &pluginHost{}
+	if _, err := dispatchObservation(context.Background(), empty, "logs", "prod", "hello", 0, false); err == nil ||
+		!strings.Contains(err.Error(), api.CapabilityDeploymentObserve) {
+		t.Fatalf("err=%v", err)
+	}
+	failing := &pluginHost{clients: []pluginClient{&stubDeploymentPlugin{capabilities: allDeploymentCapabilities(), err: errors.New("observe refused")}}}
+	if _, err := dispatchObservation(context.Background(), failing, "events", "prod", "hello", 0, false); err == nil ||
+		!strings.Contains(err.Error(), "observe refused") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestProjectLogsAndEventsWithoutAConfiguredPluginFailCleanly proves the
+// CLI wiring: `pf logs`/`pf events` now dispatch through the deployment
+// plugin (see dispatchObservation) rather than shelling to kubectl, so
+// without --plugin-dir pointing at one, both fail closed with a clear
+// "no installed plugin" message. execute is asserted never called: it is
+// retained on runProjectObservation's signature only for CLI-boundary
+// stability.
+func TestProjectLogsAndEventsWithoutAConfiguredPluginFailCleanly(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "pf.yaml"), []byte(
 		"version: 1\nlanguage: compiled\nprofile: static\nartifact: app\n"), 0o600); err != nil {
@@ -26,24 +87,15 @@ func TestProjectLogsAndEventsUsePersistedDeploymentIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(root)
-	var calls [][]string
-	execute := func(name string, args []string, _ io.Reader, _, _ io.Writer) error {
-		calls = append(calls, append([]string{name}, args...))
-		return nil
-	}
 	var stdout, stderr bytes.Buffer
-	if code := runProjectObservation("logs", []string{"--tail", "50", "--follow"}, &stdout, &stderr, execute); code != 0 {
+	if code := runProjectObservation(context.Background(), "logs", []string{"--tail", "50", "--follow"}, &stdout, &stderr, nil); code != 1 ||
+		!strings.Contains(stderr.String(), "no installed plugin provides "+api.CapabilityDeploymentObserve) {
 		t.Fatalf("logs code=%d stderr=%s", code, stderr.String())
 	}
-	if code := runProjectObservation("events", nil, &stdout, &stderr, execute); code != 0 {
+	stderr.Reset()
+	if code := runProjectObservation(context.Background(), "events", nil, &stdout, &stderr, nil); code != 1 ||
+		!strings.Contains(stderr.String(), "no installed plugin provides "+api.CapabilityDeploymentObserve) {
 		t.Fatalf("events code=%d stderr=%s", code, stderr.String())
-	}
-	want := [][]string{
-		{"kubectl", "logs", "job/hello", "--namespace", "prod", "--tail", "50", "--follow"},
-		{"kubectl", "get", "events", "--namespace", "prod", "--field-selector", "involvedObject.name=hello", "--sort-by=.lastTimestamp"},
-	}
-	if !reflect.DeepEqual(calls, want) {
-		t.Fatalf("calls=%v want=%v", calls, want)
 	}
 }
 
@@ -55,7 +107,7 @@ func TestProjectLogsFailWithOneSafeNextAction(t *testing.T) {
 	}
 	t.Chdir(root)
 	var stdout, stderr bytes.Buffer
-	if code := runProjectObservation("logs", nil, &stdout, &stderr, nil); code != 1 ||
+	if code := runProjectObservation(context.Background(), "logs", nil, &stdout, &stderr, nil); code != 1 ||
 		!strings.Contains(stderr.String(), "run `pf deploy` first") {
 		t.Fatalf("code/status=%s", stderr.String())
 	}
@@ -78,7 +130,7 @@ func TestRollbackUsesPersistedServiceAndRejectsJob(t *testing.T) {
 	}
 	t.Chdir(root)
 	var stdout, stderr bytes.Buffer
-	if code := runRollback([]string{"--dry-run"}, &stdout, &stderr, nil); code != 0 {
+	if code := runRollback(context.Background(), []string{"--dry-run"}, &stdout, &stderr, nil); code != 0 {
 		t.Fatalf("rollback code=%d stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "deployment/hello") || !strings.Contains(stdout.String(), "--namespace prod") {
@@ -90,7 +142,7 @@ func TestRollbackUsesPersistedServiceAndRejectsJob(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := runRollback([]string{"--dry-run"}, &stdout, &stderr, nil); code != 1 ||
+	if code := runRollback(context.Background(), []string{"--dry-run"}, &stdout, &stderr, nil); code != 1 ||
 		!strings.Contains(stderr.String(), "Jobs have no rollout history") {
 		t.Fatalf("job rollback code=%d stderr=%s", code, stderr.String())
 	}

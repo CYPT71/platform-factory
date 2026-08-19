@@ -3,6 +3,8 @@ package product
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 type publishArguments struct {
@@ -27,6 +29,7 @@ type publishArguments struct {
 	Format           string   `json:"format"`
 	Reports          string   `json:"reports"`
 	ExtraArgs        []string `json:"extra_args"`
+	ProjectRoot      string   `json:"project_root"`
 }
 
 // PublishToolHandler returns the pf_publish handler: `platform-factory
@@ -40,25 +43,29 @@ func PublishToolHandler(repoRoot string) func(context.Context, json.RawMessage) 
 		var a publishArguments
 		if len(arguments) > 0 && string(arguments) != "{}" {
 			if err := json.Unmarshal(arguments, &a); err != nil {
-				return "", err
+				return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 			}
 		}
 		if err := validExtraArgs(a.ExtraArgs); err != nil {
 			return "", err
 		}
-		layout, err := scopedRelative(repoRoot, a.Layout)
+		root, err := resolveProjectRoot(repoRoot, a.ProjectRoot)
 		if err != nil {
 			return "", err
 		}
-		policy, err := scopedRelative(repoRoot, a.Policy)
+		layout, err := scopedRelative(root, a.Layout)
 		if err != nil {
 			return "", err
 		}
-		evidence, err := scopedRelative(repoRoot, a.Evidence)
+		policy, err := scopedRelative(root, a.Policy)
 		if err != nil {
 			return "", err
 		}
-		reports, err := scopedRelative(repoRoot, a.Reports)
+		evidence, err := scopedRelative(root, a.Evidence)
+		if err != nil {
+			return "", err
+		}
+		reports, err := scopedRelative(root, a.Reports)
 		if err != nil {
 			return "", err
 		}
@@ -90,7 +97,7 @@ func PublishToolHandler(repoRoot string) func(context.Context, json.RawMessage) 
 			args = append(args, a.Image)
 		}
 
-		result, err := run(ctx, repoRoot, "publish", args)
+		result, err := run(ctx, root, "publish", args)
 		if err != nil {
 			return "", err
 		}

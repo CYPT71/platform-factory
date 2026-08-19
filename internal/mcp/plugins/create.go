@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 	hostplugin "github.com/CYPT71/platform-factory/internal/plugin"
 )
 
@@ -50,10 +51,10 @@ func Create(ctx context.Context, repoRoot string, req CreateRequest) (CreateResu
 		return CreateResult{}, err
 	}
 	if strings.TrimSpace(req.Description) == "" {
-		return CreateResult{}, fmt.Errorf("description must not be empty")
+		return CreateResult{}, toolerror.New(toolerror.ErrInvalidArgument, "description must not be empty")
 	}
 	if len(req.Capabilities) == 0 {
-		return CreateResult{}, fmt.Errorf("at least one capability is required")
+		return CreateResult{}, toolerror.New(toolerror.ErrInvalidArgument, "at least one capability is required")
 	}
 	family := req.Family
 	if family == "" {
@@ -62,7 +63,7 @@ func Create(ctx context.Context, repoRoot string, req CreateRequest) (CreateResu
 
 	dir := filepath.Join(pluginsDir(repoRoot), req.Name)
 	if _, err := os.Stat(dir); err == nil {
-		return CreateResult{}, fmt.Errorf("plugins/%s already exists", req.Name)
+		return CreateResult{}, toolerror.New(toolerror.ErrAlreadyExists, "plugins/%s already exists", req.Name)
 	} else if !os.IsNotExist(err) {
 		return CreateResult{}, fmt.Errorf("check plugins/%s: %w", req.Name, err)
 	}
@@ -80,7 +81,7 @@ func Create(ctx context.Context, repoRoot string, req CreateRequest) (CreateResu
 		Digest:       zeroDigest,
 	}
 	if err := manifest.Validate(); err != nil {
-		return CreateResult{}, fmt.Errorf("requested plugin would not pass manifest validation: %w", err)
+		return CreateResult{}, toolerror.New(toolerror.ErrValidationFailed, "requested plugin would not pass manifest validation: %v", err)
 	}
 
 	if err := os.MkdirAll(filepath.Join(dir, "cmd", executableName), 0o755); err != nil {
@@ -216,7 +217,7 @@ func CreateToolHandler(repoRoot string) func(context.Context, json.RawMessage) (
 		decoder := json.NewDecoder(strings.NewReader(string(arguments)))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 		}
 		result, err := Create(ctx, repoRoot, CreateRequest{
 			Name: args.Name, Description: args.Description,

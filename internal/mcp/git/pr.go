@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 // TargetRepoEnv names the environment variable that pins every PR this
@@ -47,17 +50,17 @@ func (r *Repo) CreatePR(ctx context.Context, pr PullRequest) (string, error) {
 		base = "main"
 	}
 	if !IsProtectedBranch(base) {
-		return "", fmt.Errorf("base %q must be the repository's protected branch", base)
+		return "", toolerror.New(toolerror.ErrInvalidArgument, "base %q must be the repository's protected branch", base)
 	}
 	head := strings.TrimSpace(pr.Head)
 	if head == "" {
-		return "", fmt.Errorf("head branch must not be empty")
+		return "", toolerror.New(toolerror.ErrInvalidArgument, "head branch must not be empty")
 	}
 	if IsProtectedBranch(head) {
-		return "", fmt.Errorf("refusing to open a PR whose head is the protected branch %q", head)
+		return "", toolerror.New(toolerror.ErrInvalidArgument, "refusing to open a PR whose head is the protected branch %q", head)
 	}
 	if strings.TrimSpace(pr.Title) == "" {
-		return "", fmt.Errorf("PR title must not be empty")
+		return "", toolerror.New(toolerror.ErrInvalidArgument, "PR title must not be empty")
 	}
 	args := []string{"pr", "create",
 		"--draft",
@@ -80,9 +83,9 @@ func (r *Repo) CreatePR(ctx context.Context, pr PullRequest) (string, error) {
 // prints progress notes followed by the PR URL as its final line.
 func lastLine(output string) string {
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) != "" {
-			return lines[i]
+	for _, line := range slices.Backward(lines) {
+		if strings.TrimSpace(line) != "" {
+			return line
 		}
 	}
 	return ""

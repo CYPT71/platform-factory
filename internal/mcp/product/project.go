@@ -3,7 +3,8 @@ package product
 import (
 	"context"
 	"encoding/json"
-	"errors"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 type projectArguments struct {
@@ -16,6 +17,7 @@ type projectArguments struct {
 	MaxCPU       string   `json:"max_cpu"`
 	MaxMemory    string   `json:"max_memory"`
 	ExtraArgs    []string `json:"extra_args"`
+	ProjectRoot  string   `json:"project_root"`
 }
 
 var validProjectActions = map[string]bool{
@@ -23,7 +25,7 @@ var validProjectActions = map[string]bool{
 	"run": true, "launch": true, "migrate": true,
 }
 
-var errInvalidProjectAction = errors.New("action must be one of: show, plan, freeze, build, run, launch, migrate")
+var errInvalidProjectAction = toolerror.New(toolerror.ErrInvalidArgument, "action must be one of: show, plan, freeze, build, run, launch, migrate")
 
 // ProjectToolHandler returns the pf_project handler: `platform-factory
 // project <action>`, driving a pf.yaml project's full lifecycle rather
@@ -37,7 +39,7 @@ func ProjectToolHandler(repoRoot string) func(context.Context, json.RawMessage) 
 	return func(ctx context.Context, arguments json.RawMessage) (string, error) {
 		var a projectArguments
 		if err := json.Unmarshal(arguments, &a); err != nil {
-			return "", err
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 		}
 		if !validProjectActions[a.Action] {
 			return "", errInvalidProjectAction
@@ -45,11 +47,15 @@ func ProjectToolHandler(repoRoot string) func(context.Context, json.RawMessage) 
 		if err := validExtraArgs(a.ExtraArgs); err != nil {
 			return "", err
 		}
-		directory, err := scopedRelative(repoRoot, a.Directory)
+		root, err := resolveProjectRoot(repoRoot, a.ProjectRoot)
 		if err != nil {
 			return "", err
 		}
-		config, err := scopedRelative(repoRoot, a.Config)
+		directory, err := scopedRelative(root, a.Directory)
+		if err != nil {
+			return "", err
+		}
+		config, err := scopedRelative(root, a.Config)
 		if err != nil {
 			return "", err
 		}
@@ -72,7 +78,7 @@ func ProjectToolHandler(repoRoot string) func(context.Context, json.RawMessage) 
 			args = append(args, directory)
 		}
 
-		result, err := run(ctx, repoRoot, "project", args)
+		result, err := run(ctx, root, "project", args)
 		if err != nil {
 			return "", err
 		}

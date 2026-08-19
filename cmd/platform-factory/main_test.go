@@ -113,7 +113,7 @@ func TestRunContainerUsesHardenedDefaultsAndForwardsArguments(t *testing.T) {
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := runContainer([]string{"example.test/service@sha256:abc", "--serve"}, &stdout, &stderr, execute)
+	code := runContainer(context.Background(), []string{"example.test/service@sha256:abc", "--serve"}, &stdout, &stderr, execute)
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -137,7 +137,7 @@ func TestRunContainerAcceptsExplicitBoundedConfiguration(t *testing.T) {
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := runContainer([]string{
+	code := runContainer(context.Background(), []string{
 		"--runtime=podman", "--network=bridge", "--cpus=0.5",
 		"--memory=64m", "--pids-limit=32", "service:local",
 	}, &stdout, &stderr, execute)
@@ -161,7 +161,7 @@ func TestRunContainerNetworkConfiguration(t *testing.T) {
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := runContainer([]string{
+	code := runContainer(context.Background(), []string{
 		"--runtime=podman", "--network=production", "--hostname=api.example",
 		"--publish=127.0.0.1:8443:443/tcp", "--publish=[::1]:5353:53/udp",
 		"--dns=1.1.1.1", "--add-host=database:10.0.0.5", "service:local",
@@ -185,7 +185,7 @@ func TestRunContainerVolumesAndEnv(t *testing.T) {
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := runContainer([]string{
+	code := runContainer(context.Background(), []string{
 		"--volume=/host/data:/data:ro", "-v=/host/cache:/cache",
 		"--env=LOG_LEVEL=debug", "-e=INHERITED", "service:local",
 	}, &stdout, &stderr, execute)
@@ -209,7 +209,7 @@ func TestRunContainerRepeatedPortAliases(t *testing.T) {
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
-	code := runContainer([]string{
+	code := runContainer(context.Background(), []string{
 		"--network=bridge",
 		"-p", "127.0.0.1:8080:80/tcp",
 		"--port", "8443:443",
@@ -259,7 +259,7 @@ func TestRunLaunchSelectsContainerOrMicroVM(t *testing.T) {
 		{"--isolation", "microvm", "--layout=/layout"},
 	} {
 		var stdout, stderr bytes.Buffer
-		if code := runLaunch(args, &stdout, &stderr, containerExecute, microVMExecute); code != 0 {
+		if code := runLaunch(context.Background(), args, &stdout, &stderr, containerExecute, microVMExecute); code != 0 {
 			t.Fatalf("args=%v code=%d stderr=%s", args, code, stderr.String())
 		}
 	}
@@ -280,7 +280,7 @@ func TestIsolationFlagCanAppearAnywhere(t *testing.T) {
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
-	if code := runLaunch([]string{
+	if code := runLaunch(context.Background(), []string{
 		"--network=none", "service:local", "--isolation=container",
 	}, &stdout, &stderr, execute, nil); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
@@ -301,7 +301,7 @@ func TestRunLaunchRejectsMissingIsolation(t *testing.T) {
 	}
 	for _, args := range [][]string{nil, {"--isolation=other"}, {"--isolation"}} {
 		var stdout, stderr bytes.Buffer
-		if code := runLaunch(args, &stdout, &stderr, executeContainer, executeMicroVM); code != 2 {
+		if code := runLaunch(context.Background(), args, &stdout, &stderr, executeContainer, executeMicroVM); code != 2 {
 			t.Fatalf("args=%v code=%d", args, code)
 		}
 	}
@@ -331,7 +331,7 @@ func TestRunContainerRejectsUnsafeOrInvalidOptions(t *testing.T) {
 		{"--image"},
 	} {
 		var stdout, stderr bytes.Buffer
-		if code := runContainer(args, &stdout, &stderr, execute); code != 2 {
+		if code := runContainer(context.Background(), args, &stdout, &stderr, execute); code != 2 {
 			t.Fatalf("args=%v code=%d stderr=%s", args, code, stderr.String())
 		}
 	}
@@ -2056,12 +2056,12 @@ func TestRunContainerHandlesHelpAndDashPrefixedImage(t *testing.T) {
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
-	if code := runContainer([]string{"--help"}, &stdout, &stderr, execute); code != 0 {
+	if code := runContainer(context.Background(), []string{"--help"}, &stdout, &stderr, execute); code != 0 {
 		t.Fatalf("--help code=%d stderr=%s", code, stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := runContainer([]string{"--network=bridge", "--", "-badimage"}, &stdout, &stderr, execute); code != 2 ||
+	if code := runContainer(context.Background(), []string{"--network=bridge", "--", "-badimage"}, &stdout, &stderr, execute); code != 2 ||
 		!strings.Contains(stderr.String(), "invalid image reference") {
 		t.Fatalf("dash-prefixed image code=%d stderr=%s", code, stderr.String())
 	}
@@ -2073,7 +2073,7 @@ func TestRunContainerRequiresATargetWithAClearError(t *testing.T) {
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
-	if code := runContainer(nil, &stdout, &stderr, execute); code != 2 ||
+	if code := runContainer(context.Background(), nil, &stdout, &stderr, execute); code != 2 ||
 		!strings.Contains(stderr.String(), "an IMAGE or local OCI layout is required") {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
@@ -2091,7 +2091,7 @@ func TestRunContainerRejectsAPathShapedTargetThatDoesNotExist(t *testing.T) {
 		".platform-factory/image",            // "." prefix without a slash - pf.yaml's own default build output
 	} {
 		var stdout, stderr bytes.Buffer
-		if code := runContainer([]string{target}, &stdout, &stderr, execute); code != 1 ||
+		if code := runContainer(context.Background(), []string{target}, &stdout, &stderr, execute); code != 1 ||
 			!strings.Contains(stderr.String(), "looks like a local path") {
 			t.Fatalf("target=%q code=%d stderr=%s", target, code, stderr.String())
 		}

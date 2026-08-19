@@ -11,13 +11,13 @@ package project
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/CYPT71/platform-factory/internal/mcp/git"
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 // Info is the pf_project_inspect / pf://project payload.
@@ -114,14 +114,14 @@ func InspectToolHandler(repoRoot, version string) func(context.Context, json.Raw
 		var args inspectArguments
 		if len(arguments) > 0 && string(arguments) != "{}" {
 			if err := json.Unmarshal(arguments, &args); err != nil {
-				return "", fmt.Errorf("invalid arguments: %w", err)
+				return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 			}
 		}
 		if args.Depth == "" {
 			args.Depth = "summary"
 		}
 		if args.Depth != "summary" && args.Depth != "detailed" {
-			return "", fmt.Errorf("depth must be %q or %q", "summary", "detailed")
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "depth must be %q or %q", "summary", "detailed")
 		}
 		info, err := Inspect(ctx, repoRoot, version, args.Depth)
 		if err != nil {

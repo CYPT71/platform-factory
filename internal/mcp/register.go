@@ -19,7 +19,7 @@ import (
 // the one place allowed to depend on both the generic transport (this
 // package) and the concrete tool implementations (the subpackages) -
 // which is what keeps the dependency graph acyclic.
-func NewPlatformFactoryServer(repoRoot, version string) *Server {
+func NewPlatformFactoryServer(repoRoot, version string, langPlugins plugins.LanguagePluginBackend) *Server {
 	s := NewServer("platform-factory", version)
 
 	s.AddTool(Tool{
@@ -91,6 +91,24 @@ func NewPlatformFactoryServer(repoRoot, version string) *Server {
 			}
 		}`),
 		Handler: plugins.CreateToolHandler(repoRoot),
+	})
+	s.AddTool(Tool{
+		Name: "pf_plugin_load",
+		Description: "Install a language plugin (e.g. python, node, ruby) into the host's language-plugin " +
+			"directory, the same target `platform-factory plugin load` uses - independent of this repository, " +
+			"required before pf_init/pf_build's project-detection mode can identify that language. Without " +
+			"`from`, resolves a built-in language plugin binary automatically; with `from`, loads a plugin " +
+			"binary/archive from that path or URL. Probes the plugin with a real inspection run and unloads it " +
+			"again if the probe fails, so a bad plugin is never left registered.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"required": ["name"],
+			"properties": {
+				"name": {"type": "string", "description": "the language plugin's name, e.g. \"python\", \"node\", \"ruby\""},
+				"from": {"type": "string", "description": "optional path or URL to a plugin binary/archive; omit to resolve a built-in language plugin"}
+			}
+		}`),
+		Handler: plugins.LoadToolHandler(langPlugins),
 	})
 	s.AddTool(Tool{
 		Name: "pf_plugin_validate",
@@ -292,7 +310,9 @@ func NewPlatformFactoryServer(repoRoot, version string) *Server {
 	s.AddTool(Tool{
 		Name: "pf_init",
 		Description: "Run `platform-factory init`: scaffold a pf.yaml project from a source directory, " +
-			"detecting language/artifact/dependency-mode unless overridden.",
+			"detecting language/artifact/dependency-mode unless overridden. Accepts an optional project_root: " +
+			"defaults to the platform-factory checkout the server was started against; pass an absolute path to " +
+			"operate on a different project instead.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -310,7 +330,8 @@ func NewPlatformFactoryServer(repoRoot, version string) *Server {
 				"extract_to": {"type": "string"},
 				"archive_format": {"type": "string"},
 				"filename_style": {"type": "string"},
-				"extra_args": {"type": "array", "items": {"type": "string"}, "description": "additional raw flags not covered above"}
+				"extra_args": {"type": "array", "items": {"type": "string"}, "description": "additional raw flags not covered above"},
+				"project_root": {"type": "string", "description": "absolute path to the target project; defaults to the platform-factory checkout the server was started against"}
 			}
 		}`),
 		Handler: product.InitToolHandler(repoRoot),
@@ -318,7 +339,9 @@ func NewPlatformFactoryServer(repoRoot, version string) *Server {
 	s.AddTool(Tool{
 		Name: "pf_build",
 		Description: "Run `platform-factory build`: build the nearest pf.yaml project (leave executable empty) " +
-			"or wrap one compiled executable directly into an OCI image.",
+			"or wrap one compiled executable directly into an OCI image. Accepts an optional project_root: " +
+			"defaults to the platform-factory checkout the server was started against; pass an absolute path to " +
+			"operate on a different project instead.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -340,7 +363,8 @@ func NewPlatformFactoryServer(repoRoot, version string) *Server {
 				"require_identical": {"type": "boolean"},
 				"extra_files": {"type": "array", "items": {"type": "string"}},
 				"labels": {"type": "array", "items": {"type": "string"}},
-				"extra_args": {"type": "array", "items": {"type": "string"}, "description": "additional raw flags not covered above"}
+				"extra_args": {"type": "array", "items": {"type": "string"}, "description": "additional raw flags not covered above"},
+				"project_root": {"type": "string", "description": "absolute path to the target project; defaults to the platform-factory checkout the server was started against"}
 			}
 		}`),
 		Handler: product.BuildToolHandler(repoRoot),
@@ -349,7 +373,8 @@ func NewPlatformFactoryServer(repoRoot, version string) *Server {
 		Name: "pf_publish",
 		Description: "Run `platform-factory publish`: push a verified OCI layout to a registry with optional " +
 			"signature/SBOM/provenance and a policy gate. Credentials come from this server's own environment, " +
-			"never from a tool argument.",
+			"never from a tool argument. Accepts an optional project_root: defaults to the platform-factory checkout " +
+			"the server was started against; pass an absolute path to operate on a different project instead.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"required": ["image"],
@@ -374,7 +399,8 @@ func NewPlatformFactoryServer(repoRoot, version string) *Server {
 				"mount_from": {"type": "string"},
 				"format": {"type": "string"},
 				"reports": {"type": "string"},
-				"extra_args": {"type": "array", "items": {"type": "string"}, "description": "additional raw flags not covered above"}
+				"extra_args": {"type": "array", "items": {"type": "string"}, "description": "additional raw flags not covered above"},
+				"project_root": {"type": "string", "description": "absolute path to the target project; defaults to the platform-factory checkout the server was started against"}
 			}
 		}`),
 		Handler: product.PublishToolHandler(repoRoot),
@@ -382,7 +408,9 @@ func NewPlatformFactoryServer(repoRoot, version string) *Server {
 	s.AddTool(Tool{
 		Name: "pf_deploy",
 		Description: "Run `platform-factory deploy`: apply a digest-pinned image to Kubernetes. Secret values are " +
-			"never accepted directly, only ENV=SECRET/KEY references the cluster itself resolves.",
+			"never accepted directly, only ENV=SECRET/KEY references the cluster itself resolves. Accepts an optional " +
+			"project_root: defaults to the platform-factory checkout the server was started against; pass an absolute " +
+			"path to operate on a different project instead.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -407,7 +435,8 @@ func NewPlatformFactoryServer(repoRoot, version string) *Server {
 				"evidence": {"type": "string"},
 				"dry_run": {"type": "boolean"},
 				"yes": {"type": "boolean"},
-				"extra_args": {"type": "array", "items": {"type": "string"}, "description": "additional raw flags not covered above"}
+				"extra_args": {"type": "array", "items": {"type": "string"}, "description": "additional raw flags not covered above"},
+				"project_root": {"type": "string", "description": "absolute path to the target project; defaults to the platform-factory checkout the server was started against"}
 			}
 		}`),
 		Handler: product.DeployToolHandler(repoRoot),
@@ -420,7 +449,9 @@ func NewPlatformFactoryServer(repoRoot, version string) *Server {
 			"launch (freeze+build+run as needed), or migrate (rewrite the config to the current schema). " +
 			"\"run\"/\"launch\" are the only tools in this server that actually start a built image - they shell " +
 			"to the host's docker/podman (or a native microVM runtime), so they require that runtime to be " +
-			"reachable from wherever this MCP server process itself runs.",
+			"reachable from wherever this MCP server process itself runs. Accepts an optional project_root: " +
+			"defaults to the platform-factory checkout the server was started against; pass an absolute path to " +
+			"operate on a different project instead.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"required": ["action"],
@@ -433,70 +464,86 @@ func NewPlatformFactoryServer(repoRoot, version string) *Server {
 				"max_wall_clock": {"type": "string", "description": "build only: e.g. 10m; 0 disables"},
 				"max_cpu": {"type": "string", "description": "build only: e.g. 5m; 0 disables"},
 				"max_memory": {"type": "string", "description": "build only: e.g. 512MiB; 0 disables"},
-				"extra_args": {"type": "array", "items": {"type": "string"}, "description": "additional raw flags not covered above"}
+				"extra_args": {"type": "array", "items": {"type": "string"}, "description": "additional raw flags not covered above"},
+				"project_root": {"type": "string", "description": "absolute path to the target project; defaults to the platform-factory checkout the server was started against"}
 			}
 		}`),
 		Handler: product.ProjectToolHandler(repoRoot),
 	})
 	s.AddTool(Tool{
-		Name:        "pf_status",
-		Description: "Run `platform-factory status`: report build/publish/deploy state for a project and the next safe command.",
+		Name: "pf_status",
+		Description: "Run `platform-factory status`: report build/publish/deploy state for a project and the next safe command. " +
+			"Accepts an optional project_root: defaults to the platform-factory checkout the server was started against; " +
+			"pass an absolute path to operate on a different project instead.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"directory": {"type": "string"},
-				"format": {"type": "string", "enum": ["json", "text"]}
+				"format": {"type": "string", "enum": ["json", "text"]},
+				"project_root": {"type": "string", "description": "absolute path to the target project; defaults to the platform-factory checkout the server was started against"}
 			}
 		}`),
 		Handler: product.StatusToolHandler(repoRoot),
 	})
 	s.AddTool(Tool{
-		Name:        "pf_doctor",
-		Description: "Run `platform-factory doctor`: check local tools, runtimes, and hardware support, optionally scoped to one phase.",
+		Name: "pf_doctor",
+		Description: "Run `platform-factory doctor`: check local tools, runtimes, and hardware support, optionally scoped to one phase. " +
+			"Accepts an optional project_root: defaults to the platform-factory checkout the server was started against; " +
+			"pass an absolute path to operate on a different project instead.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"scope": {"type": "string", "enum": ["", "all", "build", "publish", "deploy"]}
+				"scope": {"type": "string", "enum": ["", "all", "build", "publish", "deploy"]},
+				"project_root": {"type": "string", "description": "absolute path to the target project; defaults to the platform-factory checkout the server was started against"}
 			}
 		}`),
 		Handler: product.DoctorToolHandler(repoRoot),
 	})
 	s.AddTool(Tool{
-		Name:        "pf_detect",
-		Description: "Run `platform-factory detect`: classify an application input (language, artifact, dependency mode) without executing it.",
+		Name: "pf_detect",
+		Description: "Run `platform-factory detect`: classify an application input (language, artifact, dependency mode) without executing it. " +
+			"Accepts an optional project_root: defaults to the platform-factory checkout the server was started against; " +
+			"pass an absolute path to operate on a different project instead.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"required": ["path"],
 			"properties": {
 				"path": {"type": "string"},
 				"format": {"type": "string", "enum": ["json", "text"]},
-				"accept_ambiguous": {"type": "boolean"}
+				"accept_ambiguous": {"type": "boolean"},
+				"project_root": {"type": "string", "description": "absolute path to the target project; defaults to the platform-factory checkout the server was started against"}
 			}
 		}`),
 		Handler: product.DetectToolHandler(repoRoot),
 	})
 	s.AddTool(Tool{
-		Name:        "pf_verify",
-		Description: "Run `platform-factory verify`: strictly validate a local OCI layout.",
+		Name: "pf_verify",
+		Description: "Run `platform-factory verify`: strictly validate a local OCI layout. " +
+			"Accepts an optional project_root: defaults to the platform-factory checkout the server was started against; " +
+			"pass an absolute path to operate on a different project instead.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"required": ["layout"],
 			"properties": {
 				"layout": {"type": "string"},
-				"format": {"type": "string", "enum": ["json", "text"]}
+				"format": {"type": "string", "enum": ["json", "text"]},
+				"project_root": {"type": "string", "description": "absolute path to the target project; defaults to the platform-factory checkout the server was started against"}
 			}
 		}`),
 		Handler: product.VerifyToolHandler(repoRoot),
 	})
 	s.AddTool(Tool{
-		Name:        "pf_inspect",
-		Description: "Run `platform-factory inspect`: summarize a local OCI layout's manifests and platforms.",
+		Name: "pf_inspect",
+		Description: "Run `platform-factory inspect`: summarize a local OCI layout's manifests and platforms. " +
+			"Accepts an optional project_root: defaults to the platform-factory checkout the server was started against; " +
+			"pass an absolute path to operate on a different project instead.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"required": ["layout"],
 			"properties": {
 				"layout": {"type": "string"},
-				"format": {"type": "string", "enum": ["json", "text"]}
+				"format": {"type": "string", "enum": ["json", "text"]},
+				"project_root": {"type": "string", "description": "absolute path to the target project; defaults to the platform-factory checkout the server was started against"}
 			}
 		}`),
 		Handler: product.InspectToolHandler(repoRoot),

@@ -22,13 +22,10 @@ func TestLaunchBuildsAndRunsSupportedProjectEndToEnd(t *testing.T) {
 		"language: compiled\nartifact: app\nimage: example/e2e\ntag: v1\n", 0o644)
 	writeProjectTestFile(t, filepath.Join(root, "app"), "static executable payload", 0o755)
 	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	pointBothRuntimeSocketsAtFakeEngine(t)
 	var runtimeArgs []string
-	containerExecute := func(name string, args []string, stdin io.Reader, _, _ io.Writer) error {
+	containerExecute := func(name string, args []string, _ io.Reader, _, _ io.Writer) error {
 		runtimeArgs = append([]string{name}, args...)
-		if len(args) > 0 && args[0] == "load" {
-			_, err := io.Copy(io.Discard, stdin)
-			return err
-		}
 		return nil
 	}
 	var stdout, stderr bytes.Buffer

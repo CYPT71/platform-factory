@@ -3,6 +3,7 @@ package product
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -98,6 +99,35 @@ func TestDeployToolHandlerBuildsFullArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(result.Args, want) {
 		t.Fatalf("args = %v\nwant  %v", result.Args, want)
+	}
+}
+
+// TestDeployToolHandlerHonorsProjectRootOverride is F3's core assertion
+// for pf_deploy: project_root, not the server's own repoRoot, becomes the
+// subprocess's working directory when supplied.
+func TestDeployToolHandlerHonorsProjectRootOverride(t *testing.T) {
+	withHelperProcess(t, 0)
+	repoRoot := t.TempDir()
+	independentProject := t.TempDir()
+	payload := fmt.Sprintf(`{"project_root":%q,"name":"svc"}`, independentProject)
+	out, err := DeployToolHandler(repoRoot)(context.Background(), json.RawMessage(payload))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result Result
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	gotCwd := cwdFromStdout(t, result.Stdout)
+	if evalSymlinksOrFatal(t, gotCwd) != evalSymlinksOrFatal(t, independentProject) {
+		t.Fatalf("subprocess ran in %q, want %q", gotCwd, independentProject)
+	}
+}
+
+func TestDeployToolHandlerRejectsARelativeProjectRoot(t *testing.T) {
+	_, err := DeployToolHandler(t.TempDir())(context.Background(), json.RawMessage(`{"project_root":"relative/path"}`))
+	if err == nil {
+		t.Fatal("expected an error for a relative project_root")
 	}
 }
 

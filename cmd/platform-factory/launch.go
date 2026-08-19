@@ -1,12 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
 )
 
-func runLaunch(args []string, stdout, stderr io.Writer, containerExecute containerExecutor, microVMExecute microVMExecutor) int {
+func runLaunch(ctx context.Context, args []string, stdout, stderr io.Writer, containerExecute containerExecutor, microVMExecute microVMExecutor) int {
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, "usage: platform-factory launch --isolation=<container|microvm> [OPTIONS]")
 		return 2
@@ -35,7 +36,7 @@ func runLaunch(args []string, stdout, stderr io.Writer, containerExecute contain
 	}
 	switch isolation {
 	case "container":
-		return runContainer(remaining, stdout, stderr, containerExecute)
+		return runContainer(ctx, remaining, stdout, stderr, containerExecute)
 	case "microvm":
 		return runMicroVM(append([]string{"run"}, remaining...), stdout, stderr, microVMExecute)
 	default:

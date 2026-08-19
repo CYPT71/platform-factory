@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 	hostplugin "github.com/CYPT71/platform-factory/internal/plugin"
 )
 
@@ -129,7 +130,7 @@ func ValidateToolHandler(repoRoot string) func(context.Context, json.RawMessage)
 	return func(ctx context.Context, arguments json.RawMessage) (string, error) {
 		var args validateArguments
 		if err := json.Unmarshal(arguments, &args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 		}
 		report, err := Validate(ctx, repoRoot, args.Plugin)
 		if err != nil {

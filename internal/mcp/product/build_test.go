@@ -3,6 +3,7 @@ package product
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -108,6 +109,36 @@ func TestBuildToolHandlerLowLevelModeAppendsExecutableLast(t *testing.T) {
 	want := []string{"--tag", "v1", "bin/app"}
 	if !reflect.DeepEqual(result.Args, want) {
 		t.Fatalf("args = %v\nwant  %v", result.Args, want)
+	}
+}
+
+// TestBuildToolHandlerHonorsProjectRootOverride is F3's core assertion for
+// pf_build: when project_root is supplied, it - not the server's own
+// repoRoot - becomes the subprocess's working directory, and it need not
+// live inside repoRoot at all.
+func TestBuildToolHandlerHonorsProjectRootOverride(t *testing.T) {
+	withHelperProcess(t, 0)
+	repoRoot := t.TempDir()
+	independentProject := t.TempDir()
+	payload := fmt.Sprintf(`{"project_root":%q,"tag":"v1"}`, independentProject)
+	out, err := BuildToolHandler(repoRoot)(context.Background(), json.RawMessage(payload))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result Result
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	gotCwd := cwdFromStdout(t, result.Stdout)
+	if evalSymlinksOrFatal(t, gotCwd) != evalSymlinksOrFatal(t, independentProject) {
+		t.Fatalf("subprocess ran in %q, want %q", gotCwd, independentProject)
+	}
+}
+
+func TestBuildToolHandlerRejectsARelativeProjectRoot(t *testing.T) {
+	_, err := BuildToolHandler(t.TempDir())(context.Background(), json.RawMessage(`{"project_root":"relative/path"}`))
+	if err == nil {
+		t.Fatal("expected an error for a relative project_root")
 	}
 }
 

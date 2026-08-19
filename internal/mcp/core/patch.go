@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 // ResolveScopedPath resolves a repo-relative path and guarantees the
@@ -20,11 +22,11 @@ import (
 // let a write land outside repoRoot.
 func ResolveScopedPath(repoRoot, relative string) (string, error) {
 	if relative == "" {
-		return "", fmt.Errorf("path must not be empty")
+		return "", toolerror.New(toolerror.ErrInvalidArgument, "path must not be empty")
 	}
 	cleaned := filepath.Clean(filepath.FromSlash(relative))
 	if filepath.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path %q must be a repository-relative path with no .. segments", relative)
+		return "", toolerror.New(toolerror.ErrPathOutsideRepo, "path %q must be a repository-relative path with no .. segments", relative)
 	}
 
 	absoluteRoot, err := filepath.Abs(repoRoot)
@@ -57,7 +59,7 @@ func ResolveScopedPath(repoRoot, relative string) (string, error) {
 		return "", fmt.Errorf("resolve %q: %w", relative, err)
 	}
 	if resolvedAncestor != resolvedRoot && !strings.HasPrefix(resolvedAncestor, resolvedRoot+string(filepath.Separator)) {
-		return "", fmt.Errorf("path %q resolves outside the repository", relative)
+		return "", toolerror.New(toolerror.ErrPathOutsideRepo, "path %q resolves outside the repository", relative)
 	}
 	// Re-derive full under the resolved ancestor so a symlink earlier in
 	// the chain cannot redirect the final write either.
@@ -79,6 +81,9 @@ func ReadFile(repoRoot, relative string) (ReadFileResult, error) {
 	}
 	data, err := os.ReadFile(full)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return ReadFileResult{}, toolerror.New(toolerror.ErrNotFound, "file %q does not exist", relative)
+		}
 		return ReadFileResult{}, err
 	}
 	return ReadFileResult{Path: relative, Content: string(data)}, nil
@@ -101,7 +106,7 @@ func WriteFile(repoRoot, relative, content string) (WriteFileResult, error) {
 		return WriteFileResult{}, err
 	}
 	if info, err := os.Lstat(full); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return WriteFileResult{}, fmt.Errorf("refusing to write through a symlink at %q", relative)
+		return WriteFileResult{}, toolerror.New(toolerror.ErrInvalidArgument, "refusing to write through a symlink at %q", relative)
 	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return WriteFileResult{}, err
@@ -121,7 +126,7 @@ func ReadFileToolHandler(repoRoot string) func(context.Context, json.RawMessage)
 	return func(ctx context.Context, arguments json.RawMessage) (string, error) {
 		var args readFileArguments
 		if err := json.Unmarshal(arguments, &args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 		}
 		result, err := ReadFile(repoRoot, args.Path)
 		if err != nil {
@@ -148,7 +153,7 @@ func WriteFileToolHandler(repoRoot string) func(context.Context, json.RawMessage
 	return func(ctx context.Context, arguments json.RawMessage) (string, error) {
 		var args writeFileArguments
 		if err := json.Unmarshal(arguments, &args); err != nil {
-			return "", fmt.Errorf("invalid arguments: %w", err)
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 		}
 		result, err := WriteFile(repoRoot, args.Path, args.Content)
 		if err != nil {

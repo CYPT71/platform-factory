@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 type buildArguments struct {
@@ -31,6 +33,7 @@ type buildArguments struct {
 	ExtraFiles       []string `json:"extra_files"`
 	Labels           []string `json:"labels"`
 	ExtraArgs        []string `json:"extra_args"`
+	ProjectRoot      string   `json:"project_root"`
 }
 
 // BuildToolHandler returns the pf_build handler: `platform-factory
@@ -41,21 +44,25 @@ func BuildToolHandler(repoRoot string) func(context.Context, json.RawMessage) (s
 		var a buildArguments
 		if len(arguments) > 0 && string(arguments) != "{}" {
 			if err := json.Unmarshal(arguments, &a); err != nil {
-				return "", err
+				return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 			}
 		}
 		if err := validExtraArgs(a.ExtraArgs); err != nil {
 			return "", err
 		}
-		executable, err := scopedRelative(repoRoot, a.Executable)
+		root, err := resolveProjectRoot(repoRoot, a.ProjectRoot)
 		if err != nil {
 			return "", err
 		}
-		output, err := scopedRelative(repoRoot, a.Output)
+		executable, err := scopedRelative(root, a.Executable)
 		if err != nil {
 			return "", err
 		}
-		config, err := scopedRelative(repoRoot, a.Config)
+		output, err := scopedRelative(root, a.Output)
+		if err != nil {
+			return "", err
+		}
+		config, err := scopedRelative(root, a.Config)
 		if err != nil {
 			return "", err
 		}
@@ -91,7 +98,7 @@ func BuildToolHandler(repoRoot string) func(context.Context, json.RawMessage) (s
 			args = append(args, executable)
 		}
 
-		result, err := run(ctx, repoRoot, "build", args)
+		result, err := run(ctx, root, "build", args)
 		if err != nil {
 			return "", err
 		}

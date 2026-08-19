@@ -3,13 +3,19 @@
 // resolves which image reference within it to use, and streams it to
 // docker or podman - transposing it into the Docker Save archive format
 // for docker, since only podman's loader accepts an OCI Image Layout
-// archive directly. It has no knowledge of the CLI that calls it: every
-// external effect (running the runtime's own "load"/inspect commands)
-// is injected through Executor, and results are returned, never printed.
+// archive directly. It has no knowledge of any CLI: every external
+// effect (loading the archive, confirming the image is present
+// afterward) is a real HTTP call over the runtime's own Unix domain
+// socket, injected through RuntimeClient (see socketclient.go), and
+// results are returned, never printed. This works inside a
+// distroless/scratch container image that ships neither the docker nor
+// the podman CLI binary, unlike the CLI-shelling approach this package
+// used before.
 package dockersave
 
 import (
 	"archive/tar"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,20 +29,17 @@ import (
 	"github.com/CYPT71/platform-factory/internal/layout"
 )
 
-// Executor runs a container-runtime CLI command (docker/podman), the
-// same shape cmd/platform-factory's own containerExecutor already uses.
-type Executor func(name string, args []string, stdin io.Reader, stdout, stderr io.Writer) error
-
 // PrepareContainerImage loads layoutName's image reference into
-// runtimeName's local runtime and returns the image reference now
-// available there. Used for a local-only load - never a push - so it
-// verifies the layout with layout.VerifyForLocalImport rather than
-// layout.Verify: the same structural/digest checks, without the
-// embedded-secret-marker scan that legitimately gates a pre-push publish
-// but otherwise false-positives on any layer containing platform-
-// factory's own compiled binary (see VerifyForLocalImport's doc
-// comment).
-func PrepareContainerImage(runtimeName, image, layoutName string, stderr io.Writer, execute Executor) (string, error) {
+// runtimeName's local runtime (via client, a RuntimeClient already
+// connected to that runtime's socket - see NewRuntimeClientForName) and
+// returns the image reference now available there. Used for a local-only
+// load - never a push - so it verifies the layout with
+// layout.VerifyForLocalImport rather than layout.Verify: the same
+// structural/digest checks, without the embedded-secret-marker scan that
+// legitimately gates a pre-push publish but otherwise false-positives on
+// any layer containing platform-factory's own compiled binary (see
+// VerifyForLocalImport's doc comment).
+func PrepareContainerImage(ctx context.Context, runtimeName, image, layoutName string, stderr io.Writer, client RuntimeClient) (string, error) {
 	if layoutName == "" {
 		layoutName = image
 		image = ""
@@ -72,22 +75,17 @@ func PrepareContainerImage(runtimeName, image, layoutName string, stderr io.Writ
 	// with the freshly loaded content, so always loading is correct -
 	// it costs an unpack on every run, not just the first, but that's
 	// the right tradeoff for a local dev tool over silently stale output.
-	if err := streamLayoutToRuntime(runtimeName, layoutName, image, stderr, execute); err != nil {
+	if err := streamLayoutToRuntime(ctx, runtimeName, layoutName, image, stderr, client); err != nil {
 		return "", fmt.Errorf("import %s into %s: %w", layoutName, runtimeName, err)
 	}
-	var inspectArgs []string
-	if runtimeName == "podman" {
-		inspectArgs = []string{"image", "exists", image}
-	} else {
-		inspectArgs = []string{"image", "inspect", image}
-	}
-	if err := execute(runtimeName, inspectArgs, nil, io.Discard, io.Discard); err != nil {
+	exists, err := client.ImageExists(ctx, image)
+	if err != nil || !exists {
 		return "", fmt.Errorf("image %q is still unavailable after import", image)
 	}
 	return image, nil
 }
 
-func streamLayoutToRuntime(runtimeName, root, reference string, stderr io.Writer, execute Executor) error {
+func streamLayoutToRuntime(ctx context.Context, runtimeName, root, reference string, stderr io.Writer, client RuntimeClient) error {
 	reader, writer := io.Pipe()
 	archiveResult := make(chan error, 1)
 	go func() {
@@ -101,7 +99,10 @@ func streamLayoutToRuntime(runtimeName, root, reference string, stderr io.Writer
 		}
 		archiveResult <- writeLayoutArchive(writer, root)
 	}()
-	runtimeErr := execute(runtimeName, []string{"load"}, reader, io.Discard, stderr)
+	runtimeErr := client.LoadArchive(ctx, reader)
+	if runtimeErr != nil {
+		fmt.Fprintf(stderr, "dockersave: load %s into %s: %v\n", root, runtimeName, runtimeErr)
+	}
 	_ = reader.CloseWithError(runtimeErr)
 	archiveErr := <-archiveResult
 	if runtimeErr != nil {

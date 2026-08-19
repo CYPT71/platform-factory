@@ -330,7 +330,7 @@ func runConfiguredProject(ctx context.Context, loaded project.Loaded, plugins *p
 		runtimeArgs = append(runtimeArgs, "-p", port)
 	}
 	runtimeArgs = append(runtimeArgs, loaded.Output())
-	return runContainer(runtimeArgs, stdout, stderr, containerExecute)
+	return runContainer(ctx, runtimeArgs, stdout, stderr, containerExecute)
 }
 
 // defaultWatchPollInterval is how often runConfiguredProjectWatch
@@ -383,7 +383,7 @@ func runConfiguredProjectWatch(ctx context.Context, loaded project.Loaded, plugi
 		runtimeArgs = append(runtimeArgs, loaded.Output())
 
 		exited := make(chan int, 1)
-		go func() { exited <- runContainer(runtimeArgs, stdout, stderr, containerExecute) }()
+		go func() { exited <- runContainer(ctx, runtimeArgs, stdout, stderr, containerExecute) }()
 
 		select {
 		case code := <-exited:

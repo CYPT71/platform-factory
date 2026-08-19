@@ -10,13 +10,13 @@ package core
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/CYPT71/platform-factory/internal/mcp/docutil"
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 // areaPackages maps each pf_core_inspect "area" to the internal/
@@ -85,7 +85,7 @@ func Inspect(repoRoot, area string) (AreaInspection, error) {
 	} else {
 		dirs, ok := areaPackages[area]
 		if !ok {
-			return AreaInspection{}, fmt.Errorf("unknown area %q; valid areas: %s", area, strings.Join(validAreas(), ", "))
+			return AreaInspection{}, toolerror.New(toolerror.ErrInvalidArgument, "unknown area %q; valid areas: %s", area, strings.Join(validAreas(), ", "))
 		}
 		packageDirs = dirs
 	}
@@ -149,7 +149,7 @@ func InspectToolHandler(repoRoot string) func(context.Context, json.RawMessage) 
 		var args inspectArguments
 		if len(arguments) > 0 && string(arguments) != "{}" {
 			if err := json.Unmarshal(arguments, &args); err != nil {
-				return "", fmt.Errorf("invalid arguments: %w", err)
+				return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 			}
 		}
 		inspection, err := Inspect(repoRoot, args.Area)

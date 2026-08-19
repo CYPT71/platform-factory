@@ -299,13 +299,10 @@ func TestProjectLaunchFreezesBuildsAndRuns(t *testing.T) {
 		frozen = append(frozen, name+" "+strings.Join(args, " "))
 		return nil
 	}
+	pointBothRuntimeSocketsAtFakeEngine(t)
 	var runtimeCalls [][]string
-	containerExecute := func(name string, args []string, stdin io.Reader, _, _ io.Writer) error {
+	containerExecute := func(name string, args []string, _ io.Reader, _, _ io.Writer) error {
 		runtimeCalls = append(runtimeCalls, append([]string{name}, args...))
-		if len(args) > 0 && args[0] == "load" {
-			_, err := io.Copy(io.Discard, stdin)
-			return err
-		}
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
@@ -491,29 +488,26 @@ func TestRunProjectShowAndContainerRun(t *testing.T) {
 	if code := runProject([]string{"build", "--config", loaded.File}, &stdout, &stderr, projectExecute, nil, nil); code != 0 {
 		t.Fatalf("build code=%d stderr=%s", code, stderr.String())
 	}
+	pointBothRuntimeSocketsAtFakeEngine(t)
 	var calls [][]string
-	containerExecute := func(name string, args []string, stdin io.Reader, _, _ io.Writer) error {
+	containerExecute := func(name string, args []string, _ io.Reader, _, _ io.Writer) error {
 		if name != "podman" {
 			t.Fatalf("runtime=%s", name)
 		}
 		calls = append(calls, append([]string(nil), args...))
-		if len(args) > 0 && args[0] == "load" {
-			_, err := io.Copy(io.Discard, stdin)
-			return err
-		}
 		return nil
 	}
 	if code := runProject([]string{"run", "--config", loaded.File}, &stdout, &stderr, projectExecute, containerExecute, nil); code != 0 {
 		t.Fatalf("run code=%d stderr=%s", code, stderr.String())
 	}
-	// prepareContainerImage always (re)loads now, rather than skipping
-	// when a tag already exists - see cmd/platform-factory/import.go -
-	// so the sequence is load, then the post-load presence check, then
-	// the actual run.
-	if len(calls) != 3 || calls[0][0] != "load" || calls[1][0] != "image" {
+	// The image load and post-load presence check now happen over the
+	// podman socket directly (see internal/dockersave.SocketClient), not
+	// through containerExecute - only the final `podman run` invocation
+	// still goes through it.
+	if len(calls) != 1 || calls[0][0] != "run" {
 		t.Fatalf("calls=%v", calls)
 	}
-	joined := strings.Join(calls[2], " ")
+	joined := strings.Join(calls[0], " ")
 	for _, want := range []string{"--network=bridge", "--publish=8080:80", "--publish=8443:443"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %s in %s", want, joined)
@@ -530,14 +524,11 @@ func TestRunProjectRunAcceptsARuntimeOverride(t *testing.T) {
 		t.Fatalf("build code=%d stderr=%s", code, stderr.String())
 	}
 	stdout.Reset()
+	pointBothRuntimeSocketsAtFakeEngine(t)
 
 	var runtimesSeen []string
-	containerExecute := func(name string, args []string, stdin io.Reader, _, _ io.Writer) error {
+	containerExecute := func(name string, args []string, _ io.Reader, _, _ io.Writer) error {
 		runtimesSeen = append(runtimesSeen, name)
-		if len(args) > 0 && args[0] == "load" {
-			_, err := io.Copy(io.Discard, stdin)
-			return err
-		}
 		return nil
 	}
 	// A junior who just says "use docker" should get docker, even
@@ -861,13 +852,10 @@ func TestRunConfiguredProjectUpgradesNoneNetworkWhenPortsArePublished(t *testing
 	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nports: [9090:90]\n")
 	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
 	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	pointBothRuntimeSocketsAtFakeEngine(t)
 	var containerArgs []string
-	containerExecute := func(name string, args []string, stdin io.Reader, _, _ io.Writer) error {
+	containerExecute := func(name string, args []string, _ io.Reader, _, _ io.Writer) error {
 		containerArgs = append([]string(nil), args...)
-		if len(args) > 0 && args[0] == "load" {
-			_, err := io.Copy(io.Discard, stdin)
-			return err
-		}
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
@@ -1124,11 +1112,8 @@ func TestRunAutoFreezesWhenAFrozenInputChangesInsteadOfFailing(t *testing.T) {
 	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
 	writeProjectTestFile(t, filepath.Join(loaded.Root, "dep.txt"), "v1", 0o644)
 	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
-	containerExecute := func(_ string, args []string, stdin io.Reader, _, _ io.Writer) error {
-		if len(args) > 0 && args[0] == "load" {
-			_, err := io.Copy(io.Discard, stdin)
-			return err
-		}
+	pointBothRuntimeSocketsAtFakeEngine(t)
+	containerExecute := func(_ string, _ []string, _ io.Reader, _, _ io.Writer) error {
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
@@ -1265,6 +1250,7 @@ func TestRunConfiguredProjectWatchRebuildsOnChangeAndStopsOnCancel(t *testing.T)
 	binary := filepath.Join(loaded.Root, "app")
 	writeProjectTestFile(t, binary, "binary", 0o755)
 	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	pointBothRuntimeSocketsAtFakeEngine(t)
 
 	stub := newWatchContainerExecuteStub()
 	ctx, cancel := context.WithCancel(context.Background())

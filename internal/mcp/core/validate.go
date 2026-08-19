@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 // StepResult is one check pf_core_validate ran.
@@ -138,7 +139,7 @@ func Validate(ctx context.Context, repoRoot, profile string) (Report, error) {
 			report.Steps = []StepResult{runCommand(ctx, repoRoot, "go", args...)}
 		}
 	default:
-		return Report{}, fmt.Errorf("unknown profile %q; want fast, full, security, or affected", profile)
+		return Report{}, toolerror.New(toolerror.ErrInvalidArgument, "unknown profile %q; want fast, full, security, or affected", profile)
 	}
 
 	for _, step := range report.Steps {
@@ -159,7 +160,7 @@ func ValidateToolHandler(repoRoot string) func(context.Context, json.RawMessage)
 		var args validateArguments
 		if len(arguments) > 0 && string(arguments) != "{}" {
 			if err := json.Unmarshal(arguments, &args); err != nil {
-				return "", fmt.Errorf("invalid arguments: %w", err)
+				return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 			}
 		}
 		report, err := Validate(ctx, repoRoot, args.Profile)

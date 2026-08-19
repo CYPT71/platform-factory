@@ -160,14 +160,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDeploy(ctx, args[1:], stdout, stderr, executeContainerRuntime)
 	}
 	if args[0] == "logs" || args[0] == "events" {
-		return runProjectObservation(args[0], args[1:], stdout, stderr, executeContainerRuntime)
+		return runProjectObservation(ctx, args[0], args[1:], stdout, stderr, executeContainerRuntime)
 	}
 	if args[0] == "rollback" {
-		return runRollback(args[1:], stdout, stderr, executeContainerRuntime)
+		return runRollback(ctx, args[1:], stdout, stderr, executeContainerRuntime)
 	}
 	if args[0] == "run" {
 		if hasIsolationFlag(args[1:]) {
-			return runLaunch(args[1:], stdout, stderr, executeContainerRuntime, executeMicroVMCommand)
+			return runLaunch(ctx, args[1:], stdout, stderr, executeContainerRuntime, executeMicroVMCommand)
 		}
 		// No explicit IMAGE/layout given (e.g. bare `pf run` or `pf run
 		// --runtime docker`): the same "just run my project" shorthand
@@ -180,10 +180,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return runProjectContext(ctx, append([]string{"run"}, args[1:]...), stdout, stderr,
 				executeProjectCommand, executeContainerRuntime, executeMicroVMCommand)
 		}
-		return runContainer(args[1:], stdout, stderr, executeContainerRuntime)
+		return runContainer(ctx, args[1:], stdout, stderr, executeContainerRuntime)
 	}
 	if args[0] == "import" {
-		return runImport(args[1:], stdout, stderr, executeContainerRuntime)
+		return runImport(ctx, args[1:], stdout, stderr)
 	}
 	if args[0] == "microvm" {
 		return runMicroVM(args[1:], stdout, stderr, executeMicroVMCommand)
@@ -202,7 +202,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return runProjectContext(ctx, append([]string{action}, projectArgs...), stdout, stderr,
 				executeProjectCommand, executeContainerRuntime, executeMicroVMCommand)
 		}
-		return runLaunch(args[1:], stdout, stderr, executeContainerRuntime, executeMicroVMCommand)
+		return runLaunch(ctx, args[1:], stdout, stderr, executeContainerRuntime, executeMicroVMCommand)
 	}
 	if args[0] == "inspect" && len(args) == 1 {
 		return runStatus([]string{"--format", "json"}, stdout, stderr)
@@ -508,7 +508,7 @@ Global:
 Run "platform-factory COMMAND --help" for command options.`)
 }
 
-func runImport(args []string, stdout, stderr io.Writer, execute containerExecutor) int {
+func runImport(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("import", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	runtimeName := flags.String("runtime", "docker", "container runtime: docker or podman")
@@ -523,7 +523,7 @@ func runImport(args []string, stdout, stderr io.Writer, execute containerExecuto
 		fmt.Fprintln(stderr, "usage: platform-factory import [--runtime docker|podman] --layout LAYOUT IMAGE")
 		return 2
 	}
-	image, err := prepareContainerImage(*runtimeName, flags.Arg(0), *layoutName, stderr, execute)
+	image, err := prepareContainerImage(ctx, *runtimeName, flags.Arg(0), *layoutName, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory import: %v\n", err)
 		return 1
@@ -677,7 +677,7 @@ func runHasExplicitTarget(args []string) bool {
 	return flags.NArg() >= 1
 }
 
-func runContainer(args []string, stdout, stderr io.Writer, execute containerExecutor) int {
+func runContainer(ctx context.Context, args []string, stdout, stderr io.Writer, execute containerExecutor) int {
 	flags, values := newRunFlagSet(stderr)
 	runtimeName, cpus, memory, pidsLimit := values.runtimeName, values.cpus, values.memory, values.pidsLimit
 	network, allowHostNetwork, hostname := values.network, values.allowHostNetwork, values.hostname
@@ -779,7 +779,7 @@ func runContainer(args []string, stdout, stderr io.Writer, execute containerExec
 		}
 	}
 	if *layoutName != "" || localLayoutPath(image) {
-		prepared, err := prepareContainerImage(*runtimeName, image, *layoutName, stderr, execute)
+		prepared, err := prepareContainerImage(ctx, *runtimeName, image, *layoutName, stderr)
 		if err != nil {
 			fmt.Fprintf(stderr, "platform-factory run: %v\n", err)
 			return 1

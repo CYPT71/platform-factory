@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 
@@ -16,8 +17,14 @@ func localLayoutPath(value string) bool {
 // factory run`'s local-layout path - both load a layout into the local
 // container runtime and never push it anywhere. The actual layout
 // verification, image-reference resolution, and docker/podman streaming
-// live in internal/dockersave; this is only the CLI-layer adapter
-// that hands it this process's own container-executing function.
-func prepareContainerImage(runtimeName, image, layoutName string, stderr io.Writer, execute containerExecutor) (string, error) {
-	return dockersave.PrepareContainerImage(runtimeName, image, layoutName, stderr, dockersave.Executor(execute))
+// live in internal/dockersave, over a real HTTP connection to that
+// runtime's own Unix domain socket rather than a shelled-out CLI
+// process (see dockersave.SocketClient) - this is only the CLI-layer
+// adapter that resolves which socket to dial for runtimeName.
+func prepareContainerImage(ctx context.Context, runtimeName, image, layoutName string, stderr io.Writer) (string, error) {
+	client, err := dockersave.NewRuntimeClientForName(runtimeName)
+	if err != nil {
+		return "", err
+	}
+	return dockersave.PrepareContainerImage(ctx, runtimeName, image, layoutName, stderr, client)
 }

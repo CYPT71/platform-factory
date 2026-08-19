@@ -179,9 +179,9 @@ func TestReadOnlyCommandsRejectMalformedRequests(t *testing.T) {
 		{"compose-args", func(o, e *bytes.Buffer) int { return runCompose([]string{"one"}, o, e) }, "usage"},
 		{"compose-format", func(o, e *bytes.Buffer) int { return runCompose([]string{"--format", "xml", "one", "two"}, o, e) }, "format"},
 		{"compose-invalid-layout", func(o, e *bytes.Buffer) int { return runCompose([]string{"missing-a", "missing-b"}, o, e) }, "compose"},
-		{"import-help", func(o, e *bytes.Buffer) int { return runImport([]string{"--help"}, o, e, nil) }, ""},
-		{"import-args", func(o, e *bytes.Buffer) int { return runImport(nil, o, e, nil) }, "usage"},
-		{"import-runtime", func(o, e *bytes.Buffer) int { return runImport([]string{"--runtime", "bad", "image"}, o, e, nil) }, "usage"},
+		{"import-help", func(o, e *bytes.Buffer) int { return runImport(context.Background(), []string{"--help"}, o, e) }, ""},
+		{"import-args", func(o, e *bytes.Buffer) int { return runImport(context.Background(), nil, o, e) }, "usage"},
+		{"import-runtime", func(o, e *bytes.Buffer) int { return runImport(context.Background(), []string{"--runtime", "bad", "image"}, o, e) }, "usage"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -201,7 +201,7 @@ func TestReadOnlyCommandsRejectMalformedRequests(t *testing.T) {
 
 func TestContainerRuntimeFailureIsMachineClassified(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := runContainer([]string{"service:local"}, &stdout, &stderr,
+	code := runContainer(context.Background(), []string{"service:local"}, &stdout, &stderr,
 		func(string, []string, io.Reader, io.Writer, io.Writer) error {
 			return errors.New("runtime unavailable")
 		})

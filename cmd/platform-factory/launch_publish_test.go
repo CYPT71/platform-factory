@@ -33,14 +33,11 @@ func TestLaunchPublishCompletesNativeProductionLifecycle(t *testing.T) {
 	}
 	t.Cleanup(func() { pushOCIArtifact = previousArtifact })
 
+	pointBothRuntimeSocketsAtFakeEngine(t)
 	var runtimeCalls int
-	containerExecute := func(_ string, args []string, stdin io.Reader, _, _ io.Writer) error {
+	containerExecute := func(_ string, args []string, _ io.Reader, _, _ io.Writer) error {
 		if len(args) > 0 && args[0] == "run" {
 			runtimeCalls++
-		}
-		if len(args) > 0 && args[0] == "load" {
-			_, err := io.Copy(io.Discard, stdin)
-			return err
 		}
 		return nil
 	}

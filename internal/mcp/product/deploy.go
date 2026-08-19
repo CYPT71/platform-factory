@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 type deployArguments struct {
@@ -29,6 +31,7 @@ type deployArguments struct {
 	DryRun        bool     `json:"dry_run"`
 	Yes           bool     `json:"yes"`
 	ExtraArgs     []string `json:"extra_args"`
+	ProjectRoot   string   `json:"project_root"`
 }
 
 // DeployToolHandler returns the pf_deploy handler: `platform-factory
@@ -41,21 +44,25 @@ func DeployToolHandler(repoRoot string) func(context.Context, json.RawMessage) (
 		var a deployArguments
 		if len(arguments) > 0 && string(arguments) != "{}" {
 			if err := json.Unmarshal(arguments, &a); err != nil {
-				return "", err
+				return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 			}
 		}
 		if err := validExtraArgs(a.ExtraArgs); err != nil {
 			return "", err
 		}
-		reports, err := scopedRelative(repoRoot, a.Reports)
+		root, err := resolveProjectRoot(repoRoot, a.ProjectRoot)
 		if err != nil {
 			return "", err
 		}
-		policy, err := scopedRelative(repoRoot, a.Policy)
+		reports, err := scopedRelative(root, a.Reports)
 		if err != nil {
 			return "", err
 		}
-		evidence, err := scopedRelative(repoRoot, a.Evidence)
+		policy, err := scopedRelative(root, a.Policy)
+		if err != nil {
+			return "", err
+		}
+		evidence, err := scopedRelative(root, a.Evidence)
 		if err != nil {
 			return "", err
 		}
@@ -96,7 +103,7 @@ func DeployToolHandler(repoRoot string) func(context.Context, json.RawMessage) (
 			args = append(args, a.Image)
 		}
 
-		result, err := run(ctx, repoRoot, "deploy", args)
+		result, err := run(ctx, root, "deploy", args)
 		if err != nil {
 			return "", err
 		}

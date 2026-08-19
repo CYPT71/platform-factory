@@ -1,0 +1,19 @@
+{
+  "api_version": "platform-factory.dev/plugin-manifest/v1",
+  "name": "kubernetes",
+  "version": "1.0.0",
+  "family": "deployment",
+  "capabilities": [
+    "deployment.apply",
+    "deployment.observe",
+    "deployment.rollback"
+  ],
+  "permissions": {
+    "network": ["kubernetes-api"],
+    "filesystem": [],
+    "secrets": ["kubeconfig"]
+  },
+  "platforms": ["linux/amd64"],
+  "executable": "platform-factory-kubernetes",
+  "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

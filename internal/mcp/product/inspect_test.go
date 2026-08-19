@@ -3,6 +3,7 @@ package product
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -55,6 +56,35 @@ func TestStatusToolHandlerAppendsDirectoryAndFormat(t *testing.T) {
 	want := []string{"--format", "text", "proj"}
 	if !reflect.DeepEqual(result.Args, want) {
 		t.Fatalf("args = %v\nwant  %v", result.Args, want)
+	}
+}
+
+// TestStatusToolHandlerHonorsProjectRootOverride is F3's core assertion
+// for pf_status: project_root, not the server's own repoRoot, becomes the
+// subprocess's working directory when supplied.
+func TestStatusToolHandlerHonorsProjectRootOverride(t *testing.T) {
+	withHelperProcess(t, 0)
+	repoRoot := t.TempDir()
+	independentProject := t.TempDir()
+	payload := fmt.Sprintf(`{"project_root":%q}`, independentProject)
+	out, err := StatusToolHandler(repoRoot)(context.Background(), json.RawMessage(payload))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result Result
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	gotCwd := cwdFromStdout(t, result.Stdout)
+	if evalSymlinksOrFatal(t, gotCwd) != evalSymlinksOrFatal(t, independentProject) {
+		t.Fatalf("subprocess ran in %q, want %q", gotCwd, independentProject)
+	}
+}
+
+func TestStatusToolHandlerRejectsARelativeProjectRoot(t *testing.T) {
+	_, err := StatusToolHandler(t.TempDir())(context.Background(), json.RawMessage(`{"project_root":"relative/path"}`))
+	if err == nil {
+		t.Fatal("expected an error for a relative project_root")
 	}
 }
 
@@ -152,6 +182,28 @@ func TestDetectToolHandlerBuildsArgsWithAcceptAmbiguousAndFormat(t *testing.T) {
 	}
 }
 
+// TestDetectToolHandlerHonorsProjectRootOverride is F3's core assertion
+// for pf_detect: project_root, not the server's own repoRoot, becomes the
+// subprocess's working directory when supplied.
+func TestDetectToolHandlerHonorsProjectRootOverride(t *testing.T) {
+	withHelperProcess(t, 0)
+	repoRoot := t.TempDir()
+	independentProject := t.TempDir()
+	payload := fmt.Sprintf(`{"path":"proj","project_root":%q}`, independentProject)
+	out, err := DetectToolHandler(repoRoot)(context.Background(), json.RawMessage(payload))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result Result
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	gotCwd := cwdFromStdout(t, result.Stdout)
+	if evalSymlinksOrFatal(t, gotCwd) != evalSymlinksOrFatal(t, independentProject) {
+		t.Fatalf("subprocess ran in %q, want %q", gotCwd, independentProject)
+	}
+}
+
 func TestVerifyToolHandlerRejectsMalformedJSON(t *testing.T) {
 	_, err := VerifyToolHandler(t.TempDir())(context.Background(), json.RawMessage(`{not json`))
 	if err == nil {
@@ -190,6 +242,36 @@ func TestVerifyToolHandlerBuildsArgsAndDefaultsFormat(t *testing.T) {
 // shared layoutToolHandler's other test paths above never exercised
 // (VerifyToolHandler and InspectToolHandler are two distinct wrappers
 // around the same private helper, each wiring a different subcommand).
+// TestVerifyToolHandlerHonorsProjectRootOverride is F3's core assertion
+// for layoutToolHandler (shared by pf_verify/pf_inspect): project_root,
+// not the server's own repoRoot, becomes the subprocess's working
+// directory when supplied.
+func TestVerifyToolHandlerHonorsProjectRootOverride(t *testing.T) {
+	withHelperProcess(t, 0)
+	repoRoot := t.TempDir()
+	independentProject := t.TempDir()
+	payload := fmt.Sprintf(`{"layout":"oci","project_root":%q}`, independentProject)
+	out, err := VerifyToolHandler(repoRoot)(context.Background(), json.RawMessage(payload))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result Result
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatal(err)
+	}
+	gotCwd := cwdFromStdout(t, result.Stdout)
+	if evalSymlinksOrFatal(t, gotCwd) != evalSymlinksOrFatal(t, independentProject) {
+		t.Fatalf("subprocess ran in %q, want %q", gotCwd, independentProject)
+	}
+}
+
+func TestVerifyToolHandlerRejectsARelativeProjectRoot(t *testing.T) {
+	_, err := VerifyToolHandler(t.TempDir())(context.Background(), json.RawMessage(`{"layout":"oci","project_root":"relative/path"}`))
+	if err == nil {
+		t.Fatal("expected an error for a relative project_root")
+	}
+}
+
 func TestInspectToolHandlerBuildsArgs(t *testing.T) {
 	withHelperProcess(t, 0)
 	repoRoot := t.TempDir()

@@ -10,7 +10,26 @@ import (
 	"path/filepath"
 
 	"github.com/CYPT71/platform-factory/internal/mcp"
+	"github.com/CYPT71/platform-factory/internal/mcp/plugins"
+	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
+
+// mcpLanguagePluginBackend binds internal/mcp/plugins.LanguagePluginBackend
+// to the real sdk/langplugin registry - internal/mcp cannot import
+// sdk/langplugin itself (see internal/mcp/plugins/load.go's doc comment),
+// so this cmd-layer glue, like resolveLoadedPlugin in
+// cmd/platform-factory/language_plugin.go, is the one place that binds
+// the two together.
+func mcpLanguagePluginBackend() plugins.LanguagePluginBackend {
+	return plugins.LanguagePluginBackend{
+		Load: langplugin.Load,
+		Inspect: func(binary, root string) error {
+			_, err := langplugin.RunInspection(binary, root)
+			return err
+		},
+		Unload: langplugin.Unload,
+	}
+}
 
 func runMCP(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
@@ -64,7 +83,7 @@ func runMCPServe(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	server := mcp.NewPlatformFactoryServer(repoRoot, version)
+	server := mcp.NewPlatformFactoryServer(repoRoot, version, mcpLanguagePluginBackend())
 	// stdout carries only MCP protocol messages; every diagnostic goes to
 	// stderr, per the transport's own requirement.
 	fmt.Fprintf(stderr, "pf-mcp: serving stdio for repository %s\n", repoRoot)

@@ -20,6 +20,7 @@ import (
 	"github.com/CYPT71/platform-factory/internal/registry"
 	"github.com/CYPT71/platform-factory/internal/workloadstate"
 	"github.com/CYPT71/platform-factory/oci"
+	api "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 // freshOperationJournal points operationJournalFor (and, since runPublish
@@ -297,7 +298,7 @@ func TestPublishDeployRollbackHandleHelpFlag(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := runRollback([]string{"--help"}, &stdout, &stderr, nil); code != 0 {
+	if code := runRollback(context.Background(), []string{"--help"}, &stdout, &stderr, nil); code != 0 {
 		t.Fatalf("rollback --help code=%d stderr=%s", code, stderr.String())
 	}
 }
@@ -852,43 +853,166 @@ func TestRunPublishRejectsIncompleteAutomaticReleaseBundle(t *testing.T) {
 	}
 }
 
-func TestRunDeployAndRollbackCommands(t *testing.T) {
-	freshOperationJournal(t)
-	var calls [][]string
-	execute := func(name string, args []string, stdin io.Reader, _, _ io.Writer) error {
-		call := append([]string{name}, args...)
-		calls = append(calls, call)
-		if args[0] == "apply" && stdin == nil {
-			t.Fatal("apply has no manifest")
+// TestDeployToClusterAppliesThenObservesPerWorkload drives
+// deployToCluster directly against a stub deployment plugin - the same
+// separation TestDispatchKubeVirtRoutesMutatingActionsThroughIdempotency
+// (main_test.go) already uses for dispatchKubeVirt - covering what a
+// real (non-dry-run) `pf deploy` cannot exercise without a live cluster:
+// apply is a mutating CallWithIdempotency (crash-safe replay), the
+// post-apply observation is a plain read-only Call, and which
+// observation Kind/ResourceType gets requested depends on
+// selectedWorkload exactly the way the old kubectl
+// wait/get-cronjob/rollout-status choice did.
+func TestDeployToClusterAppliesThenObservesPerWorkload(t *testing.T) {
+	for _, test := range []struct {
+		workload         string
+		wantKind         string
+		wantResourceType string
+	}{
+		{"job", "wait-job", ""},
+		{"cronjob", "get-cronjob", ""},
+		{"service", "rollout-status", "deployment"},
+		{"statefulset", "rollout-status", "statefulset"},
+		{"daemonset", "rollout-status", "daemonset"},
+	} {
+		stub := &stubDeploymentPlugin{
+			capabilities:  allDeploymentCapabilities(),
+			observeResult: api.DeploymentObserveResult{Output: "ready", Ready: true},
 		}
+		host := &pluginHost{clients: []pluginClient{stub}}
+		manifest := []byte(`{"kind":"Deployment"}`)
+		output, err := deployToCluster(context.Background(), host, manifest, test.workload, "api", "prod", "ghcr.io/example/api@sha256:"+strings.Repeat("b", 64), "2m")
+		if err != nil {
+			t.Fatalf("workload=%s err=%v", test.workload, err)
+		}
+		if output != "ready" {
+			t.Fatalf("workload=%s output=%q", test.workload, output)
+		}
+		wantCalls := []string{
+			"idempotent:v1." + api.CapabilityDeploymentApply + ":deploy-apply-" + string(cliOperationID("deploy-apply", "prod", "api", "ghcr.io/example/api@sha256:"+strings.Repeat("b", 64))[len("deploy-apply-"):]),
+			"call:v1." + api.CapabilityDeploymentObserve,
+		}
+		if !reflect.DeepEqual(stub.calls, wantCalls) {
+			t.Fatalf("workload=%s calls=%v want=%v", test.workload, stub.calls, wantCalls)
+		}
+		var observeParams api.DeploymentObserveParams
+		if err := json.Unmarshal(stub.lastParams["v1."+api.CapabilityDeploymentObserve], &observeParams); err != nil {
+			t.Fatal(err)
+		}
+		if observeParams.Kind != test.wantKind || observeParams.ResourceType != test.wantResourceType {
+			t.Fatalf("workload=%s observeParams=%+v", test.workload, observeParams)
+		}
+		var applyParams api.DeploymentApplyParams
+		if err := json.Unmarshal(stub.lastParams["v1."+api.CapabilityDeploymentApply], &applyParams); err != nil {
+			t.Fatal(err)
+		}
+		if string(applyParams.Manifest) != string(manifest) {
+			t.Fatalf("workload=%s manifest=%s", test.workload, applyParams.Manifest)
+		}
+	}
+}
+
+func TestDeployToClusterSurfacesMissingCapabilitiesAndErrors(t *testing.T) {
+	empty := &pluginHost{}
+	if _, err := deployToCluster(context.Background(), empty, nil, "service", "api", "prod", "image@sha256:x", "2m"); err == nil ||
+		!strings.Contains(err.Error(), api.CapabilityDeploymentApply) {
+		t.Fatalf("err=%v", err)
+	}
+
+	applyOnly := &pluginHost{clients: []pluginClient{&stubDeploymentPlugin{capabilities: []string{api.CapabilityDeploymentApply}}}}
+	if _, err := deployToCluster(context.Background(), applyOnly, nil, "service", "api", "prod", "image@sha256:x", "2m"); err == nil ||
+		!strings.Contains(err.Error(), api.CapabilityDeploymentObserve) {
+		t.Fatalf("err=%v", err)
+	}
+
+	failingApply := &pluginHost{clients: []pluginClient{&stubDeploymentPlugin{capabilities: allDeploymentCapabilities(), err: errors.New("apply refused")}}}
+	if _, err := deployToCluster(context.Background(), failingApply, nil, "service", "api", "prod", "image@sha256:x", "2m"); err == nil ||
+		!strings.Contains(err.Error(), "apply refused") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestRollbackClusterUndoesThenObservesRolloutStatus drives
+// rollbackCluster directly against a stub deployment plugin: the undo
+// itself is a mutating CallWithIdempotency, and the follow-up rollout
+// status wait (equivalent to the old `kubectl rollout undo` + `kubectl
+// rollout status` pair) is a plain read-only Call against the
+// Deployment resource type.
+func TestRollbackClusterUndoesThenObservesRolloutStatus(t *testing.T) {
+	stub := &stubDeploymentPlugin{
+		capabilities:  allDeploymentCapabilities(),
+		observeResult: api.DeploymentObserveResult{Output: "deployment \"api\" successfully rolled out", Ready: true},
+	}
+	host := &pluginHost{clients: []pluginClient{stub}}
+	output, err := rollbackCluster(context.Background(), host, "prod", "api", 2, "2m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output != "deployment \"api\" successfully rolled out" {
+		t.Fatalf("output=%q", output)
+	}
+	wantOperationID := cliOperationID("rollback", "prod", "api", "2")
+	wantCalls := []string{
+		"idempotent:v1." + api.CapabilityDeploymentRollback + ":" + string(wantOperationID),
+		"call:v1." + api.CapabilityDeploymentObserve,
+	}
+	if !reflect.DeepEqual(stub.calls, wantCalls) {
+		t.Fatalf("calls=%v want=%v", stub.calls, wantCalls)
+	}
+	var rollbackParams api.DeploymentRollbackParams
+	if err := json.Unmarshal(stub.lastParams["v1."+api.CapabilityDeploymentRollback], &rollbackParams); err != nil {
+		t.Fatal(err)
+	}
+	if rollbackParams.Namespace != "prod" || rollbackParams.Name != "api" || rollbackParams.ToRevision != 2 {
+		t.Fatalf("rollbackParams=%+v", rollbackParams)
+	}
+	var observeParams api.DeploymentObserveParams
+	if err := json.Unmarshal(stub.lastParams["v1."+api.CapabilityDeploymentObserve], &observeParams); err != nil {
+		t.Fatal(err)
+	}
+	if observeParams.Kind != "rollout-status" || observeParams.ResourceType != "deployment" || observeParams.Name != "api" {
+		t.Fatalf("observeParams=%+v", observeParams)
+	}
+}
+
+func TestRollbackClusterSurfacesMissingCapabilitiesAndErrors(t *testing.T) {
+	empty := &pluginHost{}
+	if _, err := rollbackCluster(context.Background(), empty, "prod", "api", 0, "2m"); err == nil ||
+		!strings.Contains(err.Error(), api.CapabilityDeploymentRollback) {
+		t.Fatalf("err=%v", err)
+	}
+	failing := &pluginHost{clients: []pluginClient{&stubDeploymentPlugin{capabilities: allDeploymentCapabilities(), err: errors.New("rollback refused")}}}
+	if _, err := rollbackCluster(context.Background(), failing, "prod", "api", 0, "2m"); err == nil ||
+		!strings.Contains(err.Error(), "rollback refused") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestRunDeployAndRollbackWithoutAConfiguredPluginFailCleanly proves the
+// CLI wiring: a real (non-dry-run) deploy/rollback now attempts to
+// dispatch through the deployment plugin rather than shelling to
+// kubectl, so without --plugin-dir pointing at one, both fail closed
+// with a clear "no installed plugin" message instead of silently
+// invoking a container-runtime exec function that no longer does
+// anything for this path. execute is asserted never called: it is
+// retained on the signature only for CLI-boundary stability (see
+// runDeploy/runRollback's own doc comments).
+func TestRunDeployAndRollbackWithoutAConfiguredPluginFailCleanly(t *testing.T) {
+	freshOperationJournal(t)
+	execute := func(string, []string, io.Reader, io.Writer, io.Writer) error {
+		t.Fatal("execute must not be called; Kubernetes operations go through the deployment plugin now")
 		return nil
 	}
 	var stdout, stderr bytes.Buffer
 	image := "ghcr.io/example/api@sha256:" + strings.Repeat("b", 64)
-	reports := filepath.Join(t.TempDir(), "deploy-reports")
-	if code := runDeploy(context.Background(), []string{"--yes", "--reports", reports, "--name", "api", "--namespace", "prod", image}, &stdout, &stderr, execute); code != 0 {
+	if code := runDeploy(context.Background(), []string{"--yes", "--name", "api", "--namespace", "prod", image}, &stdout, &stderr, execute); code != 1 ||
+		!strings.Contains(stderr.String(), "no installed plugin provides "+api.CapabilityDeploymentApply) {
 		t.Fatalf("deploy code=%d stderr=%s", code, stderr.String())
 	}
-	if code := runRollback([]string{"--yes", "--namespace", "prod", "--to-revision", "2", "api"}, &stdout, &stderr, execute); code != 0 {
+	stderr.Reset()
+	if code := runRollback(context.Background(), []string{"--yes", "--namespace", "prod", "--to-revision", "2", "api"}, &stdout, &stderr, execute); code != 1 ||
+		!strings.Contains(stderr.String(), "no installed plugin provides "+api.CapabilityDeploymentRollback) {
 		t.Fatalf("rollback code=%d stderr=%s", code, stderr.String())
-	}
-	want := [][]string{
-		{"kubectl", "apply", "-f", "-"},
-		{"kubectl", "rollout", "status", "deployment/api", "--namespace", "prod", "--timeout", "2m"},
-		{"kubectl", "rollout", "undo", "deployment/api", "--namespace", "prod", "--to-revision=2"},
-		{"kubectl", "rollout", "status", "deployment/api", "--namespace", "prod", "--timeout", "2m"},
-	}
-	if !reflect.DeepEqual(calls, want) {
-		t.Fatalf("calls=%v want=%v", calls, want)
-	}
-	metrics, err := os.ReadFile(filepath.Join(reports, "metrics.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{`"operation": "deploy"`, `"operations": 2`, `"namespace": "prod"`, strings.Repeat("b", 64)} {
-		if !strings.Contains(string(metrics), want) {
-			t.Fatalf("deployment metrics missing %s: %s", want, metrics)
-		}
 	}
 }
 
@@ -914,21 +1038,20 @@ func TestLifecycleMetricsDryRunsWriteNothing(t *testing.T) {
 	}
 }
 
-func TestDeploymentSuccessIsNotReclassifiedWhenMetricsFail(t *testing.T) {
-	freshOperationJournal(t)
-	root := t.TempDir()
-	blocked := filepath.Join(root, "not-a-directory")
-	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var stdout, stderr bytes.Buffer
-	image := "registry.example/service@sha256:" + strings.Repeat("d", 64)
-	code := runDeploy(context.Background(), []string{"--yes", "--reports", blocked, image}, &stdout, &stderr,
-		func(string, []string, io.Reader, io.Writer, io.Writer) error { return nil })
-	if code != 0 || !strings.Contains(stderr.String(), "deployment succeeded but metrics could not be written") {
-		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
-	}
-}
+// A CLI-level "successful non-dry-run deploy" test (this package used to
+// have TestDeploymentSuccessIsNotReclassifiedWhenMetricsFail here,
+// proving a metrics-write failure after a successful deploy is reported
+// as a warning rather than reclassifying the deploy itself as failed)
+// cannot be driven the same way anymore: reaching runDeploy's success
+// path now requires a real deployment plugin talking to a live cluster
+// (see deployToCluster), not a stubbed containerExecutor - see
+// TestDeployToClusterAppliesThenObservesPerWorkload above for the
+// unit-level coverage of deployToCluster's own logic, and this file's
+// accompanying report for why the CLI-boundary "success" path itself is
+// untestable without a live cluster in this environment. The metrics
+// code path (deployOperationCount is unconditional; the write failure is
+// only ever logged as a warning, never turned into a non-zero exit code)
+// is unchanged by this refactor.
 
 func TestLifecycleRequiresConfirmationAndValidNames(t *testing.T) {
 	layoutName := buildPublishLayout(t, "example/service", "v1")
@@ -945,7 +1068,7 @@ func TestLifecycleRequiresConfirmationAndValidNames(t *testing.T) {
 	if code := runDeploy(context.Background(), []string{"--name", "Invalid_Name", image}, &stdout, &stderr, nil); code != 2 {
 		t.Fatalf("invalid deployment name code=%d", code)
 	}
-	if code := runRollback([]string{"api"}, &stdout, &stderr, nil); code != 2 {
+	if code := runRollback(context.Background(), []string{"api"}, &stdout, &stderr, nil); code != 2 {
 		t.Fatalf("unconfirmed rollback code=%d", code)
 	}
 	for _, invalid := range []string{"service:latest", "service@sha256:short", "service@sha256:" + strings.Repeat("g", 64)} {
@@ -976,28 +1099,22 @@ func TestCompletionAndCommandFormatting(t *testing.T) {
 	}
 }
 
-type lifecycleExitError struct{ code int }
-
-func (errorValue lifecycleExitError) Error() string { return "command failed" }
-func (errorValue lifecycleExitError) ExitCode() int { return errorValue.code }
-
 func TestLifecycleDryRunsErrorsAndDispatch(t *testing.T) {
 	freshOperationJournal(t)
 	var stdout, stderr bytes.Buffer
-	if code := runRollback([]string{"--dry-run", "--to-revision", "3", "api"}, &stdout, &stderr, nil); code != 0 ||
+	if code := runRollback(context.Background(), []string{"--dry-run", "--to-revision", "3", "api"}, &stdout, &stderr, nil); code != 0 ||
 		!strings.Contains(stdout.String(), "--to-revision=3") {
 		t.Fatalf("rollback dry-run code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()
-	failing := func(string, []string, io.Reader, io.Writer, io.Writer) error {
-		return lifecycleExitError{code: 17}
-	}
+	// A real (non-dry-run) deploy no longer shells to kubectl through
+	// execute at all (see deployToCluster): TestRunDeployAndRollbackWithoutAConfiguredPluginFailCleanly
+	// covers that failure mode (code 1, "no installed plugin ...") in
+	// full; this test keeps only the --yes gate itself, which is
+	// unaffected by the plugin rewrite.
 	image := "registry.example/api@sha256:" + strings.Repeat("c", 64)
-	if code := runDeploy(context.Background(), []string{"--yes", image}, &stdout, &stderr, failing); code != 17 {
-		t.Fatalf("exit code=%d", code)
-	}
-	if code := runDeploy(context.Background(), []string{image}, &stdout, &stderr, failing); code != 2 {
+	if code := runDeploy(context.Background(), []string{image}, &stdout, &stderr, nil); code != 2 {
 		t.Fatalf("deploy without --yes code=%d", code)
 	}
 	for _, args := range [][]string{
@@ -1022,7 +1139,7 @@ func TestLifecycleDryRunsErrorsAndDispatch(t *testing.T) {
 	// Rollback without a raw deployment name is now the project-native form;
 	// outside a project it reports the missing deployed identity as a product
 	// precondition rather than a syntax error.
-	if code := runRollback(nil, &stdout, &stderr, nil); code != 1 {
+	if code := runRollback(context.Background(), nil, &stdout, &stderr, nil); code != 1 {
 		t.Fatalf("project rollback without state code=%d", code)
 	}
 }
@@ -1176,79 +1293,6 @@ func TestManifestBuildersProduceValidDeterministicKubernetesResources(t *testing
 	if items := decodedList["items"].([]any); len(items) != 2 {
 		t.Fatalf("combined items=%d, want 2", len(items))
 	}
-}
-
-// TestRunClaimedOperationsCoversEveryOutcome drives runClaimedOperations
-// directly (rather than through runDeploy/runRollback) to reach branches
-// those higher-level callers' own tests don't: an already-completed claim
-// short-circuiting as success, a previously-failed claim reported as an
-// error, and the journal's Fail path when the wrapped operation itself
-// fails.
-func TestRunClaimedOperationsCoversEveryOutcome(t *testing.T) {
-	succeed := func(string, []string, io.Reader, io.Writer, io.Writer) error { return nil }
-	fail := func(string, []string, io.Reader, io.Writer, io.Writer) error { return errors.New("boom") }
-	op := []externalOperation{{name: "kubectl", args: []string{"apply"}}}
-
-	t.Run("dry run bypasses the journal entirely", func(t *testing.T) {
-		var stdout, stderr bytes.Buffer
-		code := runClaimedOperations("deploy", "deploy", []string{"ns", "name"}, op, true, &stdout, &stderr, succeed)
-		if code != 0 || !strings.Contains(stdout.String(), "kubectl apply") {
-			t.Fatalf("code=%d stdout=%s", code, stdout.String())
-		}
-	})
-
-	t.Run("first claim executes and completes", func(t *testing.T) {
-		journal := t.TempDir()
-		previous := operationJournalFor
-		operationJournalFor = func() (core.OperationJournal, error) { return idempotency.NewFileJournal(journal) }
-		t.Cleanup(func() { operationJournalFor = previous })
-
-		var stdout, stderr bytes.Buffer
-		code := runClaimedOperations("deploy", "deploy", []string{"ns", "name"}, op, false, &stdout, &stderr, succeed)
-		if code != 0 {
-			t.Fatalf("code=%d stderr=%s", code, stderr.String())
-		}
-
-		stdout.Reset()
-		stderr.Reset()
-		code = runClaimedOperations("deploy", "deploy", []string{"ns", "name"}, op, false, &stdout, &stderr, succeed)
-		if code != 0 || !strings.Contains(stderr.String(), "already applied") {
-			t.Fatalf("repeat claim: code=%d stderr=%s", code, stderr.String())
-		}
-	})
-
-	t.Run("failed operation is journaled as failed and reported on retry", func(t *testing.T) {
-		journal := t.TempDir()
-		previous := operationJournalFor
-		operationJournalFor = func() (core.OperationJournal, error) { return idempotency.NewFileJournal(journal) }
-		t.Cleanup(func() { operationJournalFor = previous })
-
-		var stdout, stderr bytes.Buffer
-		code := runClaimedOperations("deploy", "deploy", []string{"ns", "name"}, op, false, &stdout, &stderr, fail)
-		if code != 1 || !strings.Contains(stderr.String(), "boom") {
-			t.Fatalf("first (failing) claim: code=%d stderr=%s", code, stderr.String())
-		}
-
-		stdout.Reset()
-		stderr.Reset()
-		code = runClaimedOperations("deploy", "deploy", []string{"ns", "name"}, op, false, &stdout, &stderr, succeed)
-		if code != 1 || !strings.Contains(stderr.String(), "previously failed") {
-			t.Fatalf("retry after failure: code=%d stderr=%s", code, stderr.String())
-		}
-	})
-
-	t.Run("journal open failure is reported", func(t *testing.T) {
-		sentinel := errors.New("journal store unavailable")
-		previous := operationJournalFor
-		operationJournalFor = func() (core.OperationJournal, error) { return nil, sentinel }
-		t.Cleanup(func() { operationJournalFor = previous })
-
-		var stdout, stderr bytes.Buffer
-		code := runClaimedOperations("deploy", "deploy", []string{"ns", "name"}, op, false, &stdout, &stderr, succeed)
-		if code != 1 || !strings.Contains(stderr.String(), sentinel.Error()) {
-			t.Fatalf("code=%d stderr=%s", code, stderr.String())
-		}
-	})
 }
 
 // failingStore is a minimal workloadstate.Store whose Lookup and Save

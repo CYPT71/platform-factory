@@ -3,12 +3,14 @@ package product
 import (
 	"context"
 	"encoding/json"
-	"errors"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 type statusArguments struct {
-	Directory string `json:"directory"`
-	Format    string `json:"format"`
+	Directory   string `json:"directory"`
+	Format      string `json:"format"`
+	ProjectRoot string `json:"project_root"`
 }
 
 // StatusToolHandler returns the pf_status handler: `platform-factory
@@ -19,10 +21,14 @@ func StatusToolHandler(repoRoot string) func(context.Context, json.RawMessage) (
 		var a statusArguments
 		if len(arguments) > 0 && string(arguments) != "{}" {
 			if err := json.Unmarshal(arguments, &a); err != nil {
-				return "", err
+				return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 			}
 		}
-		directory, err := scopedRelative(repoRoot, a.Directory)
+		root, err := resolveProjectRoot(repoRoot, a.ProjectRoot)
+		if err != nil {
+			return "", err
+		}
+		directory, err := scopedRelative(root, a.Directory)
 		if err != nil {
 			return "", err
 		}
@@ -34,7 +40,7 @@ func StatusToolHandler(repoRoot string) func(context.Context, json.RawMessage) (
 		if directory != "" {
 			args = append(args, directory)
 		}
-		result, err := run(ctx, repoRoot, "status", args)
+		result, err := run(ctx, root, "status", args)
 		if err != nil {
 			return "", err
 		}
@@ -43,7 +49,8 @@ func StatusToolHandler(repoRoot string) func(context.Context, json.RawMessage) (
 }
 
 type doctorArguments struct {
-	Scope string `json:"scope"`
+	Scope       string `json:"scope"`
+	ProjectRoot string `json:"project_root"`
 }
 
 // DoctorToolHandler returns the pf_doctor handler: `platform-factory
@@ -53,8 +60,12 @@ func DoctorToolHandler(repoRoot string) func(context.Context, json.RawMessage) (
 		var a doctorArguments
 		if len(arguments) > 0 && string(arguments) != "{}" {
 			if err := json.Unmarshal(arguments, &a); err != nil {
-				return "", err
+				return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 			}
+		}
+		root, err := resolveProjectRoot(repoRoot, a.ProjectRoot)
+		if err != nil {
+			return "", err
 		}
 		args := []string{"--json"}
 		switch a.Scope {
@@ -64,7 +75,7 @@ func DoctorToolHandler(repoRoot string) func(context.Context, json.RawMessage) (
 		default:
 			return "", errInvalidScope
 		}
-		result, err := run(ctx, repoRoot, "doctor", args)
+		result, err := run(ctx, root, "doctor", args)
 		if err != nil {
 			return "", err
 		}
@@ -72,12 +83,13 @@ func DoctorToolHandler(repoRoot string) func(context.Context, json.RawMessage) (
 	}
 }
 
-var errInvalidScope = errors.New("scope must be empty, all, build, publish, or deploy")
+var errInvalidScope = toolerror.New(toolerror.ErrInvalidArgument, "scope must be empty, all, build, publish, or deploy")
 
 type detectArguments struct {
 	Path            string `json:"path"`
 	Format          string `json:"format"`
 	AcceptAmbiguous bool   `json:"accept_ambiguous"`
+	ProjectRoot     string `json:"project_root"`
 }
 
 // DetectToolHandler returns the pf_detect handler: `platform-factory
@@ -86,14 +98,18 @@ func DetectToolHandler(repoRoot string) func(context.Context, json.RawMessage) (
 	return func(ctx context.Context, arguments json.RawMessage) (string, error) {
 		var a detectArguments
 		if err := json.Unmarshal(arguments, &a); err != nil {
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
+		}
+		root, err := resolveProjectRoot(repoRoot, a.ProjectRoot)
+		if err != nil {
 			return "", err
 		}
-		path, err := scopedRelative(repoRoot, a.Path)
+		path, err := scopedRelative(root, a.Path)
 		if err != nil {
 			return "", err
 		}
 		if path == "" {
-			return "", errors.New("path is required")
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "path is required")
 		}
 		format := a.Format
 		if format == "" {
@@ -102,7 +118,7 @@ func DetectToolHandler(repoRoot string) func(context.Context, json.RawMessage) (
 		args := []string{"--format", format}
 		args = boolFlag(args, "--accept-ambiguous", a.AcceptAmbiguous)
 		args = append(args, path)
-		result, err := run(ctx, repoRoot, "detect", args)
+		result, err := run(ctx, root, "detect", args)
 		if err != nil {
 			return "", err
 		}
@@ -111,8 +127,9 @@ func DetectToolHandler(repoRoot string) func(context.Context, json.RawMessage) (
 }
 
 type layoutArguments struct {
-	Layout string `json:"layout"`
-	Format string `json:"format"`
+	Layout      string `json:"layout"`
+	Format      string `json:"format"`
+	ProjectRoot string `json:"project_root"`
 }
 
 // VerifyToolHandler returns the pf_verify handler: `platform-factory
@@ -131,21 +148,25 @@ func layoutToolHandler(repoRoot, subcommand string) func(context.Context, json.R
 	return func(ctx context.Context, arguments json.RawMessage) (string, error) {
 		var a layoutArguments
 		if err := json.Unmarshal(arguments, &a); err != nil {
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
+		}
+		root, err := resolveProjectRoot(repoRoot, a.ProjectRoot)
+		if err != nil {
 			return "", err
 		}
-		layout, err := scopedRelative(repoRoot, a.Layout)
+		layout, err := scopedRelative(root, a.Layout)
 		if err != nil {
 			return "", err
 		}
 		if layout == "" {
-			return "", errors.New("layout is required")
+			return "", toolerror.New(toolerror.ErrInvalidArgument, "layout is required")
 		}
 		format := a.Format
 		if format == "" {
 			format = "json"
 		}
 		args := []string{"--format", format, layout}
-		result, err := run(ctx, repoRoot, subcommand, args)
+		result, err := run(ctx, root, subcommand, args)
 		if err != nil {
 			return "", err
 		}
