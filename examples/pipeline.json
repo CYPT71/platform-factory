@@ -5,7 +5,7 @@
     {
       "id": "source",
       "kind": "directory",
-      "source": "examples/hello-pipeline/app",
+      "source": "app",
       "digest": "sha256:4206cff3eb1e62ea0e98f2e40b7df58983cdeb2be405e6068e63fd6df95fe58a"
     }
   ],

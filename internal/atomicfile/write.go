@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 // Write replaces name using a same-directory temporary file. When durable is
@@ -40,12 +39,7 @@ func Write(dir, name string, data []byte, mode os.FileMode, durable bool) error 
 	if err := os.Rename(path, filepath.Join(dir, name)); err != nil {
 		return err
 	}
-	if !durable || runtime.GOOS == "windows" {
-		// Windows has no equivalent of fsync-on-a-directory-fd: a directory
-		// handle opened for read (os.Open, since Windows forbids opening one
-		// for write) cannot be flushed, and FlushFileBuffers on it fails
-		// with access denied. The rename above is already the durable
-		// operation NTFS guarantees; there is nothing further to sync.
+	if !durable {
 		return nil
 	}
 	directory, err := os.Open(dir)
