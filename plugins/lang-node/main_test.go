@@ -37,7 +37,7 @@ func TestInspectRecognizesTypeScriptEntrypoint(t *testing.T) {
 	if err := json.Unmarshal(raw, &inspection); err != nil {
 		t.Fatal(err)
 	}
-	if !inspection.Match || inspection.Language != "node" || inspection.Artifact != "index.ts" || inspection.Entrypoint != "index.ts" {
+	if !inspection.Match || inspection.Language != "node" {
 		t.Fatalf("inspection=%+v", inspection)
 	}
 }

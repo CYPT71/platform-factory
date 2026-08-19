@@ -1,4 +1,4 @@
-// Type definitions for @platform-factory/plugin-sdk.
+// Type definitions for @secure-oci/plugin-sdk.
 // Mirrors Go's sdk/plugin package's typed capability schemas
 // (DetectParams/Result, FreezeParams/Result, PlanParams/Result), so a
 // TypeScript plugin author gets the same compile-time contract a Go

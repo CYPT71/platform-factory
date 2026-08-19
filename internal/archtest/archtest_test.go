@@ -46,18 +46,27 @@ func TestForbiddenReason(t *testing.T) {
 		want   string
 	}{
 		{name: "sdk internal", source: sourceImport{PackageRel: "sdk/client", Path: repositoryModule + "/internal/new-detail"}, want: "sdk packages"},
-		{name: "migration api internal", source: sourceImport{PackageRel: "api/migration/v2", Path: repositoryModule + "/internal/plugin"}, want: "public migration"},
+		{name: "migration api internal", source: sourceImport{PackageRel: "api/migration/v2", Path: repositoryModule + "/internal/plugin"}, want: "public api contracts"},
+		{name: "other api domain internal", source: sourceImport{PackageRel: "api/microvm/v1", Path: repositoryModule + "/internal/microvm"}, want: "public api contracts"},
+		// api/oci/v1 used to be a deliberate exception to this rule (it
+		// bridged to internal/oci, the one domain where the public SDK
+		// performed real work directly). internal/oci moved to the
+		// top-level oci package specifically to remove the need for that
+		// exception - api/oci/v1 importing anything still under internal/
+		// is now forbidden exactly like every other api/* package.
+		{name: "api oci internal now forbidden", source: sourceImport{PackageRel: "api/oci/v1", Path: repositoryModule + "/internal/microvm"}, want: "public api contracts"},
+		{name: "api oci importing the relocated top-level oci package is allowed", source: sourceImport{PackageRel: "api/oci/v1", Path: repositoryModule + "/oci"}},
 		{name: "internal cmd", source: sourceImport{PackageRel: "internal/app/run", Path: repositoryModule + "/cmd/platform-factory"}, want: "internal packages"},
 		{name: "internal api", source: sourceImport{PackageRel: "internal/plugin", Path: repositoryModule + "/api/plugin"}, want: "public api or sdk"},
 		{name: "internal sdk test", source: sourceImport{PackageRel: "internal/plugin", Path: repositoryModule + "/sdk/plugin"}, want: "public api or sdk"},
-		{name: "scheduler infrastructure", source: sourceImport{PackageRel: "internal/scheduler/queue", Path: repositoryModule + "/internal/oci/layout"}, want: "domain packages"},
+		{name: "scheduler infrastructure", source: sourceImport{PackageRel: "internal/scheduler/queue", Path: repositoryModule + "/oci"}, want: "domain packages"},
 		{name: "policy infrastructure", source: sourceImport{PackageRel: "internal/policy", Path: repositoryModule + "/internal/plugin"}, want: "domain packages"},
 		{name: "executor infrastructure", source: sourceImport{PackageRel: "internal/executor/worker", Path: repositoryModule + "/internal/networking"}, want: "domain packages"},
 		{name: "migration domain api", source: sourceImport{PackageRel: "internal/migration", Path: repositoryModule + "/api/migration"}, want: "public api or sdk"},
 		{name: "migration domain sdk", source: sourceImport{PackageRel: "internal/migration/planner", Path: repositoryModule + "/sdk/migration"}, want: "public api or sdk"},
 		{name: "migration domain plugin", source: sourceImport{PackageRel: "internal/migration", Path: repositoryModule + "/internal/plugin"}, want: "standard library"},
 		{name: "migration domain cmd", source: sourceImport{PackageRel: "internal/migration", Path: repositoryModule + "/cmd/platform-factory"}, want: "standard library"},
-		{name: "migration domain infrastructure", source: sourceImport{PackageRel: "internal/migration", Path: repositoryModule + "/internal/oci"}, want: "standard library"},
+		{name: "migration domain infrastructure", source: sourceImport{PackageRel: "internal/migration", Path: repositoryModule + "/internal/layout"}, want: "standard library"},
 		{name: "migration domain third party", source: sourceImport{PackageRel: "internal/migration", Path: "example.com/dependency"}, want: "third-party"},
 		{name: "migration domain core allowed", source: sourceImport{PackageRel: "internal/migration", Path: repositoryModule + "/internal/core"}},
 		{name: "migration domain standard library allowed", source: sourceImport{PackageRel: "internal/migration", Path: "crypto/sha256"}},

@@ -13,7 +13,7 @@ func TestEnvelopeRoundTripAndTamperRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	envelope, err := Sign(store, "release", "release-key", "https://platform-factory.dev/predicate/v1",
+	envelope, err := Sign(store, "release", "release-key", "https://secure-oci.dev/predicate/v1",
 		map[string]string{"subject": "sha256:abc"})
 	if err != nil {
 		t.Fatal(err)

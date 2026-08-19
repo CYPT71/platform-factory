@@ -1,9 +1,9 @@
-// Command platform-factory-zig-plugin is the third-party proof for the plugin
+// Command secure-oci-zig-plugin is the third-party proof for the plugin
 // boundary: a separate Go module that adds support for a language the
-// platform-factory core knows nothing about ("zig"), importing only the
+// secure-oci core knows nothing about ("zig"), importing only the
 // public sdk/plugin SDK. The host discovers it through a signed
 // manifest and consults it for detect and freeze without recompiling
-// platform-factory.
+// secure-oci.
 package main
 
 import (

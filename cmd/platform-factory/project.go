@@ -19,13 +19,16 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/CYPT71/platform-factory/cmd/tui/buildtui"
+	buildapp "github.com/CYPT71/platform-factory/internal/app/build"
+	projectapp "github.com/CYPT71/platform-factory/internal/app/project"
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
 	"github.com/CYPT71/platform-factory/internal/budget"
 	"github.com/CYPT71/platform-factory/internal/detect"
 	"github.com/CYPT71/platform-factory/internal/layout"
 	"github.com/CYPT71/platform-factory/internal/observability"
-	"github.com/CYPT71/platform-factory/internal/oci"
-	"github.com/CYPT71/platform-factory/internal/pipeline"
 	"github.com/CYPT71/platform-factory/internal/project"
+	"github.com/CYPT71/platform-factory/internal/shellquote"
+	"github.com/CYPT71/platform-factory/oci"
 )
 
 type projectExecutor func(name string, args []string, directory string, stdout, stderr io.Writer) error
@@ -93,7 +96,7 @@ func runProjectContext(ctx context.Context, args []string, stdout, stderr io.Wri
 	}
 	var resourceBudget budget.Budget
 	if action == "build" {
-		memory, budgetErr := parseByteLimit(*maxMemory)
+		memory, budgetErr := buildapp.ParseByteLimit(*maxMemory)
 		if budgetErr != nil || *maxWallClock < 0 || *maxCPU < 0 {
 			if budgetErr == nil {
 				budgetErr = errors.New("time budgets cannot be negative")
@@ -249,7 +252,7 @@ func explainProjectAction(loaded project.Loaded, plugins *pluginHost, action str
 		result["commands"] = commands
 		result["writes"] = []string{filepath.Join(".platform-factory", "freeze.lock.json")}
 	case "build":
-		if err := validateBuildCapability(loaded); err != nil {
+		if err := projectapp.ValidateBuildCapability(loaded); err != nil {
 			result["valid"] = false
 			result["blockers"] = []string{err.Error()}
 			data, _ := json.MarshalIndent(result, "", "  ")
@@ -258,127 +261,19 @@ func explainProjectAction(loaded project.Loaded, plugins *pluginHost, action str
 		}
 		result["command"] = append([]string(nil), loaded.Config.BuildCommand...)
 		result["output"] = loaded.Output()
-		result["resource_budget"] = resourceBudgetPlan(resourceBudget)
+		result["resource_budget"] = buildapp.ResourceBudgetPlan(resourceBudget)
 	}
 	data, _ := json.MarshalIndent(result, "", "  ")
 	fmt.Fprintln(stdout, string(data))
 	return 0
 }
 
-// maxRebuildStatFiles bounds projectNeedsRebuild's staleness walk over a
-// bundled directory source (e.g. the project's own tree, or a shared
-// dependency tree) - the same order of magnitude as this codebase's
-// other file-count budgets (internal/layout's maxArchiveFiles). Staleness
-// detection is a development convenience, not a correctness boundary, so
-// once the cap is hit it stops looking rather than walking an arbitrarily
-// large tree on every `pf run`.
-const maxRebuildStatFiles = 10000
-
-// projectNeedsRebuild reports whether loaded's built layout is missing or
-// older than any of its real inputs: the project config itself, the
-// built artifact/runtime binary, and every source ImageFiles() would
-// bundle. It compares against index.json's own mtime rather than the
-// output directory's, since that file is guaranteed to be rewritten by
-// every successful build regardless of what else changed inside the
-// layout tree.
-func projectNeedsRebuild(loaded project.Loaded) (bool, error) {
-	indexInfo, err := os.Stat(filepath.Join(loaded.Output(), "index.json"))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return true, nil
-		}
-		return false, err
-	}
-	builtAt := indexInfo.ModTime()
-
-	binaryName := loaded.Config.Artifact
-	if loaded.Config.Runtime != "" {
-		binaryName = loaded.Config.Runtime
-	}
-	sources := []string{loaded.File, loaded.Resolve(binaryName)}
-	files, err := loaded.ImageFiles()
-	if err != nil {
-		return false, err
-	}
-	for _, file := range files {
-		sources = append(sources, file.Source)
-	}
-
-	remaining := maxRebuildStatFiles
-	for _, source := range sources {
-		stale, err := sourceNewerThan(source, builtAt, &remaining)
-		if err != nil {
-			return false, err
-		}
-		if stale {
-			return true, nil
-		}
-		if remaining <= 0 {
-			break
-		}
-	}
-	return false, nil
-}
-
-// sourceNewerThan reports whether path (a file, or every regular file
-// under a directory) has a modification time after builtAt. A path that
-// no longer exists is not itself a reason to rebuild - the normal build
-// path already reports a clear error for a genuinely missing artifact.
-func sourceNewerThan(path string, builtAt time.Time, remaining *int) (bool, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return false, nil
-	}
-	if !info.IsDir() {
-		*remaining--
-		return info.ModTime().After(builtAt), nil
-	}
-	stale := false
-	walkErr := filepath.WalkDir(path, func(_ string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if *remaining <= 0 {
-			return filepath.SkipAll
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		*remaining--
-		entryInfo, infoErr := entry.Info()
-		if infoErr != nil {
-			return nil
-		}
-		if entryInfo.ModTime().After(builtAt) {
-			stale = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	if walkErr != nil {
-		return false, nil
-	}
-	return stale, nil
-}
-
-// projectRequiresFrozenInputs reports whether loaded's build path
-// checks VerifyFreezeInventory before proceeding - true whenever there
-// are real dependencies to pin (explicit includes/shared deps, or a
-// dependency-management mode other than none/external).
-func projectRequiresFrozenInputs(loaded project.Loaded) bool {
-	if len(loaded.Config.Include) > 0 || len(loaded.Config.SharedDeps) > 0 {
-		return true
-	}
-	dependencies := loaded.Config.DependencyManagement
-	return dependencies != nil && dependencies.Mode != "none" && dependencies.Mode != "external"
-}
-
 // rebuildProjectLayout removes any existing layout at loaded.Output()
-// before building - internal/oci.Build refuses to write into a
+// before building - oci.Build refuses to write into a
 // directory that already exists (a deliberate anti-clobber safety for
 // pf project build's own direct use), so a caller that has already
 // decided a rebuild is warranted (loaded.Output() is missing or, per
-// projectNeedsRebuild, stale) must clear the old one first. Removing a
+// projectapp.NeedsRebuild, stale) must clear the old one first. Removing a
 // path that doesn't exist is a harmless no-op.
 //
 // It also re-freezes automatically when the frozen inventory has gone
@@ -390,7 +285,7 @@ func projectRequiresFrozenInputs(loaded project.Loaded) bool {
 // file and having it just work - the same file that made the freeze
 // stale in the first place is legitimate, not something to fail on.
 func rebuildProjectLayout(ctx context.Context, loaded project.Loaded, plugins *pluginHost, stdout, stderr io.Writer, execute projectExecutor) int {
-	if projectRequiresFrozenInputs(loaded) {
+	if projectapp.RequiresFrozenInputs(loaded) {
 		if err := loaded.VerifyFreezeInventory(); err != nil {
 			if code := freezeProject(loaded, plugins, stdout, stderr, execute); code != 0 {
 				return code
@@ -406,10 +301,10 @@ func rebuildProjectLayout(ctx context.Context, loaded project.Loaded, plugins *p
 }
 
 // runConfiguredProject rebuilds loaded's layout when it is missing or
-// stale (see projectNeedsRebuild), then runs it with the configured
+// stale (see projectapp.NeedsRebuild), then runs it with the configured
 // isolation and runtime.
 func runConfiguredProject(ctx context.Context, loaded project.Loaded, plugins *pluginHost, stdout, stderr io.Writer, execute projectExecutor, containerExecute containerExecutor, microVMExecute microVMExecutor) int {
-	rebuild, err := projectNeedsRebuild(loaded)
+	rebuild, err := projectapp.NeedsRebuild(loaded)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory project run: stat image: %v\n", err)
 		return 1
@@ -439,7 +334,7 @@ func runConfiguredProject(ctx context.Context, loaded project.Loaded, plugins *p
 }
 
 // defaultWatchPollInterval is how often runConfiguredProjectWatch
-// re-checks projectNeedsRebuild while a watched container is running. A
+// re-checks projectapp.NeedsRebuild while a watched container is running. A
 // plain stat-based poll (not an OS file-notification API) matches this
 // repository's preference for minimal external dependencies - no new
 // fsnotify-family dependency, no per-OS watcher backend - and is more
@@ -448,7 +343,7 @@ const defaultWatchPollInterval = time.Second
 
 // runConfiguredProjectWatch is runConfiguredProject's --watch mode: it
 // keeps running loaded's container, rebuilding and restarting it
-// whenever projectNeedsRebuild reports a source file changed, until ctx
+// whenever projectapp.NeedsRebuild reports a source file changed, until ctx
 // is canceled (SIGINT/SIGTERM - see the signal.NotifyContext this is
 // called with) or the container exits on its own. It does not support
 // microvm isolation yet - that backend's start/stop lifecycle isn't
@@ -461,11 +356,11 @@ func runConfiguredProjectWatch(ctx context.Context, loaded project.Loaded, plugi
 		fmt.Fprintln(stderr, "platform-factory project run: --watch does not support microvm isolation yet")
 		return 2
 	}
-	containerName := watchContainerName(loaded)
+	containerName := projectapp.WatchContainerName(loaded)
 	defer stopWatchedContainer(loaded.Config.RuntimeEngine, containerName, containerExecute)
 
 	for {
-		if rebuild, err := projectNeedsRebuild(loaded); err != nil {
+		if rebuild, err := projectapp.NeedsRebuild(loaded); err != nil {
 			fmt.Fprintf(stderr, "platform-factory project run: stat image: %v\n", err)
 			return 1
 		} else if rebuild {
@@ -508,7 +403,7 @@ func runConfiguredProjectWatch(ctx context.Context, loaded project.Loaded, plugi
 	}
 }
 
-// watchForChange polls projectNeedsRebuild every pollInterval and sends
+// watchForChange polls projectapp.NeedsRebuild every pollInterval and sends
 // once when it first reports true, or closes without sending if ctx is
 // canceled first.
 func watchForChange(ctx context.Context, loaded project.Loaded, pollInterval time.Duration) <-chan struct{} {
@@ -522,7 +417,7 @@ func watchForChange(ctx context.Context, loaded project.Loaded, pollInterval tim
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if rebuild, err := projectNeedsRebuild(loaded); err == nil && rebuild {
+				if rebuild, err := projectapp.NeedsRebuild(loaded); err == nil && rebuild {
 					changed <- struct{}{}
 					return
 				}
@@ -539,25 +434,6 @@ func watchForChange(ctx context.Context, loaded project.Loaded, pollInterval tim
 // nothing is running yet.
 func stopWatchedContainer(runtimeName, name string, execute containerExecutor) {
 	_ = execute(runtimeName, []string{"stop", name}, nil, io.Discard, io.Discard)
-}
-
-// watchContainerName derives a stable docker/podman container name from
-// the project directory, so repeated rebuild/restart cycles always
-// replace the same named container rather than accumulating new ones.
-func watchContainerName(loaded project.Loaded) string {
-	var b strings.Builder
-	for _, r := range filepath.Base(loaded.Root) {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('-')
-		}
-	}
-	name := strings.Trim(b.String(), "-")
-	if name == "" {
-		name = "project"
-	}
-	return "pf-watch-" + name
 }
 
 func printProjectUsage(output io.Writer) {
@@ -765,7 +641,7 @@ func freezeProject(loaded project.Loaded, plugins *pluginHost, stdout, stderr io
 			}
 			output = outputFile
 		}
-		fmt.Fprintf(stderr, "platform-factory: freeze: %s\n", formatCommand(step.args[0], step.args[1:]))
+		fmt.Fprintf(stderr, "platform-factory: freeze: %s\n", shellquote.Command(step.args[0], step.args[1:]))
 		commandErr := execute(step.args[0], step.args[1:], loaded.Root, output, stderr)
 		if outputFile != nil {
 			if closeErr := outputFile.Close(); commandErr == nil {
@@ -887,16 +763,16 @@ func buildProjectContext(ctx context.Context, loaded project.Loaded, stdout, std
 
 func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, stdout, stderr io.Writer, execute projectExecutor, resourceBudget budget.Budget) (string, int) {
 	startedAt := time.Now()
-	if err := validateBuildCapability(loaded); err != nil {
+	if err := projectapp.ValidateBuildCapability(loaded); err != nil {
 		fmt.Fprintf(stderr, "platform-factory project build: capability preflight failed: %v\n", err)
 		return "", 2
 	}
-	if err := validateProjectBuildDAG(loaded); err != nil {
+	if err := projectapp.ValidateBuildDAG(loaded); err != nil {
 		fmt.Fprintf(stderr, "platform-factory project build: invalid build DAG: %v\n", err)
 		fmt.Fprintln(stderr, "  next: run `pf init --dry-run` to review the proposed DAG, then repair or regenerate .pf/build.pipeline.json")
 		return "", 1
 	}
-	if projectRequiresFrozenInputs(loaded) {
+	if projectapp.RequiresFrozenInputs(loaded) {
 		if err := loaded.VerifyFreezeInventory(); err != nil {
 			fmt.Fprintf(stderr, "platform-factory project build: frozen inputs are not valid: %v\n", err)
 			fmt.Fprintln(stderr, "  next: run `pf freeze`, review the inventory, then retry `pf build`")
@@ -905,7 +781,7 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 	}
 	if len(loaded.Config.BuildCommand) > 0 {
 		command := loaded.Config.BuildCommand
-		fmt.Fprintf(stderr, "platform-factory: build: %s\n", formatCommand(command[0], command[1:]))
+		fmt.Fprintf(stderr, "platform-factory: build: %s\n", shellquote.Command(command[0], command[1:]))
 		if err := execute(command[0], command[1:], loaded.Root, stderr, stderr); err != nil {
 			fmt.Fprintf(stderr, "platform-factory project build: command failed: %v\n", err)
 			return "", 1
@@ -960,7 +836,7 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 			strings.Contains(source, "/.platform-factory/artifacts/") ||
 			(strings.HasPrefix(file.Dest, "/app/.platform-factory/deps/") && strings.Contains(file.Dest, "/runtime/"))
 	})
-	languageLayer, cleanupLanguageLayer, err := languagePluginLayer(loaded, stderr, execute, resolveLoadedPlugin)
+	languageLayer, cleanupLanguageLayer, err := projectapp.LanguagePluginLayer(loaded, stderr, execute, resolveLoadedPlugin)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory project build: %v\n", err)
 		return "", 1
@@ -970,7 +846,7 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 	if languageLayer != "" {
 		extraLayers = []string{languageLayer}
 	}
-	osName, architecture, err := parsePlatform(loaded.Config.Platform)
+	osName, architecture, err := buildapp.ParsePlatform(loaded.Config.Platform)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory project build: %v\n", err)
 		return "", 2
@@ -984,7 +860,7 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 	}
 	profile := loaded.Config.Profile
 	if profile == "" {
-		profile = projectProfile(loaded.Config.Language)
+		profile = projectapp.Profile(loaded.Config.Language)
 	}
 	created := earliestProjectFileTime(loaded.Root)
 	if created.IsZero() {
@@ -1012,20 +888,20 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 	}
 	releaseDir := filepath.Join(loaded.Root, ".platform-factory", "release")
 	reportsDir := filepath.Join(releaseDir, "reports")
-	settings := buildSettings{
-		entrypoint: entrypoint, profile: profile, image: loaded.Config.Image,
-		tag: loaded.Config.Tag, created: time.Unix(0, 0), extraFiles: extraFiles,
+	settings := buildapp.Settings{
+		Entrypoint: entrypoint, Profile: profile, Image: loaded.Config.Image,
+		Tag: loaded.Config.Tag, Created: time.Unix(0, 0), ExtraFiles: extraFiles,
 	}
-	target := buildTarget{os: osName, architecture: architecture, input: binary}
-	if err := writeSBOMToDist(releaseDir, target, settings); err != nil {
+	target := buildapp.Target{OS: osName, Architecture: architecture, Input: binary}
+	if err := buildapp.WriteSBOMToDist(releaseDir, target, settings); err != nil {
 		fmt.Fprintf(stderr, "platform-factory project build: write release SBOM: %v\n", err)
 		return "", 1
 	}
-	if err := writeReportJSON(reportsDir, "build.json", resultMap); err != nil {
+	if err := atomicfile.WriteJSON(reportsDir, "build.json", resultMap); err != nil {
 		fmt.Fprintf(stderr, "platform-factory project build: write build report: %v\n", err)
 		return "", 1
 	}
-	if err := writeBuildEvidence(releaseDir, reportsDir, "", "release", resultMap, target, settings); err != nil {
+	if err := buildapp.WriteBuildEvidence(releaseDir, reportsDir, "", "release", version, resultMap, target, settings); err != nil {
 		fmt.Fprintf(stderr, "platform-factory project build: write release evidence: %v\n", err)
 		return "", 1
 	}
@@ -1034,7 +910,7 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 		fmt.Fprintf(stderr, "platform-factory project build: collect metrics: %v\n", verifyErr)
 		return "", 1
 	}
-	if err := writeReportJSON(reportsDir, "metrics.json", map[string]any{
+	if err := atomicfile.WriteJSON(reportsDir, "metrics.json", map[string]any{
 		"api_version": "platform-factory.dev/metrics/v1", "operation": "build",
 		"trace_id": observability.TraceIDFromContext(ctx), "duration_ms": time.Since(startedAt).Milliseconds(),
 		"platforms": len(verified.Platforms), "manifests": verified.Manifests, "blobs": verified.Blobs, "success": true,
@@ -1045,72 +921,4 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 	result, _ := json.MarshalIndent(resultMap, "", "  ")
 	fmt.Fprintln(stdout, string(result))
 	return digest, 0
-}
-
-func validateProjectBuildDAG(loaded project.Loaded) error {
-	filename := filepath.Join(loaded.Root, ".pf", "build.pipeline.json")
-	info, err := os.Lstat(filename)
-	if err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return errors.New(".pf/build.pipeline.json must be a regular file, not a symlink")
-		}
-		file, err := os.Open(filename)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		_, _, err = pipeline.Decode(file)
-		return err
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	definition, err := loaded.Pipeline(nil)
-	if err != nil {
-		return err
-	}
-	_, err = pipeline.Analyze(definition)
-	return err
-}
-
-func validateBuildCapability(loaded project.Loaded) error {
-	profile := strings.TrimSpace(loaded.Config.Profile)
-	if profile == "" {
-		// Compatibility for configurations created before plugins reported a
-		// runtime profile. Fresh pf init output always records the profile and
-		// therefore receives the strict interpreted-runtime preflight below.
-		return nil
-	}
-	switch profile {
-	case "python", "node", "java", "dotnet", "ruby", "php":
-		if strings.TrimSpace(loaded.Config.Runtime) == "" {
-			return fmt.Errorf("%s source was detected, but pf.yaml has no runtime field set; platform-factory does not fetch or build a %s interpreter for you, it packages a real Linux %s binary you already have - set 'runtime: PATH/TO/A/REAL/LINUX/%s/BINARY' in pf.yaml (see examples/project-config/.config_image.yaml); pf doctor does not check for this, it only reports local tool/runtime/hardware availability",
-				loaded.Config.Language, profile, profile, strings.ToUpper(profile))
-		}
-	}
-	return nil
-}
-
-// projectProfile maps a project language to a runtime profile. Go, Rust
-// and other compiled languages deliberately map to "static": they produce
-// ELF executables, and the ELF detection in internal/oci picks
-// static/glibc/musl from the actual binary rather than from the language
-// name.
-func projectProfile(language string) string {
-	switch strings.ToLower(language) {
-	case "python":
-		return "python"
-	case "node", "nodejs", "javascript", "typescript":
-		return "node"
-	case "java":
-		return "java"
-	case "dotnet", "csharp", "fsharp":
-		return "dotnet"
-	case "ruby":
-		return "ruby"
-	case "php":
-		return "php"
-	default:
-		return "static"
-	}
 }

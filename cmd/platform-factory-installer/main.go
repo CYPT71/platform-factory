@@ -21,12 +21,23 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/CYPT71/platform-factory/internal/app/installer"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-isatty"
 )
+
+// stepView is installer.BuildStep plus the presentation-only progress
+// state the bubbletea model and plain fallback track as a build runs -
+// which binaries to build is a domain decision (internal/app/installer);
+// how that progress is displayed is not.
+type stepView struct {
+	installer.BuildStep
+	status buildStatus
+	err    error
+}
 
 var (
 	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
@@ -89,10 +100,10 @@ func run() error {
 		if !*flagYes {
 			return errors.New("non-interactive mode requires -yes to confirm")
 		}
-		selectedKeys = parseComponents(*flagComponents)
+		selectedKeys = installer.ParseComponents(*flagComponents)
 	}
 
-	selected, err := resolveComponents(selectedKeys)
+	selected, err := installer.ResolveComponents(selectedKeys)
 	if err != nil {
 		return err
 	}
@@ -101,7 +112,10 @@ func run() error {
 		return fmt.Errorf("create install directory: %w", err)
 	}
 
-	steps := buildSteps(selected, *flagGOOS, *flagGOARCH)
+	var steps []stepView
+	for _, s := range installer.BuildSteps(selected, *flagGOOS, *flagGOARCH) {
+		steps = append(steps, stepView{BuildStep: s})
+	}
 	version := gitVersion(repoRoot)
 	if terminal {
 		model := newBuildModel(steps, repoRoot, prefix, *flagGOOS, *flagGOARCH, version)
@@ -136,7 +150,7 @@ func run() error {
 // rebuild in place); a real file copy on Windows, where creating a
 // symlink needs a privilege an ordinary installer run cannot assume.
 func ensurePFAlias(prefix, goos string) error {
-	suffix := binSuffix(goos)
+	suffix := installer.BinSuffix(goos)
 	targetName := "platform-factory" + suffix
 	target := filepath.Join(prefix, targetName)
 	if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
@@ -187,13 +201,13 @@ func gitVersion(repoRoot string) string {
 
 func printComponentTable() {
 	fmt.Println(titleStyle.Render("Available components"))
-	for _, c := range components {
+	for _, c := range installer.Components {
 		mark := "  "
-		if c.mandatory {
+		if c.Mandatory {
 			mark = "* "
 		}
-		fmt.Printf("%s%-12s %s\n", mark, c.key, c.description)
-		fmt.Printf("    binaries: %s\n", strings.Join(c.binaries, ", "))
+		fmt.Printf("%s%-12s %s\n", mark, c.Key, c.Description)
+		fmt.Printf("    binaries: %s\n", strings.Join(c.Binaries, ", "))
 	}
 	fmt.Println(subtleStyle.Render("\n* always installed"))
 }
@@ -209,12 +223,12 @@ func runWizard(defaultInstallPrefix string) ([]string, string, error) {
 		prefix    = defaultInstallPrefix
 		confirmed bool
 	)
-	optOptions := make([]huh.Option[string], 0, len(components)-1)
-	for _, c := range components {
-		if c.mandatory {
+	optOptions := make([]huh.Option[string], 0, len(installer.Components)-1)
+	for _, c := range installer.Components {
+		if c.Mandatory {
 			continue
 		}
-		optOptions = append(optOptions, huh.NewOption(fmt.Sprintf("%s — %s", c.label, c.description), c.key))
+		optOptions = append(optOptions, huh.NewOption(fmt.Sprintf("%s — %s", c.Label, c.Description), c.Key))
 	}
 
 	form := huh.NewForm(
@@ -267,7 +281,7 @@ type stepDoneMsg struct {
 }
 
 type buildModel struct {
-	steps    []buildStep
+	steps    []stepView
 	current  int
 	spinner  spinner.Model
 	repoRoot string
@@ -279,7 +293,7 @@ type buildModel struct {
 	failed   bool
 }
 
-func newBuildModel(steps []buildStep, repoRoot, prefix, goos, goarch, version string) buildModel {
+func newBuildModel(steps []stepView, repoRoot, prefix, goos, goarch, version string) buildModel {
 	s := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("212"))))
 	if len(steps) > 0 {
 		steps[0].status = statusBuilding
@@ -305,29 +319,29 @@ func (m buildModel) Init() tea.Cmd {
 // buildBinary invokes `go build` for a single component binary. It is the
 // one place that actually shells out, shared by the animated bubbletea
 // view and the plain sequential fallback used outside a terminal.
-func buildBinary(repoRoot, prefix, goos, goarch, version string, step buildStep) ([]byte, error) {
-	out := filepath.Join(prefix, step.name+binSuffix(goos))
+func buildBinary(repoRoot, prefix, goos, goarch, version string, step stepView) ([]byte, error) {
+	out := filepath.Join(prefix, step.Name+installer.BinSuffix(goos))
 	ldflags := "-s -w"
-	if step.name == "platform-factory" {
+	if step.Name == "platform-factory" {
 		ldflags += " -X main.version=" + version
 	}
 	cgo := "0"
-	if step.cgo {
+	if step.CGO {
 		cgo = "1"
 	}
-	cmd := exec.Command("go", "build", "-trimpath", "-ldflags="+ldflags, "-o", out, step.pkg)
+	cmd := exec.Command("go", "build", "-trimpath", "-ldflags="+ldflags, "-o", out, step.Pkg)
 	cmd.Dir = repoRoot
 	cmd.Env = append(os.Environ(), "CGO_ENABLED="+cgo, "GOOS="+goos, "GOARCH="+goarch)
 	return cmd.CombinedOutput()
 }
 
-func runPlainBuild(steps []buildStep, repoRoot, prefix, goos, goarch, version string) error {
+func runPlainBuild(steps []stepView, repoRoot, prefix, goos, goarch, version string) error {
 	for _, step := range steps {
-		fmt.Printf("building %s... ", step.name)
+		fmt.Printf("building %s... ", step.Name)
 		output, err := buildBinary(repoRoot, prefix, goos, goarch, version, step)
 		if err != nil {
 			fmt.Println("FAILED")
-			return fmt.Errorf("%s: %w: %s", step.name, err, strings.TrimSpace(string(output)))
+			return fmt.Errorf("%s: %w: %s", step.Name, err, strings.TrimSpace(string(output)))
 		}
 		fmt.Println("ok")
 	}
@@ -340,7 +354,7 @@ func (m buildModel) runStep(i int) tea.Cmd {
 	return func() tea.Msg {
 		output, err := buildBinary(repoRoot, prefix, goos, goarch, version, step)
 		if err != nil {
-			return stepDoneMsg{index: i, err: fmt.Errorf("%s: %w: %s", step.name, err, strings.TrimSpace(string(output)))}
+			return stepDoneMsg{index: i, err: fmt.Errorf("%s: %w: %s", step.Name, err, strings.TrimSpace(string(output)))}
 		}
 		return stepDoneMsg{index: i}
 	}
@@ -384,28 +398,28 @@ func (m buildModel) View() string {
 		switch step.status {
 		case statusDone:
 			b.WriteString(doneStyle.Render("✓ "))
-			b.WriteString(step.name)
+			b.WriteString(step.Name)
 			b.WriteString("\n")
 		case statusFailed:
 			b.WriteString(failStyle.Render("✗ "))
-			b.WriteString(step.name)
+			b.WriteString(step.Name)
 			b.WriteString("\n")
 		case statusBuilding:
 			b.WriteString(m.spinner.View())
 			b.WriteString(" ")
-			b.WriteString(step.name)
+			b.WriteString(step.Name)
 			b.WriteString("\n")
 		default:
-			b.WriteString(pendingStyle.Render("· " + step.name + "\n"))
+			b.WriteString(pendingStyle.Render("· " + step.Name + "\n"))
 		}
 	}
 	return b.String()
 }
 
-func printSuccess(prefix string, selected []component) {
+func printSuccess(prefix string, selected []installer.Component) {
 	var names []string
 	for _, c := range selected {
-		names = append(names, c.binaries...)
+		names = append(names, c.Binaries...)
 	}
 	sort.Strings(names)
 	for i, name := range names {

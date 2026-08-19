@@ -4,7 +4,8 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/CYPT71/platform-factory/cmd/tui/kit"
 )
 
 func newTestModel(hostCandidate string) *model {
@@ -16,22 +17,7 @@ func newTestModel(hostCandidate string) *model {
 	return &model{language: "python", hostCandidate: hostCandidate, choices: choices, imageInput: textinput.New()}
 }
 
-func key(s string) tea.KeyMsg {
-	switch s {
-	case "enter":
-		return tea.KeyMsg{Type: tea.KeyEnter}
-	case "esc":
-		return tea.KeyMsg{Type: tea.KeyEsc}
-	case "ctrl+c":
-		return tea.KeyMsg{Type: tea.KeyCtrlC}
-	case "up":
-		return tea.KeyMsg{Type: tea.KeyUp}
-	case "down":
-		return tea.KeyMsg{Type: tea.KeyDown}
-	default:
-		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
-	}
-}
+var key = kit.Key
 
 func TestEnterOnTheFirstChoiceSelectsHostWhenOffered(t *testing.T) {
 	m := newTestModel("/usr/bin/python3")

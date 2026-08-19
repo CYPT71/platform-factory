@@ -37,7 +37,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "::group::Sequential benchmarks (Build, MakeLayer, NaiveTarGzip)"
-          go test ./internal/oci -run '^$' \
+          go test ./oci -run '^$' \
             -bench '^(BenchmarkBuild|BenchmarkMakeLayer|BenchmarkNaiveTarGzip)$' \
             -benchmem -benchtime=1x -count=5 -cpu=1 \
             | tee benchmark-sequential.txt
@@ -51,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "::group::BenchmarkBuildParallel (1/2/4/8/16 concurrent builds)"
-          go test ./internal/oci -run '^$' -bench '^BenchmarkBuildParallel$' \
+          go test ./oci -run '^$' -bench '^BenchmarkBuildParallel$' \
             -benchmem -benchtime=32x -count=5 \
             | tee benchmark-parallel.txt
           echo "::endgroup::"
@@ -59,7 +59,7 @@ jobs:
         env: {GOTOOLCHAIN: local}
         run: |
           set -euo pipefail
-          go test ./internal/oci -run '^$' \
+          go test ./oci -run '^$' \
             -bench '^BenchmarkBuild/payload_4096KiB$' -benchtime=3x -count=1 -cpu=1 \
             -cpuprofile=cpu.prof -memprofile=mem.prof -memprofilerate=1 \
             > benchmark-profile.txt
@@ -67,12 +67,12 @@ jobs:
         env: {GOTOOLCHAIN: local}
         run: |
           set -euo pipefail
-          go test ./internal/oci -run '^TestBuildLeavesNoGoroutinesOrFilesBehind$' -v | tee leak-check.txt
+          go test ./oci -run '^TestBuildLeavesNoGoroutinesOrFilesBehind$' -v | tee leak-check.txt
       - name: Race-detector pass on the concurrent path (separate from perf numbers)
         env: {GOTOOLCHAIN: local}
         run: |
           set -euo pipefail
-          go test ./internal/oci -run '^$' -bench '^BenchmarkBuildParallel$' -benchtime=16x -race \
+          go test ./oci -run '^$' -bench '^BenchmarkBuildParallel$' -benchtime=16x -race \
             | tee benchmark-race.txt
       - name: Build the statistical report
         run: |
@@ -81,7 +81,7 @@ jobs:
           export BENCHMARK_NUM_CPU="$(nproc)"
           export BENCHMARK_GOMAXPROCS="$(nproc)"
           export BENCHMARK_CPU_FIXED="1 for BenchmarkBuild/MakeLayer/NaiveTarGzip; default ($BENCHMARK_NUM_CPU) for BenchmarkBuildParallel"
-          export BENCHMARK_COMMAND="go test ./internal/oci -bench '(BenchmarkBuild|BenchmarkMakeLayer|BenchmarkNaiveTarGzip)' -benchmem -benchtime=1x -count=5 -cpu=1; go test ./internal/oci -bench BenchmarkBuildParallel -benchmem -benchtime=32x -count=5"
+          export BENCHMARK_COMMAND="go test ./oci -bench '(BenchmarkBuild|BenchmarkMakeLayer|BenchmarkNaiveTarGzip)' -benchmem -benchtime=1x -count=5 -cpu=1; go test ./oci -bench BenchmarkBuildParallel -benchmem -benchtime=32x -count=5"
           python3 scripts/ci/benchmark-report.py benchmark.txt benchmark-environment.txt benchmark.json benchmark.md
       - name: Render payload-size charts (throughput, memory/op, time/op)
         run: |
@@ -171,7 +171,7 @@ jobs:
           git worktree add /tmp/main-worktree FETCH_HEAD
           (
             cd /tmp/main-worktree
-            go test ./internal/oci -run '^$' -bench '^BenchmarkBuild$' \
+            go test ./oci -run '^$' -bench '^BenchmarkBuild$' \
               -benchmem -benchtime=1x -count=5 -cpu=1 > /tmp/main-benchmark.txt
           )
           go version > /tmp/main-environment.txt

@@ -39,3 +39,24 @@ func runFixtureGit(t *testing.T, dir string, args ...string) string {
 	}
 	return string(output)
 }
+
+// newFakeGH writes a fake `gh` executable (a shell script) to a fresh
+// directory and prepends that directory to PATH for the duration of the
+// test (t.Setenv restores it afterwards), so exec.LookPath("gh") - and
+// therefore r.runGH - resolves to it instead of a real gh binary.
+//
+// This exists because this sandbox's real `gh` is authenticated against
+// a live GitHub account (see `gh auth status`): a test that shelled out
+// to the real binary could actually open a pull request or otherwise
+// touch a real repository over the network. Every gh success/failure
+// path this package needs to cover is instead exercised against this
+// deterministic, local-only stand-in - never the real CLI.
+func newFakeGH(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gh")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}

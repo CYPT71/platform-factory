@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CYPT71/platform-factory/internal/oci"
+	"github.com/CYPT71/platform-factory/oci"
 )
 
 func buildLayout(t *testing.T) string {

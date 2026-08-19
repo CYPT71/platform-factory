@@ -8,7 +8,7 @@ import (
 // FuzzManifestValidate feeds arbitrary plugin.json bytes at Manifest's
 // JSON decode and Validate. A plugin manifest is attacker-controlled by
 // construction (a third-party plugin author ships it, T21 in the Threat
-// Model), and it's the first thing platform-factory parses before deciding
+// Model), and it's the first thing secure-oci parses before deciding
 // whether to trust and execute anything.
 func FuzzManifestValidate(f *testing.F) {
 	f.Add(`{"name":"demo","version":"1.0.0","executable":"plugin","digest":"sha256:` + fuzzHexDigest + `","capabilities":["detect"]}`)

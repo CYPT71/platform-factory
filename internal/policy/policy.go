@@ -2,11 +2,14 @@
 package policy
 
 import (
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/CYPT71/platform-factory/internal/core"
 	typederrors "github.com/CYPT71/platform-factory/internal/errors"
+	"github.com/CYPT71/platform-factory/internal/strictjson"
 )
 
 const (
@@ -78,6 +81,27 @@ func Evaluate(rules Rules, evidence Evidence) (Decision, error) {
 	}
 	sort.Strings(reasons)
 	return Decision{Allowed: len(reasons) == 0, Reasons: reasons}, nil
+}
+
+// DecodeRulesAndEvidence reads and strictly decodes the Rules at
+// policyPath and the Evidence at evidencePath - the canonical "load
+// what Evaluate needs from disk" pair every `--policy`/`--evidence`
+// flag combination in this CLI uses. evidencePath is required
+// whenever policyPath is meaningful: a policy with no evidence to
+// evaluate it against is never a valid combination.
+func DecodeRulesAndEvidence(policyPath, evidencePath string) (Rules, Evidence, error) {
+	if evidencePath == "" {
+		return Rules{}, Evidence{}, errors.New("--evidence is required with --policy")
+	}
+	var rules Rules
+	if err := strictjson.DecodeFile(policyPath, &rules); err != nil {
+		return Rules{}, Evidence{}, fmt.Errorf("decode rules: %w", err)
+	}
+	var evidence Evidence
+	if err := strictjson.DecodeFile(evidencePath, &evidence); err != nil {
+		return Rules{}, Evidence{}, fmt.Errorf("decode evidence: %w", err)
+	}
+	return rules, evidence, nil
 }
 
 // DerivePipelineEvidence computes static policy facts from validated pipeline

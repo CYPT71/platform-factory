@@ -1,10 +1,10 @@
-// SDK for out-of-process platform-factory language plugins. Defines the
+// SDK for out-of-process secure-oci language plugins. Defines the
 // versioned, length-prefixed JSON-RPC protocol plugins speak over
 // stdin/stdout (an LSP/DAP-style header-framed message on the wire) and
 // the plugin-side Server. Mirrors Go's sdk/plugin package: the same wire
 // protocol, the same v1.hello handshake, the same capability dispatch
 // (method "v1."+capability). A plugin written against either SDK passes
-// the exact same conformance suite (platform-factory-conformance plugin).
+// the exact same conformance suite (secure-oci-conformance plugin).
 //
 // No third-party dependencies - System.Text.Json only.
 using System.Text;
@@ -51,7 +51,7 @@ public sealed class Server
     /// <summary>LegacyContentType is the pre-rebrand Content-Type: still
     /// accepted from a peer for the documented compatibility overlap
     /// window (see docs/api-compatibility.md), never written.</summary>
-    public const string LegacyContentType = "application/vnd.platform-factory.rpc.v1+json";
+    public const string LegacyContentType = "application/vnd.secure-oci.rpc.v1+json";
     public const string ProtocolVersion = "v1";
     private const int MaxMessageBytes = 1 << 20;
 

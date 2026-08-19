@@ -13,10 +13,11 @@ import (
 	"strings"
 	"testing"
 
+	marketplaceapp "github.com/CYPT71/platform-factory/internal/app/marketplace"
 	"github.com/CYPT71/platform-factory/internal/marketplace"
 )
 
-// withMarketplaceDir sandboxes every marketplacePaths()-derived path (index,
+// withMarketplaceDir sandboxes every marketplaceapp.Paths()-derived path (index,
 // sources, and installed-plugins directory all live under
 // PLATFORM_FACTORY_MARKETPLACE_DIR) inside a fresh temp directory, exactly
 // like marketplacePaths itself resolves them.
@@ -87,7 +88,7 @@ func TestRunMarketplaceDispatch(t *testing.T) {
 
 func TestMarketplacePaths(t *testing.T) {
 	dir := withMarketplaceDir(t)
-	indexPath, sourcesPath, pluginsDir, err := marketplacePaths()
+	indexPath, sourcesPath, pluginsDir, err := marketplaceapp.Paths()
 	if err != nil {
 		t.Fatalf("marketplacePaths: %v", err)
 	}
@@ -225,7 +226,7 @@ func stringSlicesEqual(a, b []string) bool {
 
 func TestRunMarketplaceSearch(t *testing.T) {
 	withMarketplaceDir(t)
-	indexPath, _, _, err := marketplacePaths()
+	indexPath, _, _, err := marketplaceapp.Paths()
 	if err != nil {
 		t.Fatalf("marketplacePaths: %v", err)
 	}
@@ -278,18 +279,18 @@ func TestRunMarketplaceSearch(t *testing.T) {
 }
 
 func TestAnyReleaseVerified(t *testing.T) {
-	if anyReleaseVerified(marketplace.PluginEntry{}) {
+	if marketplaceapp.AnyReleaseVerified(marketplace.PluginEntry{}) {
 		t.Fatal("empty plugin should report unverified")
 	}
 	unverified := marketplace.PluginEntry{Releases: []marketplace.ReleaseEntry{{Version: "v1", Verified: false}}}
-	if anyReleaseVerified(unverified) {
+	if marketplaceapp.AnyReleaseVerified(unverified) {
 		t.Fatal("no verified releases should report unverified")
 	}
 	verified := marketplace.PluginEntry{Releases: []marketplace.ReleaseEntry{
 		{Version: "v1", Verified: false},
 		{Version: "v2", Verified: true},
 	}}
-	if !anyReleaseVerified(verified) {
+	if !marketplaceapp.AnyReleaseVerified(verified) {
 		t.Fatal("plugin with a verified release should report verified")
 	}
 }
@@ -305,9 +306,9 @@ func TestSplitNameVersion(t *testing.T) {
 		{"@v1.2.0", "@v1.2.0", ""}, // idx==0 is not >0, entire string is treated as the name
 	}
 	for _, tc := range cases {
-		name, version := splitNameVersion(tc.arg)
+		name, version := marketplaceapp.SplitNameVersion(tc.arg)
 		if name != tc.wantName || version != tc.wantVersion {
-			t.Fatalf("splitNameVersion(%q) = (%q, %q), want (%q, %q)", tc.arg, name, version, tc.wantName, tc.wantVersion)
+			t.Fatalf("marketplaceapp.SplitNameVersion(%q) = (%q, %q), want (%q, %q)", tc.arg, name, version, tc.wantName, tc.wantVersion)
 		}
 	}
 }
@@ -334,7 +335,7 @@ func TestLoadMarketplaceKeys(t *testing.T) {
 	validPath := filepath.Join(dir, "valid.pem")
 	writePEMKeyFile(t, validPath, "PUBLIC KEY", der)
 
-	keys, err := loadMarketplaceKeys([]string{validPath})
+	keys, err := marketplaceapp.LoadKeys([]string{validPath})
 	if err != nil {
 		t.Fatalf("loadMarketplaceKeys valid: %v", err)
 	}
@@ -342,12 +343,12 @@ func TestLoadMarketplaceKeys(t *testing.T) {
 		t.Fatalf("loadMarketplaceKeys returned unexpected keys: %v", keys)
 	}
 
-	if keys, err := loadMarketplaceKeys(nil); err != nil || len(keys) != 0 {
+	if keys, err := marketplaceapp.LoadKeys(nil); err != nil || len(keys) != 0 {
 		t.Fatalf("loadMarketplaceKeys empty: keys=%v err=%v", keys, err)
 	}
 
 	missingPath := filepath.Join(dir, "missing.pem")
-	if _, err := loadMarketplaceKeys([]string{missingPath}); err == nil {
+	if _, err := marketplaceapp.LoadKeys([]string{missingPath}); err == nil {
 		t.Fatal("expected error for missing key file")
 	}
 
@@ -355,13 +356,13 @@ func TestLoadMarketplaceKeys(t *testing.T) {
 	if err := os.WriteFile(badPEMPath, []byte("not a pem file"), 0o600); err != nil {
 		t.Fatalf("write bad pem: %v", err)
 	}
-	if _, err := loadMarketplaceKeys([]string{badPEMPath}); err == nil {
+	if _, err := marketplaceapp.LoadKeys([]string{badPEMPath}); err == nil {
 		t.Fatal("expected error for non-PEM key file")
 	}
 
 	wrongTypePath := filepath.Join(dir, "wrongtype.pem")
 	writePEMKeyFile(t, wrongTypePath, "CERTIFICATE", der)
-	if _, err := loadMarketplaceKeys([]string{wrongTypePath}); err == nil {
+	if _, err := marketplaceapp.LoadKeys([]string{wrongTypePath}); err == nil {
 		t.Fatal("expected error for wrong PEM block type")
 	}
 
@@ -375,7 +376,7 @@ func TestLoadMarketplaceKeys(t *testing.T) {
 	}
 	nonEd25519Path := filepath.Join(dir, "ecdsa.pem")
 	writePEMKeyFile(t, nonEd25519Path, "PUBLIC KEY", ecDER)
-	if _, err := loadMarketplaceKeys([]string{nonEd25519Path}); err == nil {
+	if _, err := marketplaceapp.LoadKeys([]string{nonEd25519Path}); err == nil {
 		t.Fatal("expected error for non-Ed25519 key")
 	}
 }
@@ -458,7 +459,7 @@ func TestRunMarketplaceList(t *testing.T) {
 		t.Fatalf("empty list stdout = %q", stdout.String())
 	}
 
-	indexPath, _, pluginsDir, err := marketplacePaths()
+	indexPath, _, pluginsDir, err := marketplaceapp.Paths()
 	if err != nil {
 		t.Fatalf("marketplacePaths: %v", err)
 	}

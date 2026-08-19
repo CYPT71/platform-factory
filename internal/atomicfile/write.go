@@ -40,15 +40,12 @@ func Write(dir, name string, data []byte, mode os.FileMode, durable bool) error 
 	if err := os.Rename(path, filepath.Join(dir, name)); err != nil {
 		return err
 	}
-	if !durable {
-		return nil
-	}
-	// Windows does not expose a directory handle that File.Sync can flush.
-	// Rename is still atomic there, but directory-entry durability across a
-	// sudden power loss is governed by the filesystem. Unix hosts can and
-	// must flush the containing directory explicitly. See the identical
-	// rationale on FileStateStore.syncDirectory (internal/runtime/state.go).
-	if runtime.GOOS == "windows" {
+	if !durable || runtime.GOOS == "windows" {
+		// Windows has no equivalent of fsync-on-a-directory-fd: a directory
+		// handle opened for read (os.Open, since Windows forbids opening one
+		// for write) cannot be flushed, and FlushFileBuffers on it fails
+		// with access denied. The rename above is already the durable
+		// operation NTFS guarantees; there is nothing further to sync.
 		return nil
 	}
 	directory, err := os.Open(dir)

@@ -100,9 +100,9 @@ func TestExtractFailsForMissingBlob(t *testing.T) {
 // unreachableBuilder fails the test if Image ever calls it - used by tests
 // whose expected error occurs during output resolution, strictly before
 // Image would call build. The real, end-to-end build path (a genuine
-// internal/oci.Build call) is covered by
-// internal/oci's TestAssembleImageBuildsVerifiableOCILayout instead:
-// internal/assemble must not import internal/oci itself (see this
+// oci.Build call) is covered by
+// oci's TestAssembleImageBuildsVerifiableOCILayout instead:
+// internal/assemble must not import the oci package itself (see this
 // package's doc comment, enforced by internal/archtest), so a builder that
 // actually builds an image belongs on the infrastructure side of that
 // boundary, not here.

@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/CYPT71/platform-factory/internal/policy"
+	buildapp "github.com/CYPT71/platform-factory/internal/app/build"
 	"github.com/CYPT71/platform-factory/internal/project"
 )
 
@@ -163,122 +163,35 @@ func reproducibleProjectBuild(loaded project.Loaded, stdout, stderr io.Writer, e
 }
 
 func reproducibleProjectBuildContext(ctx context.Context, loaded project.Loaded, stdout, stderr io.Writer, execute projectExecutor) (string, string, int) {
-	output := loaded.Output()
-	parent := filepath.Dir(output)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		fmt.Fprintf(stderr, "platform-factory launch: prepare reproducibility workspace: %v\n", err)
-		return "", "", 1
-	}
-	workspace, err := os.MkdirTemp(parent, ".reproducibility-*")
+	first, second, err := buildapp.ReproducibleBuild(loaded, func() (string, error) {
+		digest, code := buildProjectContext(ctx, loaded, stdout, stderr, execute)
+		if code != 0 {
+			return "", &buildFailureCode{code: code}
+		}
+		return digest, nil
+	})
 	if err != nil {
-		fmt.Fprintf(stderr, "platform-factory launch: prepare reproducibility workspace: %v\n", err)
-		return "", "", 1
-	}
-	defer os.RemoveAll(workspace)
-	previous := filepath.Join(workspace, "previous")
-	if _, err := os.Stat(output); err == nil {
-		if err := os.Rename(output, previous); err != nil {
-			fmt.Fprintf(stderr, "platform-factory launch: preserve previous layout: %v\n", err)
-			return "", "", 1
+		var failed *buildapp.FailedBuild
+		if errors.As(err, &failed) {
+			var code *buildFailureCode
+			if errors.As(failed.Err, &code) {
+				return first, second, code.code
+			}
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		fmt.Fprintf(stderr, "platform-factory launch: inspect previous layout: %v\n", err)
-		return "", "", 1
-	}
-	restore := func(candidate string) {
-		if _, statErr := os.Stat(output); errors.Is(statErr, os.ErrNotExist) {
-			_ = os.Rename(candidate, output)
-		}
-	}
-	first, code := buildProjectContext(ctx, loaded, stdout, stderr, execute)
-	if code != 0 {
-		restore(previous)
-		return "", "", code
-	}
-	firstLayout := filepath.Join(workspace, "first")
-	if err := os.Rename(output, firstLayout); err != nil {
-		fmt.Fprintf(stderr, "platform-factory launch: preserve first reproducibility build: %v\n", err)
-		restore(previous)
-		return "", "", 1
-	}
-	second, code := buildProjectContext(ctx, loaded, stdout, stderr, execute)
-	if code != 0 {
-		restore(firstLayout)
-		return first, "", code
-	}
-	if first != second {
-		// A divergent candidate must not silently replace the last usable
-		// layout. Prefer the pre-existing layout, otherwise retain the first
-		// independently built candidate for diagnosis.
-		if err := os.RemoveAll(output); err != nil {
-			fmt.Fprintf(stderr, "platform-factory launch: remove divergent layout: %v\n", err)
-			return first, second, 1
-		}
-		if _, err := os.Stat(previous); err == nil {
-			restore(previous)
-		} else {
-			restore(firstLayout)
-		}
+		fmt.Fprintf(stderr, "platform-factory launch: %v\n", err)
+		return first, second, 1
 	}
 	return first, second, 0
 }
 
-func writeLaunchPublicationEvidence(policyPath, evidencePath, provenancePath string, loaded project.Loaded, digest string) error {
-	rules := policy.Rules{
-		APIVersion: policy.APIVersion, RequireHardening: true, RequireSBOM: true,
-		RequireProvenance: true, RequireSignature: true, RequireReproducible: true,
-	}
-	evidence := policy.Evidence{
-		NonRoot: true, ReadOnlyRootFS: true, CapabilitiesDropped: true,
-		SecretsAbsent: true, Reproducible: true,
-	}
-	provenance := map[string]any{
-		"api_version":  "platform-factory.dev/provenance/v1",
-		"builder":      "platform-factory/" + version,
-		"config":       filepath.Base(loaded.File),
-		"output":       digest,
-		"platform":     loaded.Config.Platform,
-		"reproducible": true,
-	}
-	for path, value := range map[string]any{
-		policyPath: rules, evidencePath: evidence, provenancePath: provenance,
-	} {
-		if err := writeLaunchJSON(path, value); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+// buildFailureCode carries buildProjectContext's exact exit code (which
+// has already printed its own detailed stderr message) back out through
+// buildapp.ReproducibleBuild's FailedBuild wrapper, so a build failure
+// still reports its original code (1 or 2) instead of a generic one.
+type buildFailureCode struct{ code int }
 
-func writeLaunchJSON(path string, value any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".publication-*.json")
-	if err != nil {
-		return err
-	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
+func (e *buildFailureCode) Error() string { return fmt.Sprintf("build failed (exit %d)", e.code) }
+
+func writeLaunchPublicationEvidence(policyPath, evidencePath, provenancePath string, loaded project.Loaded, digest string) error {
+	return buildapp.WriteLaunchPublicationEvidence(policyPath, evidencePath, provenancePath, loaded, digest, version)
 }

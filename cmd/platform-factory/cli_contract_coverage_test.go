@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
 	"github.com/CYPT71/platform-factory/internal/microvm"
 	"github.com/CYPT71/platform-factory/internal/observability"
 	"github.com/CYPT71/platform-factory/internal/policy"
@@ -95,7 +96,7 @@ func TestNativeEligibilityRejectsUnsupportedCPUCountBeforeProbe(t *testing.T) {
 }
 
 func TestLaunchJSONRejectsUnserializableEvidence(t *testing.T) {
-	if err := writeLaunchJSON(filepath.Join(t.TempDir(), "evidence.json"), make(chan int)); err == nil {
+	if err := atomicfile.WriteJSONSensitive(filepath.Join(t.TempDir(), "evidence.json"), make(chan int)); err == nil {
 		t.Fatal("unserializable evidence accepted")
 	}
 }

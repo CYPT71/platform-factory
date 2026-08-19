@@ -124,4 +124,17 @@ var syscallNumberX8664 = map[string]uint32{
 	"kill":        uint32(syscall.SYS_KILL),
 	"nanosleep":   uint32(syscall.SYS_NANOSLEEP),
 	"sched_yield": uint32(syscall.SYS_SCHED_YIELD),
+	// tgkill backs Go's asynchronous goroutine preemption (runtime
+	// sysmon's SIGURG signal, used since Go 1.14 to interrupt a
+	// goroutine that has run too long without reaching a safepoint -
+	// e.g. a tight byte-copying loop during a large kernel/initramfs
+	// read). It can fire at any point once this thread has run long
+	// enough, entirely independent of which code is executing, which is
+	// why its absence here reproduced as an intermittent, unexplained
+	// SIGSYS process kill rather than a deterministic failure at one
+	// call site - verified against a real kernel boot by bisecting a
+	// strace of the killed supervisor down to the exact
+	// tgkill(pid, tid, SIGURG) call the kernel's SECCOMP_RET_KILL_PROCESS
+	// default action fired on.
+	"tgkill": uint32(syscall.SYS_TGKILL),
 }

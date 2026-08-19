@@ -1,4 +1,4 @@
-module example.test/platform-factory-zig-plugin
+module example.test/secure-oci-zig-plugin
 
 go 1.25.12
 

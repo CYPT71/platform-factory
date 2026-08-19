@@ -58,7 +58,7 @@ func TestGenerateCapturesOrderAndOutputDigests(t *testing.T) {
 		"compile": {"binary": {Digest: testDigest, Size: 5}},
 	})
 
-	record, err := Generate(testDefinition(), resolve, Options{BuilderIdentity: "platform-factory/test"})
+	record, err := Generate(testDefinition(), resolve, Options{BuilderIdentity: "secure-oci/test"})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestGenerateCapturesOrderAndOutputDigests(t *testing.T) {
 	if len(record.Outputs) != 1 || record.Outputs[0].Digest != testDigest || record.Outputs[0].Name != "app" {
 		t.Fatalf("outputs=%+v", record.Outputs)
 	}
-	if record.BuilderIdentity != "platform-factory/test" {
+	if record.BuilderIdentity != "secure-oci/test" {
 		t.Fatalf("builder identity=%q", record.BuilderIdentity)
 	}
 }
@@ -103,7 +103,7 @@ func TestGenerateProducesDeterministicJSON(t *testing.T) {
 	resolve := resolverFrom(map[string]map[string]cache.Descriptor{
 		"compile": {"binary": {Digest: testDigest, Size: 5}},
 	})
-	opts := Options{BuilderIdentity: "platform-factory/test", Parameters: map[string]string{"b": "2", "a": "1"}}
+	opts := Options{BuilderIdentity: "secure-oci/test", Parameters: map[string]string{"b": "2", "a": "1"}}
 
 	first, err := Generate(testDefinition(), resolve, opts)
 	if err != nil {
@@ -159,7 +159,7 @@ func TestGenerateComposesWithCachingRunnerOutput(t *testing.T) {
 		}
 	}
 
-	record, err := Generate(definition, cachingRunnerOutputResolver(runner), Options{BuilderIdentity: "platform-factory/test"})
+	record, err := Generate(definition, cachingRunnerOutputResolver(runner), Options{BuilderIdentity: "secure-oci/test"})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}

@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
 )
 
 func TestProjectLogsAndEventsUsePersistedDeploymentIdentity(t *testing.T) {
@@ -16,7 +18,7 @@ func TestProjectLogsAndEventsUsePersistedDeploymentIdentity(t *testing.T) {
 		"version: 1\nlanguage: compiled\nprofile: static\nartifact: app\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeLaunchJSON(filepath.Join(root, ".platform-factory", "deployed.json"), map[string]any{
+	if err := atomicfile.WriteJSONSensitive(filepath.Join(root, ".platform-factory", "deployed.json"), map[string]any{
 		"api_version": "platform-factory.dev/deployment/v1",
 		"image":       "registry.example/app@sha256:" + strings.Repeat("a", 64),
 		"name":        "hello", "namespace": "prod", "workload": "job",
@@ -71,7 +73,7 @@ func TestRollbackUsesPersistedServiceAndRejectsJob(t *testing.T) {
 		"image":       "registry.example/app@sha256:" + strings.Repeat("a", 64),
 		"name":        "hello", "namespace": "prod", "workload": "service",
 	}
-	if err := writeLaunchJSON(statePath, state); err != nil {
+	if err := atomicfile.WriteJSONSensitive(statePath, state); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(root)
@@ -83,7 +85,7 @@ func TestRollbackUsesPersistedServiceAndRejectsJob(t *testing.T) {
 		t.Fatalf("rollback plan=%s", stdout.String())
 	}
 	state["workload"] = "job"
-	if err := writeLaunchJSON(statePath, state); err != nil {
+	if err := atomicfile.WriteJSONSensitive(statePath, state); err != nil {
 		t.Fatal(err)
 	}
 	stdout.Reset()

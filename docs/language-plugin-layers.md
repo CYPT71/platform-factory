@@ -52,7 +52,7 @@ built separately.
   language-neutral operational hints. `sdk/langplugin.Inspect` supplies safe,
   deterministic filesystem mechanics, not a language catalogue.
 
-- **`internal/oci.Options.ExtraLayers`** (`internal/oci/extralayers.go`):
+- **`oci.Options.ExtraLayers`** (`oci/extralayers.go`):
   paths to pre-built, uncompressed tar files that become additional OCI
   manifest layers. Every entry is independently parsed and validated
   before Build trusts any of it - relative paths only (no absolute

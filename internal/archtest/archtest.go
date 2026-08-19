@@ -23,17 +23,17 @@ const repositoryModule = "github.com/CYPT71/platform-factory"
 // package roots are the smallest enforceable representation of the boundary.
 // Prefix matching keeps the rule effective for future subpackages.
 var domainInfrastructureBoundaries = map[string][]string{
-	"internal/scheduler": {"internal/oci", "internal/pipeline", "internal/plugin", "internal/cache", "internal/networking", "internal/hypervisor"},
-	"internal/policy":    {"internal/oci", "internal/plugin", "internal/cache", "internal/networking", "internal/hypervisor"},
-	"internal/executor":  {"internal/oci", "internal/pipeline", "internal/plugin", "internal/cache", "internal/networking", "internal/hypervisor"},
-	"internal/assemble":  {"internal/oci"},
-	"internal/project":   {"internal/oci"},
+	"internal/scheduler": {"oci", "internal/pipeline", "internal/plugin", "internal/cache", "internal/networking", "internal/hypervisor"},
+	"internal/policy":    {"oci", "internal/plugin", "internal/cache", "internal/networking", "internal/hypervisor"},
+	"internal/executor":  {"oci", "internal/pipeline", "internal/plugin", "internal/cache", "internal/networking", "internal/hypervisor"},
+	"internal/assemble":  {"oci"},
+	"internal/project":   {"oci"},
 	// internal/core is the canonical domain model: it must stay independent of
 	// every concrete infrastructure/backend implementation (Kubernetes, containerd,
 	// KubeVirt, plugin transport, sandboxing, the CLI itself), depending only on
 	// interfaces/domain contracts it defines. Audited clean; this rule exists to
 	// keep it that way.
-	"internal/core": {"internal/oci", "internal/pipeline", "internal/plugin", "internal/cache", "internal/networking", "internal/hypervisor", "internal/executor", "internal/microvm", "internal/ociruntime"},
+	"internal/core": {"oci", "internal/pipeline", "internal/plugin", "internal/cache", "internal/networking", "internal/hypervisor", "internal/executor", "internal/microvm", "internal/ociruntime"},
 }
 
 type workspaceJSON struct {
@@ -129,9 +129,8 @@ func forbiddenReason(source sourceImport) string {
 	if (pkg == "sdk" || strings.HasPrefix(pkg, "sdk/")) && hasImportPrefix(source.Path, internal) {
 		return "sdk packages must not depend on internal packages"
 	}
-	if (pkg == "api/migration" || strings.HasPrefix(pkg, "api/migration/") ||
-		pkg == "sdk/migration" || strings.HasPrefix(pkg, "sdk/migration/")) && hasImportPrefix(source.Path, internal) {
-		return "public migration contracts and helpers must not depend on internal packages"
+	if hasPackagePrefix(pkg, "api") && hasImportPrefix(source.Path, internal) {
+		return "public api contracts must not depend on internal packages"
 	}
 	if (pkg == "internal" || strings.HasPrefix(pkg, "internal/")) && hasImportPrefix(source.Path, cmd) {
 		return "internal packages must not depend on command composition roots"

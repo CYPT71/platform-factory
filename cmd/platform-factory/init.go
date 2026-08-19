@@ -284,7 +284,7 @@ func runInit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			}
 			inspection.Runtime.Selected = runtime
 			inspection.Runtime.Unknowns = nil
-			inspection.Unknowns = filterResolvedUnknowns(inspection.Unknowns, artifact, mode)
+			inspection.Unknowns = projectinit.FilterResolvedUnknowns(inspection.Unknowns, artifact, mode)
 			if artifact == "" && legacyDisks == nil && !*dryRun {
 				fmt.Fprintln(stderr, "platform-factory init: build artifact or entrypoint requires a decision; use --artifact; nothing was written")
 				return 2

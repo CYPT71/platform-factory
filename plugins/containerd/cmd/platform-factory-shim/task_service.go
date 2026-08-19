@@ -18,6 +18,7 @@ import (
 	taskapi "github.com/containerd/containerd/api/runtime/task/v3"
 	tasktypes "github.com/containerd/containerd/api/types/task"
 	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/pkg/sys/reaper"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/ttrpc"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -72,13 +73,34 @@ func (s *taskService) RegisterTTRPC(server *ttrpc.Server) error {
 // a short client timeout (crictl defaults to 2s); tying the child to ctx
 // would let a caller giving up on the RPC SIGKILL an in-flight, otherwise
 // healthy boot out from under the guest instead of just abandoning the wait.
+//
+// It spawns and waits on the child through reaper.Default, never a plain
+// cmd.Run()/cmd.Wait(): shim.Run (main.go) already made this process a
+// child subreaper and installed its own SIGCHLD handler
+// (pkg/shim/shim_unix.go's reaper.Reap loop) that reaps every exited
+// descendant via wait4(-1, ...) - including ones a plain os/exec call
+// elsewhere in this same process spawned. That handler and a direct
+// cmd.Wait() race for the same child's exit status; whichever loses gets
+// ECHILD ("waitid: no child processes"), which is exactly what surfaced
+// here intermittently. reaper.Default.Start subscribes to the shared
+// reaper's exit-event channel before starting the process, so this
+// command's own Wait always observes the exit this same reaper already
+// claimed instead of trying to claim it a second time.
 func runtimeCommand(args ...string) ([]byte, error) {
 	cmd := exec.Command(secureOCIRuntimeBinary, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%s %v: %w (%s)", secureOCIRuntimeBinary, args, err, bytes.TrimSpace(stderr.Bytes()))
+	exits, err := reaper.Default.Start(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("%s %v: %w", secureOCIRuntimeBinary, args, err)
+	}
+	status, err := reaper.Default.Wait(cmd, exits)
+	if err != nil {
+		return nil, fmt.Errorf("%s %v: %w", secureOCIRuntimeBinary, args, err)
+	}
+	if status != 0 {
+		return nil, fmt.Errorf("%s %v: exit status %d (%s)", secureOCIRuntimeBinary, args, status, bytes.TrimSpace(stderr.Bytes()))
 	}
 	return stdout.Bytes(), nil
 }
@@ -101,12 +123,27 @@ func runtimeCommand(args ...string) ([]byte, error) {
 // container's entire lifetime, so that EOF - and this call - would never
 // arrive. A real *os.File is dup'd onto the child's fd directly with no
 // such goroutine, so cmd.Wait() only waits for this one process to exit.
+// This waits only for the short-lived "create" CLI process itself, not
+// the long-lived, Setsid-detached supervisor it spawns internally (see
+// LaunchSupervisor) - once "create" exits, that supervisor reparents to
+// this shim process (the nearest subreaper in its ancestry; see
+// runtimeCommand's own doc comment on why this process is one at all)
+// and is reaped independently, on its own schedule, by the same shared
+// reaper this function already goes through below.
 func runtimeCreateCommand(stdout, stderr *os.File, args ...string) error {
 	cmd := exec.Command(secureOCIRuntimeBinary, args...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
+	exits, err := reaper.Default.Start(cmd)
+	if err != nil {
 		return fmt.Errorf("%s %v: %w", secureOCIRuntimeBinary, args, err)
+	}
+	status, err := reaper.Default.Wait(cmd, exits)
+	if err != nil {
+		return fmt.Errorf("%s %v: %w", secureOCIRuntimeBinary, args, err)
+	}
+	if status != 0 {
+		return fmt.Errorf("%s %v: exit status %d", secureOCIRuntimeBinary, args, status)
 	}
 	return nil
 }

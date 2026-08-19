@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	pluginapp "github.com/CYPT71/platform-factory/internal/app/plugin"
 	hostplugin "github.com/CYPT71/platform-factory/internal/plugin"
 	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
@@ -325,7 +326,7 @@ func TestIntermediateCreatesPluginsInPreferredLanguage(t *testing.T) {
 }
 
 func TestPrepareSourceRejectsMissingPath(t *testing.T) {
-	_, cleanup, err := prepareSource(filepath.Join(t.TempDir(), "does-not-exist"))
+	_, cleanup, err := pluginapp.PrepareSource(filepath.Join(t.TempDir(), "does-not-exist"))
 	cleanup()
 	if err == nil {
 		t.Fatal("expected an error for a nonexistent --from path")
@@ -399,7 +400,7 @@ func TestRunPluginListShowsAllBuiltinsByDefault(t *testing.T) {
 	if code := runPlugin([]string{"list"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
-	for _, lang := range builtinLanguages {
+	for _, lang := range pluginapp.BuiltinLanguages {
 		if !strings.Contains(stdout.String(), lang) {
 			t.Fatalf("stdout=%s, missing built-in language %q", stdout.String(), lang)
 		}
@@ -553,7 +554,7 @@ func TestRunPluginCreateSurfacesScaffoldFailure(t *testing.T) {
 }
 
 func TestLocateBuiltinPluginBinaryRejectsUnknownLanguage(t *testing.T) {
-	if _, err := locateBuiltinPluginBinary("cobol"); err == nil {
+	if _, err := pluginapp.LocateBuiltinPluginBinary("cobol"); err == nil {
 		t.Fatal("expected an error for a non-built-in language")
 	}
 }
@@ -569,7 +570,7 @@ func TestLocateBuiltinPluginBinaryFindsItOnPATH(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	got, err := locateBuiltinPluginBinary("ruby")
+	got, err := pluginapp.LocateBuiltinPluginBinary("ruby")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -585,100 +586,8 @@ func TestLocateBuiltinPluginBinaryFindsItOnPATH(t *testing.T) {
 
 func TestLocateBuiltinPluginBinaryNotFoundAnywhere(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	if _, err := locateBuiltinPluginBinary("php"); err == nil {
+	if _, err := pluginapp.LocateBuiltinPluginBinary("php"); err == nil {
 		t.Fatal("expected an error when the binary is not next to the CLI or on PATH")
-	}
-}
-
-func TestPrepareTypeScriptPluginRequiresNodeOnPATH(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	_, cleanup, err := prepareTypeScriptPlugin(filepath.Join(t.TempDir(), "plugin.ts"))
-	defer cleanup()
-	if err == nil || !strings.Contains(err.Error(), "node was not found on PATH") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestBuildDotnetPluginRequiresDotnetOnPATH(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	_, cleanup, err := buildDotnetPlugin(filepath.Join(t.TempDir(), "Plugin.cs"))
-	defer cleanup()
-	if err == nil || !strings.Contains(err.Error(), "dotnet SDK was not found on PATH") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestPrepareScriptPluginRequiresTheInterpreterOnPATH(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("prepareScriptPlugin always errors on windows before checking PATH")
-	}
-	t.Setenv("PATH", t.TempDir())
-	_, cleanup, err := prepareScriptPlugin(filepath.Join(t.TempDir(), "plugin.py"), "python3", nil)
-	defer cleanup()
-	if err == nil || !strings.Contains(err.Error(), "was not found on PATH") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestPrepareScriptPluginSurfacesInterpreterProbeFailure(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("prepareScriptPlugin always errors on windows before checking PATH")
-	}
-	dir := t.TempDir()
-	interpreter := filepath.Join(dir, "brokenpy")
-	if err := os.WriteFile(interpreter, []byte("#!/bin/sh\necho probe failed >&2\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	source := filepath.Join(t.TempDir(), "plugin.py")
-	if err := os.WriteFile(source, []byte("print(1)\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	_, cleanup, err := prepareScriptPlugin(source, "brokenpy", []string{"--strict"})
-	defer cleanup()
-	if err == nil || !strings.Contains(err.Error(), "cannot execute this plugin source") {
-		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestPrepareScriptPluginStripsShebangAndWrapsInterpreter(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("prepareScriptPlugin always errors on windows")
-	}
-	dir := t.TempDir()
-	interpreter := filepath.Join(dir, "fakepy")
-	if err := os.WriteFile(interpreter, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	source := filepath.Join(t.TempDir(), "plugin.py")
-	if err := os.WriteFile(source, []byte("#!/usr/bin/env python3\nprint(1)\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	prepared, cleanup, err := prepareScriptPlugin(source, "fakepy", nil)
-	defer cleanup()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	content, readErr := os.ReadFile(prepared)
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	if strings.Contains(string(content), "env python3") {
-		t.Fatalf("expected the original shebang to be stripped, got:\n%s", content)
-	}
-	if !strings.HasPrefix(string(content), "#!/usr/bin/env -S fakepy\n") {
-		t.Fatalf("expected the new interpreter shebang, got:\n%s", content)
-	}
-	if !strings.Contains(string(content), "print(1)") {
-		t.Fatalf("expected the original source body preserved, got:\n%s", content)
-	}
-	info, statErr := os.Stat(prepared)
-	if statErr != nil {
-		t.Fatal(statErr)
-	}
-	if info.Mode().Perm()&0o111 == 0 {
-		t.Fatalf("expected the prepared script to be executable, mode=%v", info.Mode())
 	}
 }
 
@@ -754,7 +663,7 @@ func TestRunPluginRemoveErrorPaths(t *testing.T) {
 
 func TestGenericPluginDir(t *testing.T) {
 	explicit := t.TempDir()
-	got, err := genericPluginDir(explicit)
+	got, err := pluginapp.GenericPluginDir(explicit)
 	if err != nil {
 		t.Fatalf("explicit dir: %v", err)
 	}
@@ -765,7 +674,7 @@ func TestGenericPluginDir(t *testing.T) {
 
 	envDir := t.TempDir()
 	t.Setenv("PLATFORM_FACTORY_PLUGIN_DIR", envDir)
-	got, err = genericPluginDir("")
+	got, err = pluginapp.GenericPluginDir("")
 	if err != nil {
 		t.Fatalf("env dir: %v", err)
 	}
@@ -775,7 +684,7 @@ func TestGenericPluginDir(t *testing.T) {
 	}
 
 	t.Setenv("PLATFORM_FACTORY_PLUGIN_DIR", "")
-	got, err = genericPluginDir("")
+	got, err = pluginapp.GenericPluginDir("")
 	if err != nil {
 		t.Fatalf("default dir: %v", err)
 	}

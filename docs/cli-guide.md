@@ -449,7 +449,7 @@ Pass `--list`/`-list` to either one to see the available components.
 
 `pf`, installed as a symlink alongside `platform-factory`, is a plain alias
 for it: `pf <anything>` and `platform-factory <anything>` run the identical
-binary. There is no separate delegator process and no separate `platform-factory`
+binary. There is no separate delegator process and no separate `secure-oci`
 binary to keep in sync — `pf` is just a shorter name for the same command
 surface documented throughout this guide.
 

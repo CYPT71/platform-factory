@@ -92,7 +92,7 @@ func BuildLayer(args []string, dependenciesPath, pluginName string) error {
 // to destPrefix-prefixed, sorted, and every timestamp zeroed. Symlinks
 // are rejected outright: package managers legitimately create them
 // (e.g. npm's .bin/ wrapper scripts), and the host's own validation
-// (internal/oci/extralayers.go) would reject them anyway - refusing
+// (oci/extralayers.go) would reject them anyway - refusing
 // here gives a clearer, earlier error.
 func WriteDeterministicTar(source, destPrefix, output string) error {
 	type entry struct {

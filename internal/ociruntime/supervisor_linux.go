@@ -220,31 +220,28 @@ func ServeSupervisor(ctx context.Context, store *Store, id string, readyFD int) 
 		return err
 	}
 	defer command.Close()
-	if err := applyVMMSandbox(); err != nil {
-		return err
-	}
+	// Do every piece of host-side, pre-boot preparation that needs real
+	// privilege - reading the bundle, building the guest initramfs from
+	// its rootfs, opening the pinned kernel/init and any requested
+	// virtio device - before applyVMMSandbox (below) drops the full
+	// capability set. None of this touches anything guest-facing yet
+	// (the guest does not exist as a running entity until
+	// kvm.RunLinuxWithOptions much further down), so there is no
+	// security benefit to sandboxing it first, and a real cost to doing
+	// so: this process is root by UID but not necessarily the *owner*
+	// of every directory on the path to its own bundle (e.g. a
+	// caller-supplied bundle root created by an unprivileged operator,
+	// as in tests/microvm/test-containerd-kvm.sh's own isolated,
+	// non-root-owned work directory) - losing CAP_DAC_OVERRIDE/
+	// CAP_DAC_READ_SEARCH before that path's lstat/open calls
+	// deterministically turns "root, but not the owner, of a 0700
+	// directory" into a permission-denied read with no Go-level chance
+	// to recover. Requesting a TAP device (virtioDevicesForSupervisor)
+	// has the same requirement for a different reason: it needs
+	// CAP_NET_ADMIN, which applyVMMSandbox also drops.
 	config, err := LoadConfig(state.Bundle)
 	if err != nil {
 		return err
-	}
-	// AppArmor and seccomp are thread-scoped; pin the KVM execution path and
-	// never return its confined thread to the runtime pool.
-	runtime.LockOSThread()
-	if err := applyApparmorProfile(config.Process.ApparmorProfile); err != nil {
-		return err
-	}
-	sandboxConfig, err := sandboxConfigForSupervisor(state.Annotations)
-	if err != nil {
-		return err
-	}
-	guestSandbox := sandbox.NewSandbox(sandboxConfig)
-	if err := guestSandbox.Apply(); err != nil {
-		return fmt.Errorf("oci runtime: apply VMM sandbox: %w", err)
-	}
-	defer func() { _ = guestSandbox.Cleanup() }()
-	// Apply the thread-scoped filter after LockOSThread.
-	if err := guestSandbox.ApplyStrictSeccomp(); err != nil {
-		return fmt.Errorf("oci runtime: apply strict VMM seccomp filter: %w", err)
 	}
 	sessionKey, err := generateGuestSessionKey(rand.Reader)
 	if err != nil {
@@ -270,6 +267,30 @@ func ServeSupervisor(ctx context.Context, store *Store, id string, readyFD int) 
 		return err
 	}
 	defer cleanupBlockDevice()
+
+	if err := applyVMMSandbox(); err != nil {
+		return err
+	}
+	// AppArmor and seccomp are thread-scoped; pin the KVM execution path and
+	// never return its confined thread to the runtime pool.
+	runtime.LockOSThread()
+	if err := applyApparmorProfile(config.Process.ApparmorProfile); err != nil {
+		return err
+	}
+	sandboxConfig, err := sandboxConfigForSupervisor(state.Annotations)
+	if err != nil {
+		return err
+	}
+	guestSandbox := sandbox.NewSandbox(sandboxConfig)
+	if err := guestSandbox.Apply(); err != nil {
+		return fmt.Errorf("oci runtime: apply VMM sandbox: %w", err)
+	}
+	defer func() { _ = guestSandbox.Cleanup() }()
+	// Apply the thread-scoped filter after LockOSThread.
+	if err := guestSandbox.ApplyStrictSeccomp(); err != nil {
+		return fmt.Errorf("oci runtime: apply strict VMM seccomp filter: %w", err)
+	}
+
 	hostChannel, guestChannel := net.Pipe()
 	agent, err := guesttransport.NewAgent(hostChannel, sessionKey)
 	if err != nil {

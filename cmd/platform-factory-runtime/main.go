@@ -206,7 +206,7 @@ func normalizeInvocation(args []string) ([]string, error) {
 			// This runtime never creates a per-container cgroup at all;
 			// internal/hypervisor/sandbox's cgroup primitive confines the
 			// VMM supervisor process itself, gated by the separate
-			// platform-factory.dev/sandbox-cgroups annotation
+			// secure-oci.dev/sandbox-cgroups annotation
 			// (sandboxConfigForSupervisor, supervisor_linux.go), not by
 			// Podman's own cgroup-manager choice. Accepting the flag
 			// keeps Podman's own invocation happy; there is no cgroup

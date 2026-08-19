@@ -2,6 +2,7 @@ package microvm
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -66,6 +67,60 @@ func TestNativeTargetAndEnvironment(t *testing.T) {
 	want := []string{
 		"MICROVM_MEMORY=128M", "MICROVM_SMP=2", "MICROVM_HOST_ADDRESS=127.0.0.1",
 		"MICROVM_FORWARDS=tcp|127.0.0.1|8443|443",
+	}
+	if got := NativeEnvironment(spec); !reflect.DeepEqual(got, want) {
+		t.Fatalf("environment=%v want=%v", got, want)
+	}
+}
+
+func TestValidateNativeTargetNameEdgeCases(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		ok   bool
+	}{
+		{"a", true},
+		{"demo-1", true},
+		{strings.Repeat("a", 63), true},
+		{strings.Repeat("a", 64), false},
+		{"", false},
+		{"UPPER", false},
+		{"-leading-dash", false},
+		{"trailing-dash-", false},
+		{"../escape", false},
+		{"has space", false},
+	} {
+		err := ValidateNativeTarget(Spec{Name: test.name})
+		if test.ok && err != nil {
+			t.Fatalf("name %q: unexpected error: %v", test.name, err)
+		}
+		if !test.ok && err == nil {
+			t.Fatalf("name %q: expected error, got nil", test.name)
+		}
+	}
+}
+
+func TestNativeEnvironmentMultipleForwardsAndHostIPOverride(t *testing.T) {
+	spec := Spec{
+		Name: "demo", Listen: "0.0.0.0", MemoryMiB: 256, VCPUs: 4, Port: 9090,
+		Forwards: []Forward{
+			{HostPort: 80, GuestPort: 8080, Protocol: "tcp"},
+			{HostIP: "10.0.0.5", HostPort: 53, GuestPort: 53, Protocol: "udp"},
+		},
+	}
+	want := []string{
+		"MICROVM_MEMORY=256M", "MICROVM_SMP=4", "MICROVM_HOST_ADDRESS=0.0.0.0",
+		"MICROVM_FORWARDS=tcp|0.0.0.0|80|8080;udp|10.0.0.5|53|53",
+	}
+	if got := NativeEnvironment(spec); !reflect.DeepEqual(got, want) {
+		t.Fatalf("environment=%v want=%v", got, want)
+	}
+}
+
+func TestNativeEnvironmentNoForwards(t *testing.T) {
+	spec := Spec{Name: "demo", Listen: "127.0.0.1", MemoryMiB: 64, VCPUs: 1}
+	want := []string{
+		"MICROVM_MEMORY=64M", "MICROVM_SMP=1", "MICROVM_HOST_ADDRESS=127.0.0.1",
+		"MICROVM_FORWARDS=",
 	}
 	if got := NativeEnvironment(spec); !reflect.DeepEqual(got, want) {
 		t.Fatalf("environment=%v want=%v", got, want)

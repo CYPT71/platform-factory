@@ -27,7 +27,12 @@ jobs:
           LC_ALL: C.UTF-8
         run: |
           set -euo pipefail
-          go test ./internal/oci ./internal/runtime ./internal/hypervisor/... ./cmd/platform-factory \
+          # internal/ociruntime is deliberately not in this list: none of
+          # the tests selected below live there, and every file in that
+          # package is linux-only, which would fail this cross-OS matrix's
+          # macOS and Windows legs at the build step before -run even
+          # applies its filter.
+          go test ./internal/runtime ./internal/hypervisor/... ./cmd/platform-factory \
             -run "Test(BuildIsDeterministic|BuildSemanticLayersIsDeterministic|RunBuildRebuildVerifiesReproducibility|ProjectDoubleBuildProducesIdenticalDigest|ProbeNativeIsActionable)" \
             -count=1
       - name: Verify the local macOS install includes the native VMM

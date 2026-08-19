@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	"flag"
 	"fmt"
 	"io"
@@ -11,8 +10,8 @@ import (
 	"text/tabwriter"
 
 	"github.com/CYPT71/platform-factory/cmd/tui/marketplacetui"
+	marketplaceapp "github.com/CYPT71/platform-factory/internal/app/marketplace"
 	"github.com/CYPT71/platform-factory/internal/marketplace"
-	hostplugin "github.com/CYPT71/platform-factory/internal/plugin"
 )
 
 func runMarketplace(args []string, stdout, stderr io.Writer) int {
@@ -103,27 +102,6 @@ Examples:
   platform-factory marketplace publish --catalog-url https://example.com/catalog.json`)
 }
 
-func marketplacePaths() (indexPath, sourcesPath, pluginsDir string, err error) {
-	indexPath, err = marketplace.DefaultIndexPath()
-	if err != nil {
-		return "", "", "", err
-	}
-	sourcesPath, err = marketplace.DefaultSourcesPath()
-	if err != nil {
-		return "", "", "", err
-	}
-	dir := os.Getenv("PLATFORM_FACTORY_MARKETPLACE_DIR")
-	if dir == "" {
-		config, cfgErr := os.UserConfigDir()
-		if cfgErr != nil {
-			return "", "", "", cfgErr
-		}
-		dir = config + string(os.PathSeparator) + "platform-factory" + string(os.PathSeparator) + "marketplace"
-	}
-	pluginsDir = dir + string(os.PathSeparator) + "plugins"
-	return indexPath, sourcesPath, pluginsDir, nil
-}
-
 func runMarketplaceSync(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("marketplace sync", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -134,7 +112,7 @@ func runMarketplaceSync(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	indexPath, sourcesPath, _, err := marketplacePaths()
+	indexPath, sourcesPath, _, err := marketplaceapp.Paths()
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace sync: %v\n", err)
 		return 1
@@ -180,7 +158,7 @@ func runMarketplaceSync(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "platform-factory marketplace sync: %v\n", err)
 		return 1
 	}
-	keys, err := loadMarketplaceKeys(keyFiles)
+	keys, err := marketplaceapp.LoadKeys(keyFiles)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace sync: %v\n", err)
 		return 1
@@ -213,7 +191,7 @@ func runMarketplaceSources(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: platform-factory marketplace sources add|remove|list [REPO_URL]")
 		return 2
 	}
-	_, sourcesPath, _, err := marketplacePaths()
+	_, sourcesPath, _, err := marketplaceapp.Paths()
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace sources: %v\n", err)
 		return 1
@@ -283,7 +261,7 @@ func runMarketplaceSearch(args []string, stdout, stderr io.Writer) int {
 	}
 	query := strings.Join(queryArgs, " ")
 
-	indexPath, _, _, err := marketplacePaths()
+	indexPath, _, _, err := marketplaceapp.Paths()
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace search: %v\n", err)
 		return 1
@@ -308,7 +286,7 @@ func runMarketplaceSearch(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(tw, "NAME\tLATEST\tVERIFIED\tDOWNLOADS\tDESCRIPTION")
 	for _, hit := range result.Hits {
 		verifiedMark := ""
-		if anyReleaseVerified(hit.Plugin) {
+		if marketplaceapp.AnyReleaseVerified(hit.Plugin) {
 			verifiedMark = "yes"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\n", hit.Plugin.Name, hit.Plugin.LatestVersion, verifiedMark,
@@ -343,34 +321,6 @@ func splitMarketplaceSearchArgs(args []string) (options, query []string, err err
 	return options, query, nil
 }
 
-func anyReleaseVerified(plugin marketplace.PluginEntry) bool {
-	for _, release := range plugin.Releases {
-		if release.Verified {
-			return true
-		}
-	}
-	return false
-}
-
-func splitNameVersion(arg string) (name, version string) {
-	if idx := strings.LastIndex(arg, "@"); idx > 0 {
-		return arg[:idx], arg[idx+1:]
-	}
-	return arg, ""
-}
-
-func loadMarketplaceKeys(files []string) ([]ed25519.PublicKey, error) {
-	keys := make([]ed25519.PublicKey, 0, len(files))
-	for _, filename := range files {
-		key, err := hostplugin.LoadPublicKey(filename)
-		if err != nil {
-			return nil, err
-		}
-		keys = append(keys, key)
-	}
-	return keys, nil
-}
-
 func runMarketplaceInstall(args []string, stdout, stderr io.Writer, isUpdate bool) int {
 	verb := "install"
 	if isUpdate {
@@ -388,9 +338,9 @@ func runMarketplaceInstall(args []string, stdout, stderr io.Writer, isUpdate boo
 		fmt.Fprintf(stderr, "usage: platform-factory marketplace %s [--allow-unsigned] [--key PUBLIC.pem] NAME[@VERSION]\n", verb)
 		return 2
 	}
-	name, version := splitNameVersion(flags.Arg(0))
+	name, version := marketplaceapp.SplitNameVersion(flags.Arg(0))
 
-	indexPath, _, pluginsDir, err := marketplacePaths()
+	indexPath, _, pluginsDir, err := marketplaceapp.Paths()
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace install: %v\n", err)
 		return 1
@@ -400,7 +350,7 @@ func runMarketplaceInstall(args []string, stdout, stderr io.Writer, isUpdate boo
 		fmt.Fprintf(stderr, "platform-factory marketplace install: %v\n", err)
 		return 1
 	}
-	keys, err := loadMarketplaceKeys(keyFiles)
+	keys, err := marketplaceapp.LoadKeys(keyFiles)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace %s: %v\n", verb, err)
 		return 1
@@ -441,7 +391,7 @@ func runMarketplaceRemove(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: platform-factory marketplace remove NAME")
 		return 2
 	}
-	_, _, pluginsDir, err := marketplacePaths()
+	_, _, pluginsDir, err := marketplaceapp.Paths()
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace remove: %v\n", err)
 		return 1
@@ -456,7 +406,7 @@ func runMarketplaceRemove(args []string, stdout, stderr io.Writer) int {
 }
 
 func runMarketplaceList(args []string, stdout, stderr io.Writer) int {
-	indexPath, _, pluginsDir, err := marketplacePaths()
+	indexPath, _, pluginsDir, err := marketplaceapp.Paths()
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace list: %v\n", err)
 		return 1
@@ -506,12 +456,12 @@ func runMarketplaceTUI(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: platform-factory marketplace tui [--key PUBLIC.pem] [--allow-unsigned]")
 		return 2
 	}
-	indexPath, _, pluginsDir, err := marketplacePaths()
+	indexPath, _, pluginsDir, err := marketplaceapp.Paths()
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace tui: %v\n", err)
 		return 1
 	}
-	keys, err := loadMarketplaceKeys(keyFiles)
+	keys, err := marketplaceapp.LoadKeys(keyFiles)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace tui: %v\n", err)
 		return 1

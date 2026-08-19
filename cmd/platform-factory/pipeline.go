@@ -2,26 +2,17 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/CYPT71/platform-factory/internal/cache"
-	"github.com/CYPT71/platform-factory/internal/core"
-	"github.com/CYPT71/platform-factory/internal/executor"
+	"github.com/CYPT71/platform-factory/internal/app/pipeline"
 	"github.com/CYPT71/platform-factory/internal/observability"
-	"github.com/CYPT71/platform-factory/internal/pipeline"
 )
-
-const engineVersion = "platform-factory/1"
 
 func runPipeline(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -62,33 +53,6 @@ Run options:
   --format FORMAT     json (default) or text`)
 }
 
-func decodePipelineFile(name string) (pipeline.Graph, pipelineDocument, error) {
-	file, err := os.Open(name)
-	if err != nil {
-		return pipeline.Graph{}, pipelineDocument{}, err
-	}
-	defer file.Close()
-	definition, graph, err := pipeline.Decode(file)
-	if err != nil {
-		return pipeline.Graph{}, pipelineDocument{}, err
-	}
-	fingerprint, err := pipeline.Fingerprint(definition)
-	if err != nil {
-		return pipeline.Graph{}, pipelineDocument{}, err
-	}
-	return graph, pipelineDocument{definition: definition, fingerprint: fingerprint}, nil
-}
-
-type pipelineDocument struct {
-	definition  core.Pipeline
-	fingerprint string
-}
-
-func emptyBaseDigest() string {
-	digest := sha256.Sum256(nil)
-	return "sha256:" + hex.EncodeToString(digest[:])
-}
-
 func runPipelinePlan(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("pipeline plan", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -103,30 +67,29 @@ func runPipelinePlan(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: platform-factory pipeline plan [--format json|text] PIPELINE.json")
 		return 2
 	}
-	graph, document, err := decodePipelineFile(flags.Arg(0))
+	result, err := pipeline.New().Plan(flags.Arg(0))
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory pipeline plan: %v\n", err)
 		return 1
 	}
-	available := pipeline.KnownCapabilities()
-	result := map[string]any{
-		"api_version":            cliOutputAPIVersion,
-		"pipeline_api_version":   document.definition.APIVersion,
-		"name":                   document.definition.Name,
-		"fingerprint":            document.fingerprint,
-		"order":                  graph.Order,
-		"levels":                 graph.Levels,
-		"required_capabilities":  document.definition.RequiredCapabilities,
-		"available_capabilities": available,
-		"valid":                  true,
-	}
 	if *outputFormat == "text" {
-		fmt.Fprintf(stdout, "pipeline %s (%s)\n", document.definition.Name, document.fingerprint)
-		for index, level := range graph.Levels {
+		fmt.Fprintf(stdout, "pipeline %s (%s)\n", result.Name, result.Fingerprint)
+		for index, level := range result.Levels {
 			fmt.Fprintf(stdout, "  level %d: %s\n", index, strings.Join(level, ", "))
 		}
 	} else {
-		encoded, _ := json.MarshalIndent(result, "", "  ")
+		output := map[string]any{
+			"api_version":            cliOutputAPIVersion,
+			"pipeline_api_version":   result.PipelineAPIVersion,
+			"name":                   result.Name,
+			"fingerprint":            result.Fingerprint,
+			"order":                  result.Order,
+			"levels":                 result.Levels,
+			"required_capabilities":  result.RequiredCapabilities,
+			"available_capabilities": result.AvailableCapabilities,
+			"valid":                  true,
+		}
+		encoded, _ := json.MarshalIndent(output, "", "  ")
 		fmt.Fprintln(stdout, string(encoded))
 	}
 	return 0
@@ -166,63 +129,28 @@ func runPipelineRun(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	_, document, err := decodePipelineFile(flags.Arg(0))
-	if err != nil {
-		fmt.Fprintf(stderr, "platform-factory pipeline run: %v\n", err)
-		return 1
-	}
-
-	root := *workdir
-	if root == "" {
-		root, err = os.MkdirTemp("", "platform-factory-pipeline-*")
-		if err != nil {
-			fmt.Fprintf(stderr, "platform-factory pipeline run: %v\n", err)
-			return 1
-		}
-	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		fmt.Fprintf(stderr, "platform-factory pipeline run: %v\n", err)
-		return 1
-	}
-	cachePath := *cacheDir
-	if cachePath == "" {
-		cachePath = filepath.Join(root, "cache")
-	}
-	store, err := cache.Open(cachePath)
-	if err != nil {
-		fmt.Fprintf(stderr, "platform-factory pipeline run: open cache: %v\n", err)
-		return 1
-	}
-
-	runner, err := buildStageRunner(*sandboxMode, root, store, *secretEnv, *secretDir, document, stderr)
-	if err != nil {
-		fmt.Fprintf(stderr, "platform-factory pipeline run: %v\n", err)
-		return 1
-	}
-
 	ctx := context.Background()
 	if traceID := os.Getenv("PLATFORM_FACTORY_TRACE_ID"); traceID != "" {
 		ctx = observability.ContextWithTraceID(ctx, traceID)
 	}
-	scheduler := pipeline.Scheduler{Parallelism: *parallelism, Runner: runner.staging, Budget: *budget}
-	report, runErr := scheduler.Run(ctx, document.definition)
-
-	journal := buildJournal(document, report, runner)
-	journalPath := filepath.Join(root, "journal.json")
-	journalData, _ := json.MarshalIndent(journal, "", "  ")
-	if err := os.WriteFile(journalPath, append(journalData, '\n'), 0o644); err != nil {
-		fmt.Fprintf(stderr, "platform-factory pipeline run: write journal: %v\n", err)
+	result, runErr := pipeline.New().Run(ctx, pipeline.RunOptions{
+		Path: flags.Arg(0), Workdir: *workdir, CacheDir: *cacheDir,
+		Parallelism: *parallelism, SandboxMode: *sandboxMode,
+		SecretEnv: *secretEnv, SecretDir: *secretDir, Budget: *budget,
+	}, stderr)
+	if result.JournalPath == "" {
+		fmt.Fprintf(stderr, "platform-factory pipeline run: %v\n", runErr)
 		return 1
 	}
 
 	if *outputFormat == "text" {
 		fmt.Fprintf(stdout, "pipeline %s: %d stages, journal %s\n",
-			document.definition.Name, len(report.Stages), journalPath)
-		for _, stage := range report.Stages {
+			result.Name, len(result.Stages), result.JournalPath)
+		for _, stage := range result.Stages {
 			fmt.Fprintf(stdout, "  %s: %s\n", stage.Stage, stage.State)
 		}
 	} else {
-		output := map[string]any{"api_version": cliOutputAPIVersion, "journal": journalPath, "result": journal, "valid": runErr == nil}
+		output := map[string]any{"api_version": cliOutputAPIVersion, "journal": result.JournalPath, "result": result.Journal, "valid": runErr == nil}
 		encoded, _ := json.MarshalIndent(output, "", "  ")
 		fmt.Fprintln(stdout, string(encoded))
 	}
@@ -231,140 +159,4 @@ func runPipelineRun(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
-}
-
-// stageRunner bundles the caching and staging runners so the journal can
-// read cache hits and per-stage results.
-type stageRunner struct {
-	executor *executor.Executor
-	caching  *executor.CachingRunner
-	staging  *executor.StagingRunner
-	sandbox  string
-}
-
-func buildStageRunner(mode, root string, store *cache.Store, secretEnv bool, secretDir string, document pipelineDocument, stderr io.Writer) (*stageRunner, error) {
-	sandboxState := "off"
-	var exec *executor.Executor
-	if mode != "off" {
-		support := executor.ProbeSandbox()
-		if support.UserNamespaces {
-			mountSources := map[string]string{}
-			for _, input := range document.definition.Inputs {
-				mountSources[input.ID] = input.Source
-			}
-			sandboxed, err := executor.NewSandboxed(root, nil, support, mountSources)
-			if err == nil {
-				exec = sandboxed
-				sandboxState = "on"
-			}
-		}
-		if exec == nil {
-			if mode == "require" {
-				return nil, fmt.Errorf("sandbox required but unavailable: %s", support.Details["user-namespaces"])
-			}
-			fmt.Fprintf(stderr, "platform-factory pipeline run: sandbox unavailable (%s); falling back to the unsandboxed executor\n",
-				support.Details["user-namespaces"])
-		}
-	}
-	if exec == nil {
-		if err := materializePlainMounts(root, document.definition); err != nil {
-			return nil, err
-		}
-		home := filepath.Join(root, "home")
-		if err := os.MkdirAll(home, 0o700); err != nil {
-			return nil, err
-		}
-		exec = executor.New(root, []string{
-			"PATH=" + os.Getenv("PATH"), "HOME=" + home,
-			"LANG=C.UTF-8", "LC_ALL=C.UTF-8",
-			"TZ=UTC", "SOURCE_DATE_EPOCH=0",
-		})
-	}
-	if secretEnv {
-		exec.WithSecretResolver(executor.EnvResolver{})
-	} else if secretDir != "" {
-		exec.WithSecretResolver(executor.DirResolver{Dir: secretDir})
-	}
-	// Wrap store in adapter to implement core.CacheStore interface
-	storeAdapter := cache.NewStoreAdapter(store)
-	caching := executor.NewCachingRunner(exec, root, storeAdapter, engineVersion, emptyBaseDigest(), "linux/amd64")
-	staging := executor.NewStagingRunner(caching, root, storeAdapter, caching)
-	return &stageRunner{executor: exec, caching: caching, staging: staging, sandbox: sandboxState}, nil
-}
-
-func materializePlainMounts(root string, definition core.Pipeline) error {
-	sources := make(map[string]string, len(definition.Inputs))
-	for _, input := range definition.Inputs {
-		sources[input.ID] = input.Source
-	}
-	installed := map[string]string{}
-	for _, stage := range definition.Stages {
-		for _, mount := range stage.Mounts {
-			source, ok := sources[mount.Source]
-			if !ok {
-				return fmt.Errorf("pipeline mount %q has no declared input", mount.Source)
-			}
-			destination := executor.MapPath(root, mount.Target)
-			if previous, ok := installed[destination]; ok {
-				if previous != source {
-					return fmt.Errorf("pipeline mounts %q and %q to the same target %q", previous, source, mount.Target)
-				}
-				continue
-			}
-			info, err := os.Stat(source)
-			if err != nil {
-				return fmt.Errorf("pipeline input %q: %w", mount.Source, err)
-			}
-			if !info.IsDir() {
-				return fmt.Errorf("pipeline input %q: plain execution currently requires a directory", mount.Source)
-			}
-			if err := os.CopyFS(destination, os.DirFS(source)); err != nil {
-				return fmt.Errorf("pipeline input %q: %w", mount.Source, err)
-			}
-			installed[destination] = source
-		}
-	}
-	return nil
-}
-
-func buildJournal(document pipelineDocument, report pipeline.ScheduleResult, runner *stageRunner) map[string]any {
-	hits := map[string]bool{}
-	for _, id := range runner.caching.Hits() {
-		hits[id] = true
-	}
-	execResults := map[string]executor.Result{}
-	for _, result := range runner.executor.Results() {
-		execResults[result.Stage] = result
-	}
-	stages := make([]map[string]any, 0, len(report.Stages))
-	for _, stage := range report.Stages {
-		entry := map[string]any{"id": stage.Stage, "state": stage.State}
-		if stage.Error != "" {
-			entry["error"] = stage.Error
-		}
-		if hits[stage.Stage] {
-			entry["cache"] = "hit"
-		} else if _, ran := execResults[stage.Stage]; ran {
-			entry["cache"] = "miss"
-		}
-		if result, ran := execResults[stage.Stage]; ran {
-			entry["exit_code"] = result.ExitCode
-			entry["duration_ms"] = result.Duration.Milliseconds()
-			if len(result.Stdout) > 0 {
-				entry["stdout"] = string(result.Stdout)
-			}
-			if len(result.Stderr) > 0 {
-				entry["stderr"] = string(result.Stderr)
-			}
-		}
-		stages = append(stages, entry)
-	}
-	return map[string]any{
-		"api_version":          "platform-factory.dev/journal/v1",
-		"pipeline_fingerprint": document.fingerprint,
-		"engine_version":       engineVersion,
-		"sandbox":              runner.sandbox,
-		"generated":            time.Now().UTC().Format(time.RFC3339),
-		"stages":               stages,
-	}
 }

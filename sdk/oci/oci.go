@@ -30,7 +30,7 @@ const (
 // Build writes an OCI Image Layout to Options.Output and returns the digest
 // of its manifest. The result is a complete, standard OCI Image Layout: it
 // runs as an ordinary container under any OCI-compatible engine with no
-// further platform-factory involvement. Targeting the MicroVM runtime for the
+// further secure-oci involvement. Targeting the MicroVM runtime for the
 // same layout instead is opt-in and happens later, via sdk/microvm - Build
 // itself never depends on it and never requires it.
 func Build(opts Options) (digest string, err error) {

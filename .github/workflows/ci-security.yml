@@ -81,12 +81,29 @@ jobs:
           # as sandbox_linux_test.go above) to apply a real seccomp filter
           # in a throwaway child rather than the shared test process.
           # projectinit_test.go's `git init` sets up a real repository
-          # fixture, the same as gitfixture_test.go above.
-          # provisionruntime.go's own os/exec import
-          # is exec.LookPath only (pf init's optional host-runtime-reuse
-          # offer, locating a candidate interpreter already on PATH) - it
-          # never executes anything; actual provisioning still goes through
-          # the injected projectExecutor, not a direct exec.Command here.
+          # fixture, the same as gitfixture_test.go above. git_edge_test.go's
+          # own os/exec import is exec.LookPath only, discovering `git`/`gh`
+          # on PATH for a test skip decision, never executing anything.
+          # cmd/platform-factory/provisionruntime.go's own os/exec import is
+          # exec.LookPath only (pf init's optional host-runtime-reuse offer,
+          # locating a candidate interpreter already on PATH) - it never
+          # executes anything itself. The actual provisioning logic now
+          # lives in internal/app/provisionruntime/provisionruntime.go,
+          # whose injected `execute` func runs the already-resolved,
+          # already-loaded language plugin's "runtime" subcommand - the same
+          # plugin-launch shape as internal/plugin above, not a
+          # caller-controlled command name. internal/app/plugin/plugin.go is
+          # the application-layer home for `pf plugin load --from`'s
+          # source-plugin build/execution (moved out of cmd/platform-factory/
+          # plugin.go referenced above): fixed toolchain binaries (`node`,
+          # `go`, `dotnet`, and any interpreter already resolved via
+          # exec.LookPath) invoked with explicit argument arrays, no shell.
+          # plugin_more_test.go builds and runs the same kind of throwaway
+          # fixtures as the other *_test.go entries above.
+          # shellquote.go's own doc comment mentions "os/exec" in prose (it
+          # explains what the package is NOT for); the package itself only
+          # formats a command line as a string for logging and never
+          # imports os/exec or executes anything.
           # Process execution remains forbidden elsewhere.
           test -z "$(find cmd internal -name '*.go' -type f \
               ! -path 'cmd/microvm-init/main.go' \
@@ -130,6 +147,8 @@ jobs:
             ! -path 'internal/plugin/sandbox_linux.go' \
             ! -path 'internal/plugin/sandbox_other.go' \
             ! -path 'internal/plugin/sandbox_linux_test.go' \
+            ! -path 'internal/app/plugin/plugin.go' \
+            ! -path 'internal/app/plugin/plugin_more_test.go' \
             ! -path 'internal/provenance/plugin.go' \
             ! -path 'internal/provenance/plugin_test.go' \
             ! -path 'internal/sbom/sbom_test.go' \
@@ -138,9 +157,11 @@ jobs:
             ! -path 'internal/ociruntime/runtime_linux_test.go' \
             ! -path 'internal/app/projectinit/projectinit.go' \
             ! -path 'internal/app/projectinit/projectinit_test.go' \
+            ! -path 'internal/app/provisionruntime/provisionruntime.go' \
             ! -path 'internal/marketplace/sync.go' \
             ! -path 'internal/marketplace/gitfixture_test.go' \
             ! -path 'internal/mcp/git/exec.go' \
+            ! -path 'internal/mcp/git/git_edge_test.go' \
             ! -path 'internal/mcp/git/gitfixture_test.go' \
             ! -path 'internal/mcp/project/inspect_test.go' \
             ! -path 'internal/mcp/core/validate.go' \
@@ -156,6 +177,7 @@ jobs:
             ! -path 'cmd/platform-factory/init_e2e_test.go' \
             ! -path 'cmd/platform-factory/marketplace_e2e_test.go' \
             ! -path 'cmd/platform-factory/main_test.go' \
+            ! -path 'internal/shellquote/shellquote.go' \
             -exec grep -nE 'os/exec|exec\.Command' {} + || true)"
           test -z "$(find cmd internal -name '*.go' -type f \
             -exec grep -n 'InsecureSkipVerify' {} + || true)"

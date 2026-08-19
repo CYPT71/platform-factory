@@ -220,7 +220,7 @@ func TestLoadManifestAndExecutableFailClosedOnFilesystemAndJSONErrors(t *testing
 	}
 	for name, content := range map[string]string{
 		"malformed": `{`,
-		"unknown":   `{"api_version":"platform-factory.dev/plugin-manifest/v1","extra":true}`,
+		"unknown":   `{"api_version":"secure-oci.dev/plugin-manifest/v1","extra":true}`,
 		"trailing":  `{} {}`,
 		"invalid":   `{}`,
 	} {

@@ -44,7 +44,7 @@ these levels (see "What isn't true yet" at the bottom).
 
 | Component | Level | Why |
 |---|---|---|
-| OCI builder (`internal/oci`, `cmd/oci-builder`) | **Supported** | Deterministic-build and hostile-layout regression tests in CI (`ci-quality.yml`); no versioned compatibility policy or failure-injection tests yet, so not Stable. |
+| OCI builder (`oci`, `cmd/oci-builder`) | **Supported** | Deterministic-build and hostile-layout regression tests in CI (`ci-quality.yml`); no versioned compatibility policy or failure-injection tests yet, so not Stable. |
 | Supply chain (SBOM, provenance, signing, `internal/sbom`, `internal/provenance`, `internal/signing`) | **Supported** | Tested, used by every build; no dedicated threat-model audit performed yet. |
 | Language plugins - Go, Python, Node.js (`internal/project` built-in freeze adapters, `plugins/lang-python`, `plugins/lang-node`) | **Supported** | The three officially frozen languages for the next release (see "Scope freeze" below); tested, documented in `docs/language-plugin-layers.md`. |
 | Language plugins - Ruby, PHP, Java, .NET, Rust (`plugins/lang-*`) | **Experimental** | Built and tested in isolation same as Python/Node, but outside the frozen release scope below - API/behavior may still shift. |

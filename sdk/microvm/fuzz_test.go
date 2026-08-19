@@ -4,7 +4,7 @@ import "testing"
 
 // FuzzParseForward feeds arbitrary strings at the --publish/-p/--port
 // value parser (PORT, HOST:GUEST, or IP:HOST:GUEST, optional /tcp or
-// /udp) - direct, unvalidated CLI/config input for platform-factory run
+// /udp) - direct, unvalidated CLI/config input for secure-oci run
 // --isolation microvm.
 func FuzzParseForward(f *testing.F) {
 	f.Add("8080")

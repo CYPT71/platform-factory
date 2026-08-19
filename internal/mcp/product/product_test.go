@@ -3,11 +3,68 @@ package product
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 )
+
+// helperProcessEnv/helperExitCodeEnv gate the TestMain stand-in below -
+// the same env-var-gated "act as a different program when re-exec'd"
+// pattern Go's own os/exec tests use (TestHelperProcess), applied here so
+// run()/selfExecutable() can be exercised for real without recursively
+// restarting this package's own test suite. selfExecutable() resolves
+// os.Executable(), which under `go test` is this very test binary; if a
+// test called run() without this guard, the "subprocess" it spawns would
+// be the test binary itself, which - absent the env-var short-circuit in
+// TestMain - would just re-run the whole suite (including that same
+// test) forever. Setting helperProcessEnv before calling run() makes the
+// spawned child take the short-circuit branch instead: it never reaches
+// m.Run(), so it can't recurse, and it deterministically echoes its argv
+// and exits with helperExitCodeEnv's value so the test can assert on
+// exactly what run() plumbed through.
+const (
+	helperProcessEnv  = "PLATFORM_FACTORY_PRODUCT_TEST_HELPER_PROCESS"
+	helperExitCodeEnv = "PLATFORM_FACTORY_PRODUCT_TEST_HELPER_EXIT_CODE"
+)
+
+func TestMain(m *testing.M) {
+	if os.Getenv(helperProcessEnv) == "1" {
+		runAsHelperProcess()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+// runAsHelperProcess makes this test binary stand in for the real
+// platform-factory binary: it echoes its own argv to stdout/stderr and
+// exits with helperExitCodeEnv's value, then stops - it never calls
+// m.Run(), so a chain of these never recurses.
+func runAsHelperProcess() {
+	argv := strings.Join(os.Args[1:], "|")
+	fmt.Fprintf(os.Stdout, "stdout-argv:%s\n", argv)
+	fmt.Fprintf(os.Stderr, "stderr-argv:%s\n", argv)
+	code := 0
+	if v := os.Getenv(helperExitCodeEnv); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			code = parsed
+		}
+	}
+	os.Exit(code)
+}
+
+// withHelperProcess arranges for the next run() call in this test to
+// re-exec the helper stand-in above (via inherited environment on the
+// spawned child) instead of actually restarting the test suite.
+func withHelperProcess(t *testing.T, exitCode int) {
+	t.Helper()
+	t.Setenv(helperProcessEnv, "1")
+	t.Setenv(helperExitCodeEnv, strconv.Itoa(exitCode))
+}
 
 // realPFBinary builds the actual platform-factory binary once per test
 // process and re-execs the *test binary itself* is not what these tests
@@ -144,57 +201,6 @@ func TestDoctorToolHandlerRejectsAnInvalidScope(t *testing.T) {
 	}
 }
 
-func TestDoctorToolHandlerRejectsInvalidJSON(t *testing.T) {
-	handler := DoctorToolHandler(t.TempDir())
-	if _, err := handler(context.Background(), json.RawMessage(`not json`)); err == nil {
-		t.Fatal("expected an error for invalid JSON arguments")
-	}
-}
-
-func TestStatusToolHandlerValidatesBeforeRunningAnything(t *testing.T) {
-	dir := t.TempDir()
-	handler := StatusToolHandler(dir)
-	if _, err := handler(context.Background(), json.RawMessage(`not json`)); err == nil {
-		t.Fatal("expected an error for invalid JSON arguments")
-	}
-	if _, err := handler(context.Background(), json.RawMessage(`{"directory":"../escape"}`)); err == nil {
-		t.Fatal("expected an error for a path-traversal directory argument")
-	}
-}
-
-func TestDetectToolHandlerValidatesBeforeRunningAnything(t *testing.T) {
-	dir := t.TempDir()
-	handler := DetectToolHandler(dir)
-	if _, err := handler(context.Background(), json.RawMessage(`not json`)); err == nil {
-		t.Fatal("expected an error for invalid JSON arguments")
-	}
-	if _, err := handler(context.Background(), json.RawMessage(`{"path":"../escape"}`)); err == nil {
-		t.Fatal("expected an error for a path-traversal path argument")
-	}
-}
-
-func TestInspectToolHandlerRequiresALayout(t *testing.T) {
-	handler := InspectToolHandler(t.TempDir())
-	if _, err := handler(context.Background(), json.RawMessage(`{}`)); err == nil {
-		t.Fatal("expected an error when layout is missing")
-	}
-}
-
-func TestLayoutToolHandlersValidateBeforeRunningAnything(t *testing.T) {
-	dir := t.TempDir()
-	for _, newHandler := range []func(string) func(context.Context, json.RawMessage) (string, error){
-		VerifyToolHandler, InspectToolHandler,
-	} {
-		handler := newHandler(dir)
-		if _, err := handler(context.Background(), json.RawMessage(`not json`)); err == nil {
-			t.Fatal("expected an error for invalid JSON arguments")
-		}
-		if _, err := handler(context.Background(), json.RawMessage(`{"layout":"../escape"}`)); err == nil {
-			t.Fatal("expected an error for a path-traversal layout argument")
-		}
-	}
-}
-
 func TestDetectToolHandlerRequiresAPath(t *testing.T) {
 	handler := DetectToolHandler(t.TempDir())
 	_, err := handler(context.Background(), json.RawMessage(`{}`))
@@ -235,42 +241,89 @@ func TestProjectToolHandlerRejectsAnInvalidAction(t *testing.T) {
 	}
 }
 
-// TestDeployToolHandlerValidatesBeforeRunningAnything covers every
-// error branch DeployToolHandler reaches before its own call to run() -
-// invalid JSON, unsafe extra_args, and each of the three
-// repository-scoped path arguments. It deliberately never supplies
-// arguments that pass every validation, since a successful call would
-// reach run()'s self-re-exec of os.Executable() - the running `go test`
-// binary itself, not platform-factory - and re-run this entire test
-// binary recursively (see realPFBinary's own doc comment above for why
-// these handlers can only be driven end-to-end via a real, separately
-// built binary).
-func TestDeployToolHandlerValidatesBeforeRunningAnything(t *testing.T) {
-	dir := t.TempDir()
-	handler := DeployToolHandler(dir)
-
-	if _, err := handler(context.Background(), json.RawMessage(`not json`)); err == nil {
-		t.Fatal("expected an error for invalid JSON arguments")
-	}
-	if _, err := handler(context.Background(), json.RawMessage(`{"extra_args":["a\u0000b"]}`)); err == nil {
-		t.Fatal("expected an error for a NUL byte in extra_args")
-	}
-	if _, err := handler(context.Background(), json.RawMessage(`{"reports":"../escape"}`)); err == nil {
-		t.Fatal("expected an error for a path-traversal reports argument")
-	}
-	if _, err := handler(context.Background(), json.RawMessage(`{"policy":"../escape"}`)); err == nil {
-		t.Fatal("expected an error for a path-traversal policy argument")
-	}
-	if _, err := handler(context.Background(), json.RawMessage(`{"evidence":"../escape"}`)); err == nil {
-		t.Fatal("expected an error for a path-traversal evidence argument")
-	}
-}
-
 func TestProjectToolHandlerShowRunsTheRealBinary(t *testing.T) {
 	bin := realPFBinary(t)
 	repoRoot := t.TempDir()
 	result := runWithBinary(t, bin, repoRoot, "project", []string{"show"})
 	if result.Stdout == "" {
 		t.Fatal("expected some output about the missing project config from an empty directory")
+	}
+}
+
+func TestSelfExecutableResolvesAnAbsoluteExistingPath(t *testing.T) {
+	path, err := selfExecutable()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !filepath.IsAbs(path) {
+		t.Fatalf("expected an absolute path, got %q", path)
+	}
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Fatalf("expected the resolved path to exist: %v", statErr)
+	}
+}
+
+func TestRunCapturesStdoutStderrArgsAndZeroExit(t *testing.T) {
+	withHelperProcess(t, 0)
+	repoRoot := t.TempDir()
+	args := []string{"--dry-run", "--tag", "v1"}
+	result, err := run(context.Background(), repoRoot, "build", args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Command != "build" {
+		t.Fatalf("command = %q, want %q", result.Command, "build")
+	}
+	if !reflect.DeepEqual(result.Args, args) {
+		t.Fatalf("args = %v, want %v", result.Args, args)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", result.ExitCode)
+	}
+	if !strings.Contains(result.Stdout, "stdout-argv:build|--dry-run|--tag|v1") {
+		t.Fatalf("stdout = %q", result.Stdout)
+	}
+	if !strings.Contains(result.Stderr, "stderr-argv:build|--dry-run|--tag|v1") {
+		t.Fatalf("stderr = %q", result.Stderr)
+	}
+}
+
+func TestRunReturnsNonZeroExitCodeWithoutAGoError(t *testing.T) {
+	withHelperProcess(t, 7)
+	repoRoot := t.TempDir()
+	result, err := run(context.Background(), repoRoot, "deploy", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ExitCode != 7 {
+		t.Fatalf("exit code = %d, want 7", result.ExitCode)
+	}
+}
+
+func TestRunReturnsAGoErrorWhenTheContextIsAlreadyDone(t *testing.T) {
+	withHelperProcess(t, 0)
+	repoRoot := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := run(ctx, repoRoot, "build", nil); err == nil {
+		t.Fatal("expected an error when the context is already canceled")
+	}
+}
+
+func TestEncodeRoundTripsResultAsIndentedJSON(t *testing.T) {
+	result := Result{Command: "build", Args: []string{"--dry-run"}, ExitCode: 1, Stdout: "out", Stderr: "err"}
+	encoded, err := encode(result)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(encoded, "\n  \"command\": \"build\"") {
+		t.Fatalf("expected indented JSON, got %q", encoded)
+	}
+	var decoded Result
+	if err := json.Unmarshal([]byte(encoded), &decoded); err != nil {
+		t.Fatalf("expected valid JSON: %v", err)
+	}
+	if !reflect.DeepEqual(decoded, result) {
+		t.Fatalf("decoded = %+v, want %+v", decoded, result)
 	}
 }

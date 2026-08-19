@@ -1,0 +1,9 @@
+{
+  "api_version": "platform-factory.dev/policy/v1",
+  "require_pins": false,
+  "require_hardening": false,
+  "require_sbom": false,
+  "require_provenance": false,
+  "require_signature": false,
+  "require_reproducible": false
+}

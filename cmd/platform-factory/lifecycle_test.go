@@ -12,13 +12,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CYPT71/platform-factory/internal/app/publish"
 	"github.com/CYPT71/platform-factory/internal/core"
 	"github.com/CYPT71/platform-factory/internal/idempotency"
 	"github.com/CYPT71/platform-factory/internal/layout"
-	"github.com/CYPT71/platform-factory/internal/oci"
 	"github.com/CYPT71/platform-factory/internal/policy"
 	"github.com/CYPT71/platform-factory/internal/registry"
 	"github.com/CYPT71/platform-factory/internal/workloadstate"
+	"github.com/CYPT71/platform-factory/oci"
 )
 
 // freshOperationJournal points operationJournalFor (and, since runPublish
@@ -119,39 +120,6 @@ func TestRunPublishDryRunIncludesSupplyChainOperations(t *testing.T) {
 	}
 }
 
-func TestNativePublicationArtifactsRejectInvalidEvidenceInputs(t *testing.T) {
-	published := registry.Result{
-		Digest:    "sha256:" + strings.Repeat("a", 64),
-		Reference: "registry.example/service@sha256:" + strings.Repeat("a", 64),
-	}
-	artifacts, err := nativePublicationArtifacts("", published, false,
-		"", "", "builder", false, "", "")
-	if err != nil || len(artifacts) != 0 {
-		t.Fatalf("artifacts=%v err=%v", artifacts, err)
-	}
-	root := t.TempDir()
-	invalid := filepath.Join(root, "invalid.json")
-	if err := os.WriteFile(invalid, []byte("{"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := nativePublicationArtifacts("", published, false,
-		invalid, "", "builder", false, "", ""); err == nil {
-		t.Fatal("invalid provenance accepted")
-	}
-	if _, err := nativePublicationArtifacts("", published, false,
-		filepath.Join(root, "missing"), "", "builder", false, "", ""); err == nil {
-		t.Fatal("missing provenance accepted")
-	}
-	if _, err := nativePublicationArtifacts("", published, false,
-		"", invalid, "builder", false, "", ""); err == nil {
-		t.Fatal("invalid journal accepted")
-	}
-	if _, err := nativePublicationArtifacts(filepath.Join(root, "missing-layout"), published, true,
-		"", "", "builder", false, "", ""); err == nil {
-		t.Fatal("missing SBOM layout accepted")
-	}
-}
-
 func TestRunPublishExecutesInOrderAndReportsFailure(t *testing.T) {
 	layoutName := buildPublishLayout(t, "example/service", "v1")
 	digest := "sha256:" + strings.Repeat("d", 64)
@@ -249,49 +217,6 @@ func TestRunPublishReferenceOutput(t *testing.T) {
 	}
 }
 
-func TestPublicationPolicyUsesGeneratedEvidenceAndFailsClosed(t *testing.T) {
-	root := t.TempDir()
-	rules := filepath.Join(root, "policy.json")
-	evidence := filepath.Join(root, "evidence.json")
-	if err := os.WriteFile(rules, []byte(`{
-	  "api_version":"platform-factory.dev/policy/v1",
-	  "require_pins":true,
-	  "require_hardening":true,
-	  "require_sbom":true,
-	  "require_provenance":true,
-	  "require_signature":true,
-	  "require_reproducible":true
-	}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(evidence, []byte(`{
-	  "subject_digest":"",
-	  "sources_pinned":true,
-	  "base_pinned":true,
-	  "toolchain_pinned":true,
-	  "plugins_pinned":true,
-	  "non_root":true,
-	  "read_only_rootfs":true,
-	  "capabilities_dropped":true,
-	  "secrets_absent":true,
-	  "sbom":false,
-	  "provenance":false,
-	  "signature":false,
-	  "reproducible":true
-	}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	published := registry.Result{Digest: "sha256:" + strings.Repeat("a", 64)}
-	decision, err := evaluatePublicationPolicy(rules, evidence, published, true, true, true)
-	if err != nil || !decision.Allowed {
-		t.Fatalf("decision=%+v err=%v", decision, err)
-	}
-	decision, err = evaluatePublicationPolicy(rules, evidence, published, true, false, true)
-	if err != nil || decision.Allowed || !strings.Contains(strings.Join(decision.Reasons, " "), "provenance") {
-		t.Fatalf("decision=%+v err=%v", decision, err)
-	}
-}
-
 func TestV3PublicationExitCriteriaFailClosed(t *testing.T) {
 	t.Run("altered layout never reaches registry", func(t *testing.T) {
 		layoutName := buildPublishLayout(t, "example/service", "v1")
@@ -346,7 +271,7 @@ func TestV3PublicationExitCriteriaFailClosed(t *testing.T) {
 		if err := os.WriteFile(evidence, []byte(`{"reproducible":false}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		decision, err := evaluatePublicationPolicy(rules, evidence,
+		decision, err := publish.EvaluatePolicy(rules, evidence,
 			registry.Result{Digest: "sha256:" + strings.Repeat("b", 64)}, true, true, true)
 		if err != nil {
 			t.Fatal(err)
@@ -548,106 +473,15 @@ func TestRunPublishAppliesPolicyDecision(t *testing.T) {
 // helper's own failure branches: a required-but-empty evidence path, a
 // policy file that does not exist, and a policy file containing more than
 // one JSON value.
-func TestEvaluatePublicationPolicyDecodeFailures(t *testing.T) {
-	published := registry.Result{Digest: "sha256:" + strings.Repeat("a", 64)}
-	if _, err := evaluatePublicationPolicy("policy.json", "", published, false, false, false); err == nil {
-		t.Fatal("expected empty evidence path rejection")
-	}
-	root := t.TempDir()
-	evidencePath := filepath.Join(root, "evidence.json")
-	if err := os.WriteFile(evidencePath, []byte(`{}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := evaluatePublicationPolicy(filepath.Join(root, "missing-policy.json"), evidencePath,
-		published, false, false, false); err == nil {
-		t.Fatal("expected missing policy file rejection")
-	}
-	trailing := filepath.Join(root, "trailing.json")
-	if err := os.WriteFile(trailing, []byte(`{"api_version":"platform-factory.dev/policy/v1"}{"extra":true}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := evaluatePublicationPolicy(trailing, evidencePath, published, false, false, false); err == nil {
-		t.Fatal("expected trailing-content policy file rejection")
-	}
-}
 
 // TestNativePublicationArtifactsSignUsesDefaultKeyDirectory drives the
 // keyDir=="" branch, which resolves the signing key directory from the
 // user's home directory rather than an explicit --key-dir.
-func TestNativePublicationArtifactsSignUsesDefaultKeyDirectory(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	published := registry.Result{
-		Digest:    "sha256:" + strings.Repeat("a", 64),
-		Reference: "registry.example/service@sha256:" + strings.Repeat("a", 64),
-	}
-	artifacts, err := nativePublicationArtifacts("", published, false, "", "", "builder", true, "", "release")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(artifacts) != 1 || artifacts[0].name != "signature" {
-		t.Fatalf("artifacts=%+v", artifacts)
-	}
-}
-
-func TestNativePublicationArtifactsSignSurfacesKeyStoreFailure(t *testing.T) {
-	root := t.TempDir()
-	blocked := filepath.Join(root, "blocked")
-	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	published := registry.Result{Digest: "sha256:" + strings.Repeat("a", 64)}
-	if _, err := nativePublicationArtifacts("", published, false, "", "", "builder", true, blocked, "release"); err == nil {
-		t.Fatal("expected key store failure when key-dir is a regular file")
-	}
-}
-
-func TestNativePublicationArtifactsSignSurfacesPublicKeyFailure(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory write permissions")
-	}
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chmod(dir, 0o755)
-	published := registry.Result{Digest: "sha256:" + strings.Repeat("a", 64)}
-	if _, err := nativePublicationArtifacts("", published, false, "", "", "builder", true, dir, "release"); err == nil {
-		t.Fatal("expected public key generation failure when key-dir is unwritable")
-	}
-}
 
 // TestNativePublicationArtifactsJournalProvenance covers the
 // journal-derived provenance path (as opposed to the --provenance file
 // path already covered indirectly through launch_publish_test.go), both
 // on success and when the journal file cannot be opened.
-func TestNativePublicationArtifactsJournalProvenance(t *testing.T) {
-	root := t.TempDir()
-	journalPath := filepath.Join(root, "journal.json")
-	journal := `{
-	  "api_version":"platform-factory.dev/journal/v1",
-	  "pipeline_fingerprint":"sha256:abc",
-	  "engine_version":"platform-factory/1",
-	  "sandbox":"on",
-	  "generated":"2026-07-28T12:00:00Z",
-	  "stages":[{"id":"build","state":"succeeded"}]
-	}`
-	if err := os.WriteFile(journalPath, []byte(journal), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	published := registry.Result{Digest: "sha256:" + strings.Repeat("a", 64)}
-	artifacts, err := nativePublicationArtifacts("", published, false, "", journalPath,
-		"https://platform-factory.dev/builder/v1", false, "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(artifacts) != 1 || artifacts[0].name != "provenance" {
-		t.Fatalf("artifacts=%+v", artifacts)
-	}
-	if _, err := nativePublicationArtifacts("", published, false, "", filepath.Join(root, "missing.json"),
-		"builder", false, "", ""); err == nil {
-		t.Fatal("expected missing journal file to fail")
-	}
-}
 
 func TestRunDeployDryRunEmitsHardenedManifest(t *testing.T) {
 	var stdout, stderr bytes.Buffer
@@ -1140,9 +974,6 @@ func TestCompletionAndCommandFormatting(t *testing.T) {
 	if code := runCompletion(nil, &stdout, &stderr); code != 2 {
 		t.Fatalf("missing shell code=%d", code)
 	}
-	if got := formatCommand("tool", []string{"plain", "two words", "it's"}); got != `tool plain 'two words' 'it'\''s'` {
-		t.Fatalf("formatted command=%q", got)
-	}
 }
 
 type lifecycleExitError struct{ code int }
@@ -1436,31 +1267,31 @@ func (f failingStore) Lookup(core.WorkloadID) (core.RuntimeState, bool, error) {
 func (f failingStore) Save(core.WorkloadID, core.RuntimeState) error { return f.saveErr }
 
 func TestTransitionPublishWorkload(t *testing.T) {
-	if warning, ok := transitionPublishWorkload(nil, "w", core.PhasePublishing); !ok || warning != "" {
+	if warning, ok := publish.TransitionWorkload(nil, "w", core.PhasePublishing); !ok || warning != "" {
 		t.Fatalf("nil store: warning=%q ok=%t", warning, ok)
 	}
 
 	sentinel := errors.New("lookup boom")
-	if warning, ok := transitionPublishWorkload(failingStore{lookupErr: sentinel}, "w", core.PhasePublishing); ok || !strings.Contains(warning, "lookup boom") {
+	if warning, ok := publish.TransitionWorkload(failingStore{lookupErr: sentinel}, "w", core.PhasePublishing); ok || !strings.Contains(warning, "lookup boom") {
 		t.Fatalf("lookup error: warning=%q ok=%t", warning, ok)
 	}
 
 	// Not found defaults to PhaseBuilt, from which PhasePublishing is a
 	// valid transition per internal/core/statemachine.go's own table.
 	store := failingStore{lookupFound: false}
-	if warning, ok := transitionPublishWorkload(store, "w", core.PhasePublishing); !ok || warning != "" {
+	if warning, ok := publish.TransitionWorkload(store, "w", core.PhasePublishing); !ok || warning != "" {
 		t.Fatalf("not found: warning=%q ok=%t", warning, ok)
 	}
 
 	// PhaseBuilt -> PhaseDeploying is not a valid direct transition.
 	invalidFrom := failingStore{lookupFound: true, lookupState: core.RuntimeState{Phase: core.PhaseBuilt}}
-	if warning, ok := transitionPublishWorkload(invalidFrom, "w", core.PhaseDeploying); ok || warning == "" {
+	if warning, ok := publish.TransitionWorkload(invalidFrom, "w", core.PhaseDeploying); ok || warning == "" {
 		t.Fatalf("invalid transition: warning=%q ok=%t", warning, ok)
 	}
 
 	saveSentinel := errors.New("save boom")
 	saveFails := failingStore{lookupFound: true, lookupState: core.RuntimeState{Phase: core.PhaseBuilt}, saveErr: saveSentinel}
-	if warning, ok := transitionPublishWorkload(saveFails, "w", core.PhasePublishing); ok || !strings.Contains(warning, "save boom") {
+	if warning, ok := publish.TransitionWorkload(saveFails, "w", core.PhasePublishing); ok || !strings.Contains(warning, "save boom") {
 		t.Fatalf("save error: warning=%q ok=%t", warning, ok)
 	}
 
@@ -1468,7 +1299,7 @@ func TestTransitionPublishWorkload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if warning, ok := transitionPublishWorkload(real, "w", core.PhasePublishing); !ok || warning != "" {
+	if warning, ok := publish.TransitionWorkload(real, "w", core.PhasePublishing); !ok || warning != "" {
 		t.Fatalf("real store success: warning=%q ok=%t", warning, ok)
 	}
 }

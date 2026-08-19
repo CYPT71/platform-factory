@@ -74,7 +74,7 @@ image works:
       "args": [
         "run", "--rm", "-i",
         "-v", "/path/to/platform-factory:/workspace",
-        "ghcr.io/cypt71/platform-factory-base-mcp:latest",
+        "ghcr.io/cypt71/secure-oci-base-mcp:latest",
         "mcp", "serve", "--repo", "/workspace"
       ]
     }

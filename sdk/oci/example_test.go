@@ -11,7 +11,7 @@ import (
 )
 
 func ExampleBuild() {
-	dir, err := os.MkdirTemp("", "platform-factory-sdk-oci-example-*")
+	dir, err := os.MkdirTemp("", "secure-oci-sdk-oci-example-*")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func ExampleBuild() {
 		log.Fatal(err)
 	}
 
-	// The result is a standard OCI Image Layout: no platform-factory code is
+	// The result is a standard OCI Image Layout: no secure-oci code is
 	// needed to consume it, only to build it. `oci-layout` and `index.json`
 	// are the two files every OCI-compatible engine looks for.
 	for _, name := range []string{"oci-layout", "index.json"} {

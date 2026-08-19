@@ -26,7 +26,7 @@ import (
 var areaPackages = map[string][]string{
 	"marketplace":  {"internal/marketplace", "cmd/tui/marketplacetui"},
 	"runtime":      {"internal/runtime", "internal/ociruntime", "internal/executor", "internal/guest", "internal/guesttransport"},
-	"builder":      {"internal/oci", "internal/layout", "internal/rootfs", "internal/assemble", "internal/pipeline", "internal/scheduler"},
+	"builder":      {"oci", "internal/layout", "internal/rootfs", "internal/assemble", "internal/pipeline", "internal/scheduler"},
 	"registry":     {"internal/registry"},
 	"supply-chain": {"internal/attestation", "internal/provenance", "internal/sbom", "internal/signing", "internal/policy"},
 	"microvm":      {"internal/microvm", "internal/hypervisor", "internal/directboot", "internal/vmdisk"},

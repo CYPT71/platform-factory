@@ -14,10 +14,10 @@ import (
 	"strings"
 )
 
-// ExtraFile mirrors internal/oci.ExtraFile field-for-field so a caller (the
+// ExtraFile mirrors oci.ExtraFile field-for-field so a caller (the
 // composition root in cmd/, which is allowed to depend on both) can convert
 // one into the other with a plain literal. internal/project does not import
-// internal/oci itself - domain packages must not depend on concrete
+// the oci package itself - domain packages must not depend on concrete
 // infrastructure packages, enforced by internal/archtest.
 type ExtraFile struct {
 	Dest, Source string
@@ -25,8 +25,8 @@ type ExtraFile struct {
 	Category     string
 }
 
-// Semantic layer categories. Matches internal/oci.Category* by value (both
-// are plain strings, and internal/oci.Build validates an ExtraFile.Category
+// Semantic layer categories. Matches oci.Category* by value (both
+// are plain strings, and oci.Build validates an ExtraFile.Category
 // against exactly these four names) rather than by importing that package.
 const (
 	CategoryToolchain    = "toolchain"

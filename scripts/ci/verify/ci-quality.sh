@@ -72,7 +72,7 @@ DOTNET_ROOT="$csharp_runtime_root" "$work/platform-factory-conformance" plugin \
 
 echo "--- Run explicit CLI, OCI, and mTLS regression tests ---"
 go test ./cmd/oci-builder -run 'TestRunWithoutArgumentsShowsUsage|TestRunArgumentErrors|TestRunBuildsLayout'
-go test ./internal/oci -run 'TestBuildWritesValidLayout|TestBuildRejectsUnsafeInputs|TestBuildErrors|TestNormalizeValidation|TestWriteLayoutErrors'
+go test ./internal/ociruntime -run 'TestBuildWritesValidLayout|TestBuildRejectsUnsafeInputs|TestBuildErrors|TestNormalizeValidation|TestWriteLayoutErrors'
 go test ./internal/mtls -count=1
 
 echo "--- Build local Linux and Windows command environments ---"

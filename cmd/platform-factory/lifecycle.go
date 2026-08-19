@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -15,18 +14,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CYPT71/platform-factory/internal/app/sbom"
-	"github.com/CYPT71/platform-factory/internal/attestation"
+	"github.com/CYPT71/platform-factory/internal/app/deploy"
+	"github.com/CYPT71/platform-factory/internal/app/observe"
+	"github.com/CYPT71/platform-factory/internal/app/publish"
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
 	"github.com/CYPT71/platform-factory/internal/core"
 	"github.com/CYPT71/platform-factory/internal/idempotency"
 	"github.com/CYPT71/platform-factory/internal/layout"
 	"github.com/CYPT71/platform-factory/internal/observability"
 	"github.com/CYPT71/platform-factory/internal/policy"
 	"github.com/CYPT71/platform-factory/internal/project"
-	provenancegen "github.com/CYPT71/platform-factory/internal/provenance"
 	"github.com/CYPT71/platform-factory/internal/publicationtarget"
 	"github.com/CYPT71/platform-factory/internal/registry"
-	"github.com/CYPT71/platform-factory/internal/signing"
+	"github.com/CYPT71/platform-factory/internal/shellquote"
 	"github.com/CYPT71/platform-factory/internal/strictjson"
 	"github.com/CYPT71/platform-factory/internal/workloadstate"
 )
@@ -57,29 +57,6 @@ func defaultLifecycleRoot(environment, name string) string {
 		return filepath.Join(cacheDir, "platform-factory", name)
 	}
 	return filepath.Join(".platform-factory", name)
-}
-
-// transitionPublishWorkload records publish progress without changing the
-// registry operation's outcome when state persistence fails.
-func transitionPublishWorkload(store workloadstate.Store, workloadID core.WorkloadID, to core.Phase) (warning string, ok bool) {
-	if store == nil {
-		return "", true
-	}
-	current, found, err := store.Lookup(workloadID)
-	if err != nil {
-		return fmt.Sprintf("workload state: lookup %s: %v", workloadID, err), false
-	}
-	if !found {
-		current = core.RuntimeState{Phase: core.PhaseBuilt}
-	}
-	next, err := current.TransitionTo(to)
-	if err != nil {
-		return fmt.Sprintf("workload state: %v", err), false
-	}
-	if err := store.Save(workloadID, next); err != nil {
-		return fmt.Sprintf("workload state: save %s: %v", workloadID, err), false
-	}
-	return "", true
 }
 
 // cliOperationID deterministically identifies one logical mutation.
@@ -313,7 +290,7 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 	}
 	if *policyFile != "" {
 		localDigest := report.Platforms[0].Digest
-		decision, policyErr := evaluatePublicationPolicy(*policyFile, *evidenceFile,
+		decision, policyErr := publish.EvaluatePolicy(*policyFile, *evidenceFile,
 			registry.Result{Digest: localDigest}, *includeSBOM, *provenance != "" || *journal != "", *sign)
 		if policyErr != nil {
 			fmt.Fprintf(stderr, "platform-factory publish: policy preflight: %v\n", policyErr)
@@ -373,7 +350,7 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 		fmt.Fprintf(stderr, "platform-factory publish: open workload state store: %v\n", err)
 		return 1
 	}
-	if warning, ok := transitionPublishWorkload(stateStore, workloadID, core.PhasePublishing); !ok {
+	if warning, ok := publish.TransitionWorkload(stateStore, workloadID, core.PhasePublishing); !ok {
 		fmt.Fprintf(stderr, "platform-factory publish: %s\n", warning)
 	}
 
@@ -381,12 +358,12 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 	defer func() {
 		if succeeded {
 			_ = opJournal.Complete(opID)
-			if warning, ok := transitionPublishWorkload(stateStore, workloadID, core.PhasePublished); !ok {
+			if warning, ok := publish.TransitionWorkload(stateStore, workloadID, core.PhasePublished); !ok {
 				fmt.Fprintf(stderr, "platform-factory publish: %s\n", warning)
 			}
 		} else {
 			_ = opJournal.Fail(opID)
-			if warning, ok := transitionPublishWorkload(stateStore, workloadID, core.PhaseFailed); !ok {
+			if warning, ok := publish.TransitionWorkload(stateStore, workloadID, core.PhaseFailed); !ok {
 				fmt.Fprintf(stderr, "platform-factory publish: %s\n", warning)
 			}
 		}
@@ -408,7 +385,7 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 		return 1
 	}
 	_ = execute // retained in the command boundary for deploy/rollback test injection.
-	artifacts, err := nativePublicationArtifacts(layoutName, published, *includeSBOM,
+	artifacts, err := publish.BuildArtifacts(layoutName, published, *includeSBOM,
 		*provenance, *journal, *builderID, *sign, *keyDir, *keyName)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory publish: build native evidence: %v\n", err)
@@ -416,13 +393,13 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 	}
 	for _, artifact := range artifacts {
 		if _, err := pushOCIArtifact(ctx, target, published,
-			artifact.artifactType, artifact.payloadType, artifact.payload, scheme, *username, password); err != nil {
-			fmt.Fprintf(stderr, "platform-factory publish: publish %s: %v\n", artifact.name, err)
+			artifact.ArtifactType, artifact.PayloadType, artifact.Payload, scheme, *username, password); err != nil {
+			fmt.Fprintf(stderr, "platform-factory publish: publish %s: %v\n", artifact.Name, err)
 			return 1
 		}
 	}
 	if *policyFile != "" {
-		decision, err := evaluatePublicationPolicy(*policyFile, *evidenceFile, published,
+		decision, err := publish.EvaluatePolicy(*policyFile, *evidenceFile, published,
 			*includeSBOM, *provenance != "" || *journal != "", *sign)
 		if err != nil {
 			fmt.Fprintf(stderr, "platform-factory publish: policy: %v\n", err)
@@ -451,15 +428,15 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 			CapabilitiesDropped: true, SecretsAbsent: true, SBOM: true,
 			Provenance: true, Signature: true, Reproducible: true,
 		}
-		if err := writeLaunchJSON(filepath.Join(publicationDir, "policy.json"), publicationRules); err != nil {
+		if err := atomicfile.WriteJSONSensitive(filepath.Join(publicationDir, "policy.json"), publicationRules); err != nil {
 			fmt.Fprintf(stderr, "platform-factory publish: persist publication policy: %v\n", err)
 			return 1
 		}
-		if err := writeLaunchJSON(filepath.Join(publicationDir, "evidence.json"), publicationEvidence); err != nil {
+		if err := atomicfile.WriteJSONSensitive(filepath.Join(publicationDir, "evidence.json"), publicationEvidence); err != nil {
 			fmt.Fprintf(stderr, "platform-factory publish: persist publication evidence: %v\n", err)
 			return 1
 		}
-		if err := writeLaunchJSON(filepath.Join(discoveredProject.Root, ".platform-factory", "published.json"), map[string]any{
+		if err := atomicfile.WriteJSONSensitive(filepath.Join(discoveredProject.Root, ".platform-factory", "published.json"), map[string]any{
 			"api_version": "platform-factory.dev/publication/v1", "digest": digest,
 			"reference": immutable, "repository": target.Registry + "/" + target.Repository, "scheme": scheme,
 		}); err != nil {
@@ -472,7 +449,7 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 	// failed/indeterminate publication in the write-once operation journal.
 	succeeded = true
 	if *reportsDir != "" {
-		if err := writeReportJSON(*reportsDir, "metrics.json", map[string]any{
+		if err := atomicfile.WriteJSON(*reportsDir, "metrics.json", map[string]any{
 			"api_version": "platform-factory.dev/metrics/v1", "operation": "publish",
 			"trace_id": observability.TraceIDFromContext(ctx), "duration_ms": time.Since(startedAt).Milliseconds(),
 			"digest": digest, "reference": immutable, "artifacts": len(artifacts), "tag_moved": true, "success": true,
@@ -494,166 +471,6 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 
 func defaultUploadSessionDir() string {
 	return defaultLifecycleRoot("PLATFORM_FACTORY_UPLOAD_SESSION_DIR", "registry-uploads")
-}
-
-// decodeStrictJSON applies the canonical fail-closed decoder to at most 1 MiB.
-func decodeStrictJSON(path string, target any) error {
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, 1<<20))
-	if err != nil {
-		return err
-	}
-	return strictjson.Decode(data, target)
-}
-
-func decodePolicyRulesAndEvidence(policyPath, evidencePath string) (policy.Rules, policy.Evidence, error) {
-	if evidencePath == "" {
-		return policy.Rules{}, policy.Evidence{}, errors.New("--evidence is required with --policy")
-	}
-	var rules policy.Rules
-	if err := decodeStrictJSON(policyPath, &rules); err != nil {
-		return policy.Rules{}, policy.Evidence{}, fmt.Errorf("decode rules: %w", err)
-	}
-	var evidence policy.Evidence
-	if err := decodeStrictJSON(evidencePath, &evidence); err != nil {
-		return policy.Rules{}, policy.Evidence{}, fmt.Errorf("decode evidence: %w", err)
-	}
-	return rules, evidence, nil
-}
-
-func evaluatePublicationPolicy(policyPath, evidencePath string, published registry.Result, hasSBOM, hasProvenance, hasSignature bool) (policy.Decision, error) {
-	rules, evidence, err := decodePolicyRulesAndEvidence(policyPath, evidencePath)
-	if err != nil {
-		return policy.Decision{}, err
-	}
-	evidence.SubjectDigest = published.Digest
-	evidence.SBOM = hasSBOM
-	evidence.Provenance = hasProvenance
-	evidence.Signature = hasSignature
-	return policy.Evaluate(rules, evidence)
-}
-
-// evaluateDeploymentPolicy binds existing evidence to the deployed digest.
-func evaluateDeploymentPolicy(policyPath, evidencePath, digest string) (policy.Decision, error) {
-	rules, evidence, err := decodePolicyRulesAndEvidence(policyPath, evidencePath)
-	if err != nil {
-		return policy.Decision{}, err
-	}
-	evidence.SubjectDigest = digest
-	return policy.Evaluate(rules, evidence)
-}
-
-type publicationArtifact struct {
-	name, artifactType, payloadType string
-	payload                         []byte
-}
-
-func nativePublicationArtifacts(layoutName string, published registry.Result, includeSBOM bool, provenancePath, journalPath, builderID string, sign bool, keyDir, keyName string) ([]publicationArtifact, error) {
-	var store signing.KeyStore
-	var keyID string
-	if sign {
-		if keyDir == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return nil, err
-			}
-			keyDir = filepath.Join(home, ".platform-factory", "keys")
-		}
-		fileStore, err := signing.NewFileKeyStore(keyDir)
-		if err != nil {
-			return nil, err
-		}
-		store = fileStore
-		publicKey, err := store.PublicKey(keyName)
-		if err != nil {
-			return nil, err
-		}
-		keyID = "ed25519:" + base64.RawURLEncoding.EncodeToString(publicKey)
-	}
-	var artifacts []publicationArtifact
-	if includeSBOM {
-		sbomService := sbom.New()
-		paths, err := sbomService.CollectPaths([]string{layoutName})
-		if err != nil {
-			return nil, err
-		}
-		document, err := sbomService.Generate(paths)
-		if err != nil {
-			return nil, err
-		}
-		payload, err := json.Marshal(document)
-		if err != nil {
-			return nil, err
-		}
-		artifacts = append(artifacts, publicationArtifact{
-			name: "SBOM", artifactType: "application/vnd.platform-factory.sbom.v1+json",
-			payloadType: "application/json", payload: payload,
-		})
-	}
-	if provenancePath != "" || journalPath != "" {
-		var payload []byte
-		var err error
-		if journalPath != "" {
-			file, openErr := os.Open(journalPath)
-			if openErr != nil {
-				return nil, openErr
-			}
-			predicate, generateErr := provenancegen.FromJournal(file, builderID)
-			_ = file.Close()
-			if generateErr != nil {
-				return nil, generateErr
-			}
-			payload, err = json.Marshal(predicate)
-		} else {
-			payload, err = os.ReadFile(provenancePath)
-		}
-		if err != nil {
-			return nil, err
-		}
-		if !json.Valid(payload) {
-			return nil, errors.New("provenance predicate must be valid JSON")
-		}
-		if sign {
-			var predicate any
-			if err := json.Unmarshal(payload, &predicate); err != nil {
-				return nil, err
-			}
-			envelope, err := attestation.Sign(store, keyName, keyID,
-				"application/vnd.in-toto+json", predicate)
-			if err != nil {
-				return nil, err
-			}
-			payload, err = json.Marshal(envelope)
-			if err != nil {
-				return nil, err
-			}
-		}
-		artifacts = append(artifacts, publicationArtifact{
-			name: "provenance", artifactType: "application/vnd.platform-factory.provenance.v1+json",
-			payloadType: "application/json", payload: payload,
-		})
-	}
-	if sign {
-		envelope, err := attestation.Sign(store, keyName, keyID,
-			"application/vnd.platform-factory.subject.v1+json",
-			map[string]string{"digest": published.Digest, "reference": published.Reference})
-		if err != nil {
-			return nil, err
-		}
-		payload, err := json.Marshal(envelope)
-		if err != nil {
-			return nil, err
-		}
-		artifacts = append(artifacts, publicationArtifact{
-			name: "signature", artifactType: "application/vnd.platform-factory.signature.v1+json",
-			payloadType: attestation.EnvelopeMediaType, payload: payload,
-		})
-	}
-	return artifacts, nil
 }
 
 func printDeployUsage(output io.Writer, flags *flag.FlagSet) {
@@ -726,7 +543,7 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 		fmt.Fprintln(stderr, "platform-factory deploy: --runtime-class must be a valid Kubernetes name")
 		return 2
 	}
-	configEntries, secretReferences, persistentVolumes, extensionErr := parseKubernetesExtensions(configValues, secretEnvValues, volumeValues)
+	configEntries, secretReferences, persistentVolumes, extensionErr := deploy.ParseKubernetesExtensions(configValues, secretEnvValues, volumeValues)
 	if extensionErr != nil {
 		fmt.Fprintf(stderr, "platform-factory deploy: %v\n", extensionErr)
 		return 2
@@ -761,7 +578,7 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 			Scheme     string `json:"scheme"`
 		}
 		publishedPath := filepath.Join(loaded.Root, ".platform-factory", "published.json")
-		if err := decodeStrictJSON(publishedPath, &published); err != nil {
+		if err := strictjson.DecodeFile(publishedPath, &published); err != nil {
 			fmt.Fprintf(stderr, "platform-factory deploy: no verified published release (run `pf publish` first): %v\n", err)
 			return 1
 		}
@@ -790,7 +607,7 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 	}
 	if *policyFile != "" {
 		_, digest, _ := strings.Cut(image, "@")
-		decision, err := evaluateDeploymentPolicy(*policyFile, *evidenceFile, digest)
+		decision, err := deploy.EvaluatePolicy(*policyFile, *evidenceFile, digest)
 		if err != nil {
 			fmt.Fprintf(stderr, "platform-factory deploy: policy: %v\n", err)
 			return 1
@@ -851,7 +668,7 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 		if *reportsDir == "" {
 			*reportsDir = filepath.Join(deploymentProject.Root, ".platform-factory", "deployment")
 		}
-		if err := writeLaunchJSON(filepath.Join(deploymentProject.Root, ".platform-factory", "deployed.json"), map[string]any{
+		if err := atomicfile.WriteJSONSensitive(filepath.Join(deploymentProject.Root, ".platform-factory", "deployed.json"), map[string]any{
 			"api_version": "platform-factory.dev/deployment/v1", "image": image,
 			"name": *name, "namespace": *namespace, "workload": selectedWorkload,
 			"runtime_class": *runtimeClass,
@@ -862,7 +679,7 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 	}
 	if code == 0 && *reportsDir != "" {
 		_, digest, _ := strings.Cut(image, "@")
-		if err := writeReportJSON(*reportsDir, "metrics.json", map[string]any{
+		if err := atomicfile.WriteJSON(*reportsDir, "metrics.json", map[string]any{
 			"api_version": "platform-factory.dev/metrics/v1", "operation": "deploy",
 			"trace_id": traceID, "duration_ms": time.Since(startedAt).Milliseconds(),
 			"digest": digest, "namespace": *namespace, "name": *name,
@@ -872,35 +689,6 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 		}
 	}
 	return code
-}
-
-func parseKubernetesExtensions(configValues, secretValues, volumeValues []string) ([]publicationtarget.KeyValue, []publicationtarget.SecretEnvReference, []publicationtarget.PersistentVolume, error) {
-	configs := make([]publicationtarget.KeyValue, 0, len(configValues))
-	for _, value := range configValues {
-		key, content, ok := strings.Cut(value, "=")
-		if !ok {
-			return nil, nil, nil, fmt.Errorf("--config must use KEY=VALUE")
-		}
-		configs = append(configs, publicationtarget.KeyValue{Key: key, Value: content})
-	}
-	secrets := make([]publicationtarget.SecretEnvReference, 0, len(secretValues))
-	for _, value := range secretValues {
-		env, reference, ok := strings.Cut(value, "=")
-		secret, key, slash := strings.Cut(reference, "/")
-		if !ok || !slash || strings.Contains(key, "/") {
-			return nil, nil, nil, fmt.Errorf("--secret-env must use ENV=SECRET/KEY")
-		}
-		secrets = append(secrets, publicationtarget.SecretEnvReference{Env: env, Secret: secret, Key: key})
-	}
-	volumes := make([]publicationtarget.PersistentVolume, 0, len(volumeValues))
-	for _, value := range volumeValues {
-		mount, size, ok := strings.Cut(value, "=")
-		if !ok {
-			return nil, nil, nil, fmt.Errorf("--volume must use MOUNT_PATH=SIZE")
-		}
-		volumes = append(volumes, publicationtarget.PersistentVolume{MountPath: mount, Size: size})
-	}
-	return configs, secrets, volumes, nil
 }
 
 func runRollback(args []string, stdout, stderr io.Writer, execute containerExecutor) int {
@@ -925,7 +713,7 @@ func runRollback(args []string, stdout, stderr io.Writer, execute containerExecu
 	if flags.NArg() == 1 {
 		deploymentName = flags.Arg(0)
 	} else {
-		state, err := loadDeployedProject()
+		state, err := observe.LoadDeployedProject()
 		if err != nil {
 			fmt.Fprintf(stderr, "platform-factory rollback: no deployed project (run `pf deploy` first): %v\n", err)
 			return 1
@@ -1008,7 +796,7 @@ type externalOperation struct {
 func executeOperations(operation string, operations []externalOperation, dryRun bool, stdout, stderr io.Writer, execute containerExecutor) int {
 	for _, item := range operations {
 		if dryRun {
-			fmt.Fprintf(stdout, "%s\n", formatCommand(item.name, item.args))
+			fmt.Fprintf(stdout, "%s\n", shellquote.Command(item.name, item.args))
 			continue
 		}
 		if err := execute(item.name, item.args, item.stdin, stdout, stderr); err != nil {
@@ -1021,16 +809,6 @@ func executeOperations(operation string, operations []externalOperation, dryRun 
 		}
 	}
 	return 0
-}
-
-func formatCommand(name string, args []string) string {
-	values := append([]string{name}, args...)
-	for index, value := range values {
-		if value == "" || strings.ContainsAny(value, " \t\r\n'\"\\$") {
-			values[index] = "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
-		}
-	}
-	return strings.Join(values, " ")
 }
 
 func deploymentManifest(name, namespace, image string, replicas, port int, cpuRequest, memoryRequest string) []byte {

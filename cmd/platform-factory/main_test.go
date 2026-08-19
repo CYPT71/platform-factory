@@ -20,17 +20,20 @@ import (
 	"strings"
 	"testing"
 
+	buildapp "github.com/CYPT71/platform-factory/internal/app/build"
+	microvmapp "github.com/CYPT71/platform-factory/internal/app/microvm"
 	"github.com/CYPT71/platform-factory/internal/attestation"
 	"github.com/CYPT71/platform-factory/internal/core"
+	"github.com/CYPT71/platform-factory/internal/dockersave"
 	"github.com/CYPT71/platform-factory/internal/executor"
 	"github.com/CYPT71/platform-factory/internal/hypervisor"
 	"github.com/CYPT71/platform-factory/internal/layout"
 	"github.com/CYPT71/platform-factory/internal/microvm"
 	"github.com/CYPT71/platform-factory/internal/networking"
-	"github.com/CYPT71/platform-factory/internal/oci"
 	"github.com/CYPT71/platform-factory/internal/plugin"
 	"github.com/CYPT71/platform-factory/internal/signing"
 	"github.com/CYPT71/platform-factory/internal/vmdisk"
+	"github.com/CYPT71/platform-factory/oci"
 	api "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
@@ -540,7 +543,7 @@ func TestRunMicroVMNativeLifecycleUsesSystemd(t *testing.T) {
 type stubKubeVirtPlugin struct {
 	capabilities []string
 	calls        []string
-	result       kubevirtResult
+	result       microvmapp.Result
 	err          error
 }
 
@@ -637,7 +640,7 @@ func TestDispatchKubeVirtSendsSpecFieldsAsParams(t *testing.T) {
 func TestDispatchKubeVirtReflectsPluginResult(t *testing.T) {
 	stub := &stubKubeVirtPlugin{
 		capabilities: allKubeVirtCapabilities(),
-		result:       kubevirtResult{Manifest: `{"kind": "VirtualMachine"}`},
+		result:       microvmapp.Result{Manifest: `{"kind": "VirtualMachine"}`},
 	}
 	host := &pluginHost{clients: []pluginClient{stub}}
 	spec := microvm.Spec{Name: "demo", Namespace: "default"}
@@ -932,7 +935,7 @@ func TestRunVerifyDockerSaveArchive(t *testing.T) {
 	}
 	reader, writer := io.Pipe()
 	done := make(chan error, 1)
-	go func() { done <- writeDockerArchive(writer, layoutName, "example/service:v1") }()
+	go func() { done <- dockersave.WriteDockerArchive(writer, layoutName, "example/service:v1") }()
 	_, copyErr := io.Copy(file, reader)
 	writeErr := <-done
 	if err := errors.Join(copyErr, writeErr, file.Close()); err != nil {
@@ -1005,9 +1008,9 @@ func TestRunBuildRejectsInvalidResourceBudgets(t *testing.T) {
 		}
 	}
 	for input, want := range map[string]int64{"0": 0, "512MiB": 512 << 20, "2GiB": 2 << 30, "4096": 4096} {
-		got, err := parseByteLimit(input)
+		got, err := buildapp.ParseByteLimit(input)
 		if err != nil || got != want {
-			t.Fatalf("parseByteLimit(%q)=%d,%v want=%d", input, got, err, want)
+			t.Fatalf("buildapp.ParseByteLimit(%q)=%d,%v want=%d", input, got, err, want)
 		}
 	}
 }
@@ -1565,7 +1568,7 @@ func TestBuildTargetsRejectsAmbiguousSyntax(t *testing.T) {
 		{[]string{"linux/amd64=app", "linux/arm64"}, nil},
 		{[]string{"linux/amd64=app", "linux/arm64=other"}, []string{"extra"}},
 	} {
-		if _, _, err := buildTargets(test.platforms, test.positional, "linux", "amd64"); err == nil {
+		if _, _, err := buildapp.Targets(test.platforms, test.positional, "linux", "amd64"); err == nil {
 			t.Fatalf("accepted platforms=%v positional=%v", test.platforms, test.positional)
 		}
 	}
@@ -2121,10 +2124,10 @@ func TestRunComposeHelpUsageAndFormat(t *testing.T) {
 // platform inside multi-platform syntax, and a non-executable input
 // (detected as a different, unambiguous kind) reaching resolveBuildTarget.
 func TestBuildTargetsAndResolveBuildTargetRemainingErrorBranches(t *testing.T) {
-	if _, code, err := buildTargets([]string{"linux/amd64"}, nil, "linux", "amd64"); err == nil || code != 2 {
+	if _, code, err := buildapp.Targets([]string{"linux/amd64"}, nil, "linux", "amd64"); err == nil || code != 2 {
 		t.Fatalf("single platform without executable: code=%d err=%v", code, err)
 	}
-	if _, code, err := buildTargets(
+	if _, code, err := buildapp.Targets(
 		[]string{"bogus/arch=a", "linux/amd64=b"}, nil, "linux", "amd64",
 	); err == nil || code != 2 {
 		t.Fatalf("invalid platform in multi-platform syntax: code=%d err=%v", code, err)
@@ -2134,7 +2137,7 @@ func TestBuildTargetsAndResolveBuildTargetRemainingErrorBranches(t *testing.T) {
 	if err := os.WriteFile(script, []byte("#!/usr/bin/env python3\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := resolveBuildTarget(buildTarget{os: "linux", architecture: "amd64", input: script}, buildSettings{}); err == nil {
+	if _, _, err := buildapp.ResolveTarget(buildapp.Target{OS: "linux", Architecture: "amd64", Input: script}, buildapp.Settings{}); err == nil {
 		t.Fatal("expected a non-ELF, non-unknown input to be rejected")
 	}
 }

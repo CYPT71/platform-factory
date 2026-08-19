@@ -4,19 +4,17 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"github.com/CYPT71/platform-factory/cmd/tui/kit"
 )
 
 var (
-	accent       = lipgloss.AdaptiveColor{Light: "25", Dark: "39"}
-	muted        = lipgloss.AdaptiveColor{Light: "243", Dark: "245"}
-	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	dimStyle     = lipgloss.NewStyle().Foreground(muted)
-	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "160", Dark: "203"})
-	successStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "28", Dark: "42"})
-	helpStyle    = dimStyle
-	cursorStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.AdaptiveColor{Light: "127", Dark: "212"})
-	boxStyle     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(muted).Padding(0, 1)
+	titleStyle   = kit.TitleStyle
+	dimStyle     = kit.DimStyle
+	errorStyle   = kit.ErrorStyle
+	successStyle = kit.SuccessStyle
+	helpStyle    = kit.HelpStyle
+	cursorStyle  = kit.CursorStyle
+	boxStyle     = kit.BoxStyle
 )
 
 func (m *model) View() string {

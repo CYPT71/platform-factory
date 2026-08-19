@@ -1,5 +1,5 @@
 {
-  "api_version": "platform-factory.dev/v1beta1",
+  "api_version": "secure-oci.dev/v1beta1",
   "name": "example",
   "inputs": [
     {
