@@ -13,9 +13,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install the pinned Go toolchain
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with: {go-version: '1.25.12', cache: true}
+      - name: Initialize the CI environment
+        uses: ./.github/actions/env-init
+        with: {runc: "${{ matrix.runtime == 'podman' }}"}
       - name: Ensure the ${{ matrix.runtime }} runtime is available
         run: |
           set -euo pipefail
@@ -25,10 +25,6 @@ jobs:
           fi
           '${{ matrix.runtime }}' --version
           if [ '${{ matrix.runtime }}' = podman ]; then
-            if ! command -v runc >/dev/null; then
-              sudo apt-get update
-              sudo apt-get install -y runc
-            fi
             runc --version
             mkdir -p "${HOME}/.config/containers/containers.conf.d"
             printf '[engine]\nruntime="runc"\n' \

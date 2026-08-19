@@ -14,9 +14,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install the pinned Go toolchain
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with: {go-version: '1.25.12', cache: true}
+      - name: Initialize the CI environment
+        uses: ./.github/actions/env-init
       - name: Verify deterministic rebuilds on the host OS
         shell: bash
         env:
@@ -54,9 +53,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install the pinned Go toolchain
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with: {go-version: '1.25.12', cache: true}
+      - name: Initialize the CI environment
+        uses: ./.github/actions/env-init
       - name: Build independently reproducible layout A
         env: {GOTOOLCHAIN: local, SOURCE_DATE_EPOCH: '0'}
         run: |
@@ -80,9 +78,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install the pinned Go toolchain
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with: {go-version: '1.25.12', cache: true}
+      - name: Initialize the CI environment
+        uses: ./.github/actions/env-init
       - name: Build independently reproducible layout B
         env: {GOTOOLCHAIN: local, SOURCE_DATE_EPOCH: '0'}
         run: |

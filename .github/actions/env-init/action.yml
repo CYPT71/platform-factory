@@ -1,0 +1,157 @@
+name: CI environment init
+description: >
+  Single source of truth for tool installation across every
+  platform-factory CI workflow. Every workflow already runs
+  actions/checkout itself (a local composite action like this one only
+  exists on the runner's filesystem once checkout has put it there, so
+  checkout can never move into this action) - this action starts right
+  after that, and always pins and installs the Go toolchain every job
+  needs. Every other tool is opt-in via a boolean input, so a job that
+  needs only Go pays nothing for the tools it does not use, while a job
+  that needs several (e.g. podman + skopeo) still gets one apt-get
+  update instead of one per tool. Changing a pinned tool version here
+  changes it everywhere that tool is requested, instead of hunting
+  through every workflow file that happens to install it.
+inputs:
+  go:
+    description: >
+      Install the Go toolchain. Defaults on since almost every job needs
+      it; the handful of Go-free evidence-signing jobs that only need
+      e.g. Cosign set this to false so they still share this action's
+      single pinned Cosign version without paying for an unused Go setup.
+    required: false
+    default: "true"
+  go-version:
+    description: Go toolchain version to install when go is true.
+    required: false
+    default: "1.25.12"
+  extra-packages:
+    description: >
+      Extra space-separated apt package names to install alongside
+      podman/skopeo/runc in the same apt-get update, for a job with its
+      own one-off packages (e.g. build-essential, qemu-system-x86) that
+      would otherwise force a second, redundant apt-get update.
+    required: false
+    default: ""
+  podman:
+    description: Install podman via apt.
+    required: false
+    default: "false"
+  skopeo:
+    description: Install skopeo via apt.
+    required: false
+    default: "false"
+  runc:
+    description: Install runc via apt.
+    required: false
+    default: "false"
+  kind:
+    description: Install kind (pinned, via go install).
+    required: false
+    default: "false"
+  kind-version:
+    description: kind version to install when kind is true.
+    required: false
+    default: "v0.32.0"
+  crictl:
+    description: >
+      Install crictl (pinned, via go install), placed on /usr/local/bin
+      since callers that invoke it via sudo never see GOPATH/bin.
+    required: false
+    default: "false"
+  crictl-version:
+    description: crictl version to install when crictl is true.
+    required: false
+    default: "v1.33.0"
+  benchstat:
+    description: Install benchstat (pinned, via go install).
+    required: false
+    default: "false"
+  benchstat-version:
+    description: benchstat version (module pseudo-version or tag) to install when benchstat is true.
+    required: false
+    default: "82a0b07e230d76fa1b3036c383d7a98172f87334"
+  nuclei:
+    description: Install nuclei (pinned, via go install).
+    required: false
+    default: "false"
+  nuclei-version:
+    description: nuclei version to install when nuclei is true.
+    required: false
+    default: "v3.8.0"
+  cosign:
+    description: Install the Cosign CLI.
+    required: false
+    default: "false"
+  cosign-version:
+    description: >
+      Cosign release to install when cosign is true. Most callers want
+      the shared default; ci-supply-chain-e2e.yml pins an older release
+      itself (policy-controller v0.10.x only understands Cosign 2's
+      legacy signature representation), so this stays overridable
+      rather than hardcoded.
+    required: false
+    default: "v3.0.6"
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned Go toolchain
+      if: inputs.go == 'true'
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+      with: {go-version: "${{ inputs.go-version }}", cache: true}
+    - name: Install apt-based tools (podman, skopeo, runc, extra-packages)
+      if: inputs.podman == 'true' || inputs.skopeo == 'true' || inputs.runc == 'true' || inputs.extra-packages != ''
+      shell: bash
+      env:
+        WANT_PODMAN: ${{ inputs.podman }}
+        WANT_SKOPEO: ${{ inputs.skopeo }}
+        WANT_RUNC: ${{ inputs.runc }}
+        EXTRA_PACKAGES: ${{ inputs.extra-packages }}
+      run: |
+        set -euo pipefail
+        packages=()
+        [ "$WANT_PODMAN" = true ] && packages+=(podman)
+        [ "$WANT_SKOPEO" = true ] && packages+=(skopeo)
+        [ "$WANT_RUNC" = true ] && packages+=(runc)
+        # shellcheck disable=SC2206 # word-splitting the caller-provided
+        # list is the point: extra-packages is documented as space-separated.
+        packages+=($EXTRA_PACKAGES)
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends "${packages[@]}"
+    - name: Install kind (pinned)
+      if: inputs.kind == 'true'
+      shell: bash
+      env: {GOTOOLCHAIN: local}
+      run: |
+        set -euo pipefail
+        go install "sigs.k8s.io/kind@${{ inputs.kind-version }}"
+    - name: Install crictl (pinned)
+      if: inputs.crictl == 'true'
+      shell: bash
+      env: {GOTOOLCHAIN: local}
+      run: |
+        set -euo pipefail
+        go install "sigs.k8s.io/cri-tools/cmd/crictl@${{ inputs.crictl-version }}"
+        # test-containerd-kvm.sh (and any other sudo-driven caller) invokes
+        # crictl via sudo, which uses its own secure_path and ignores both
+        # the caller's PATH and GITHUB_PATH; GOPATH/bin is never on it.
+        # Install straight to /usr/local/bin, which is.
+        sudo install -m 0755 "$(go env GOPATH)/bin/crictl" /usr/local/bin/crictl
+    - name: Install benchstat (pinned)
+      if: inputs.benchstat == 'true'
+      shell: bash
+      env: {GOTOOLCHAIN: local}
+      run: |
+        set -euo pipefail
+        go install "golang.org/x/perf/cmd/benchstat@${{ inputs.benchstat-version }}"
+    - name: Install nuclei (pinned)
+      if: inputs.nuclei == 'true'
+      shell: bash
+      env: {GOTOOLCHAIN: local}
+      run: |
+        set -euo pipefail
+        go install "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@${{ inputs.nuclei-version }}"
+    - name: Install Cosign (pinned)
+      if: inputs.cosign == 'true'
+      uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      with: {cosign-release: "${{ inputs.cosign-version }}"}

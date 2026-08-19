@@ -106,7 +106,7 @@ spec:
           image: $image
           imagePullPolicy: Never
           command: [/platform-factory-worker]
-          args: [-control-plane=https://distributed-control:8443, -cert=/tls/worker.pem, -key=/tls/worker-key.pem, -ca=/tls/ca.pem, -platform=linux/$target_arch, -poll-interval=100ms, -heartbeat-interval=100ms, -simulated-execution-duration=30s]
+          args: [-control-plane=https://distributed-control:8443, -cert=/tls/worker.pem, -key=/tls/worker-key.pem, -ca=/tls/ca.pem, -platform=linux/$target_arch, -poll-interval=100ms, -heartbeat-interval=100ms, -simulated-execution-duration=30s, -demo-simulate]
           volumeMounts: [{name: tls, mountPath: /tls, readOnly: true}]
       volumes: [{name: tls, secret: {secretName: distributed-tls}}]
 EOF

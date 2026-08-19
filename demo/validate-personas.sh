@@ -53,9 +53,9 @@ cp "$repo_root/demo/hello-world/main.go" "$work_root/intermediate/app/main.go"
 )
 test -f "$work_root/intermediate/oci/index.json"
 
-mkdir -p "$work_root/senior/app"
+mkdir -p "$work_root/senior/examples/hello-pipeline/app"
 cp -R "$repo_root/examples/hello-pipeline/app/." \
-  "$work_root/senior/app/"
+  "$work_root/senior/examples/hello-pipeline/app/"
 cp "$repo_root/examples/pipeline.json" \
   "$work_root/senior/pipeline.json"
 (

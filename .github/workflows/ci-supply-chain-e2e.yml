@@ -10,15 +10,12 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install the pinned Go toolchain
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with: {go-version: '1.25.12', cache: true}
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Initialize the CI environment
+        uses: ./.github/actions/env-init
         # policy-controller v0.10.x only supports plain signatures in Cosign's
         # legacy OCI representation. Keep this integration test on Cosign 2
         # until plain bundle signatures are supported by policy-controller.
-        with: {cosign-release: 'v2.6.1'}
+        with: {cosign: true, cosign-version: v2.6.1, kind: true}
       - name: Build and publish the demonstration image to GHCR
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -102,7 +99,6 @@ jobs:
         env: {GOTOOLCHAIN: local}
         run: |
           set -euo pipefail
-          go install sigs.k8s.io/kind@v0.32.0
           "$(go env GOPATH)/bin/kind" create cluster --wait 90s \
             --config scripts/ci/kind-multinode.yaml \
             --image kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5

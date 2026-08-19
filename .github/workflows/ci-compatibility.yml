@@ -11,17 +11,16 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install the pinned Go toolchain
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with: {go-version: '1.25.12', cache: true}
+      - name: Initialize the CI environment
+        uses: ./.github/actions/env-init
+        with: {skopeo: true}
       - name: Install OCI compatibility clients
+        # The hosted runner already ships Docker plus containerd.io; skopeo
+        # comes from the env-init step above. The Ubuntu `containerd`
+        # package conflicts with those packages and removes the Docker
+        # daemon, so there is nothing else to install here.
         run: |
           set -euo pipefail
-          sudo apt-get update
-          # The hosted runner already ships Docker plus containerd.io. The
-          # Ubuntu `containerd` package conflicts with those packages and
-          # removes the Docker daemon, so install only the missing client.
-          sudo apt-get install -y --no-install-recommends skopeo
           command -v ctr
           docker version | tee compatibility-versions.txt
           containerd --version | tee -a compatibility-versions.txt
