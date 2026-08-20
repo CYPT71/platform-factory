@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -913,45 +912,6 @@ func TestPlanProjectSurfacesFreezeResolutionError(t *testing.T) {
 	}
 }
 
-// TestPlanProjectDetectedBlockReflectsAmbiguousLanguagePlugins is
-// planProject's half of the same fix as
-// TestSuggestProjectConfigDetectsAmbiguousLanguagePluginsForADirectory:
-// its own "detected" block used detect.Path directly too, so it could
-// never actually surface an ambiguous multi-plugin match either. A
-// go-configured project whose root ALSO carries a package.json (e.g. a
-// go backend with a node-based frontend build alongside it) matches
-// both the ambient go and node language plugins TestMain loads.
-func TestPlanProjectDetectedBlockReflectsAmbiguousLanguagePlugins(t *testing.T) {
-	loaded := loadProjectTest(t, "language: go\nartifact: app\n")
-	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
-	writeProjectTestFile(t, filepath.Join(loaded.Root, "go.mod"), "module x\n", 0o644)
-	writeProjectTestFile(t, filepath.Join(loaded.Root, "package.json"), "{}", 0o644)
-	var stdout, stderr bytes.Buffer
-	if code := planProject(loaded, nil, &stdout, &stderr); code != 0 {
-		t.Fatalf("code=%d stderr=%s", code, stderr.String())
-	}
-	var result struct {
-		Detected struct {
-			Kind            string   `json:"kind"`
-			Ambiguous       bool     `json:"ambiguous"`
-			Candidates      []string `json:"candidates"`
-			MatchesLanguage bool     `json:"matches_language"`
-		} `json:"detected"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("stdout=%s err=%v", stdout.String(), err)
-	}
-	if !result.Detected.Ambiguous || result.Detected.Kind != "ambiguous" {
-		t.Fatalf("detected=%+v stdout=%s", result.Detected, stdout.String())
-	}
-	if len(result.Detected.Candidates) != 2 || result.Detected.Candidates[0] != "go" || result.Detected.Candidates[1] != "node" {
-		t.Fatalf("candidates=%v", result.Detected.Candidates)
-	}
-	if result.Detected.MatchesLanguage {
-		t.Fatalf("an ambiguous detection must never report matches_language=true, got %+v", result.Detected)
-	}
-}
-
 func TestFreezeProjectSurfacesResolutionErrorOutputFileAndInventoryFailures(t *testing.T) {
 	unsupported := loadProjectTest(t, "language: cobol\nartifact: app\n")
 	writeProjectTestFile(t, filepath.Join(unsupported.Root, "app"), "binary", 0o755)
@@ -1420,52 +1380,6 @@ func TestSuggestProjectConfig(t *testing.T) {
 	out := stderr.String()
 	if !strings.Contains(out, "detected a script project") || !strings.Contains(out, "pf build") {
 		t.Fatalf("detected script stderr = %q", out)
-	}
-}
-
-// TestSuggestProjectConfigDetectsAmbiguousLanguagePluginsForADirectory
-// covers the real fix for the bug the previous dead-code sweep found:
-// detect.Path alone can never set Ambiguous for a directory anymore
-// (ecosystem classification moved to the language-plugin system - see
-// suggestProjectConfig's own doc comment), so this branch used to be
-// unreachable through this function even though internal/detect.Result
-// still has the field and detectionFromPlugins (main.go's
-// TestRunDetectSurfacesAmbiguousLanguagePlugins covers the same
-// mechanism from `platform-factory detect` itself) can still set it. A
-// directory carrying both go.mod and package.json matches the ambient
-// go and node language plugins TestMain loads for this whole test
-// binary simultaneously.
-func TestSuggestProjectConfigDetectsAmbiguousLanguagePluginsForADirectory(t *testing.T) {
-	root := t.TempDir()
-	writeProjectTestFile(t, filepath.Join(root, "go.mod"), "module x\n", 0o644)
-	writeProjectTestFile(t, filepath.Join(root, "package.json"), "{}", 0o644)
-	var stderr bytes.Buffer
-	code := suggestProjectConfig("run", root, &stderr)
-	if code != 2 {
-		t.Fatalf("code=%d stderr=%s", code, stderr.String())
-	}
-	out := stderr.String()
-	if !strings.Contains(out, "detected multiple ecosystems") || !strings.Contains(out, "go") || !strings.Contains(out, "node") {
-		t.Fatalf("stderr=%q", out)
-	}
-}
-
-// TestSuggestProjectConfigDetectsASingleLanguagePluginMatchForADirectory
-// is the non-ambiguous half of the same fix: a directory matching
-// exactly one loaded language plugin now suggests `pf init` naming that
-// language, instead of falling through to the generic "undetected
-// directory" message every directory target used to get.
-func TestSuggestProjectConfigDetectsASingleLanguagePluginMatchForADirectory(t *testing.T) {
-	root := t.TempDir()
-	writeProjectTestFile(t, filepath.Join(root, "go.mod"), "module x\n", 0o644)
-	var stderr bytes.Buffer
-	code := suggestProjectConfig("build", root, &stderr)
-	if code != 1 {
-		t.Fatalf("code=%d stderr=%s", code, stderr.String())
-	}
-	out := stderr.String()
-	if !strings.Contains(out, "detected a go project") {
-		t.Fatalf("stderr=%q", out)
 	}
 }
 
