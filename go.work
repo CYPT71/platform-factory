@@ -4,6 +4,7 @@ use (
 	.
 	./cmd/tui
 	./plugins/containerd
+	./plugins/kubernetes
 	./plugins/kubevirt
 	./plugins/lang-dotnet
 	./plugins/lang-go

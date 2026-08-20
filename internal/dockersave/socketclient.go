@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // RuntimeClient is the socket-level operations PrepareContainerImage needs
@@ -75,7 +76,13 @@ func NewSocketClient(socketPath string) *SocketClient {
 
 // NewRuntimeClientForName resolves and connects to the local socket for
 // runtimeName ("docker" or "podman"), honoring $DOCKER_HOST/$CONTAINER_HOST
-// the same way the docker/podman CLIs themselves do.
+// the same way the docker/podman CLIs themselves do. When that socket is
+// not reachable - the common case for podman, which does not run a
+// background API service unless something has explicitly started one -
+// it falls back to shelling the runtimeName CLI binary directly (see
+// cliclient.go), so environments that have the CLI installed but no
+// socket service running keep working exactly as they did before the
+// socket-based client was introduced.
 func NewRuntimeClientForName(runtimeName string) (RuntimeClient, error) {
 	var (
 		socketPath string
@@ -92,7 +99,24 @@ func NewRuntimeClientForName(runtimeName string) (RuntimeClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !socketReachable(socketPath) {
+		return &cliRuntimeClient{runtimeName: runtimeName}, nil
+	}
 	return NewSocketClient(socketPath), nil
+}
+
+// socketReachable reports whether a Unix domain socket at path accepts a
+// connection right now. A short-lived, otherwise-unused connection - the
+// same "is anyone listening" check `docker version`/`podman info` make
+// implicitly on every invocation - not a load-bearing part of any actual
+// request.
+func socketReachable(path string) bool {
+	conn, err := net.DialTimeout("unix", path, 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // DockerSocketPath resolves the Unix domain socket docker's Engine API
