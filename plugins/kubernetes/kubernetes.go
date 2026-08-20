@@ -104,15 +104,15 @@ func NewClientFromRESTConfig(config *rest.Config) (*Client, error) {
 // round trip (and the RESTMapper machinery it requires) buys nothing
 // here that this table doesn't already give directly.
 var knownGVRs = map[string]schema.GroupVersionResource{
-	"apps/v1|Deployment":                  {Group: "apps", Version: "v1", Resource: "deployments"},
-	"apps/v1|StatefulSet":                 {Group: "apps", Version: "v1", Resource: "statefulsets"},
-	"apps/v1|DaemonSet":                   {Group: "apps", Version: "v1", Resource: "daemonsets"},
-	"v1|Service":                          {Group: "", Version: "v1", Resource: "services"},
-	"v1|ConfigMap":                        {Group: "", Version: "v1", Resource: "configmaps"},
-	"v1|PersistentVolumeClaim":            {Group: "", Version: "v1", Resource: "persistentvolumeclaims"},
-	"batch/v1|Job":                        {Group: "batch", Version: "v1", Resource: "jobs"},
-	"batch/v1|CronJob":                    {Group: "batch", Version: "v1", Resource: "cronjobs"},
-	"networking.k8s.io/v1|Ingress":        {Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"},
+	"apps/v1|Deployment":           {Group: "apps", Version: "v1", Resource: "deployments"},
+	"apps/v1|StatefulSet":          {Group: "apps", Version: "v1", Resource: "statefulsets"},
+	"apps/v1|DaemonSet":            {Group: "apps", Version: "v1", Resource: "daemonsets"},
+	"v1|Service":                   {Group: "", Version: "v1", Resource: "services"},
+	"v1|ConfigMap":                 {Group: "", Version: "v1", Resource: "configmaps"},
+	"v1|PersistentVolumeClaim":     {Group: "", Version: "v1", Resource: "persistentvolumeclaims"},
+	"batch/v1|Job":                 {Group: "batch", Version: "v1", Resource: "jobs"},
+	"batch/v1|CronJob":             {Group: "batch", Version: "v1", Resource: "cronjobs"},
+	"networking.k8s.io/v1|Ingress": {Group: "networking.k8s.io", Version: "v1", Resource: "ingresses"},
 }
 
 func gvrForKind(apiVersion, kind string) (schema.GroupVersionResource, error) {

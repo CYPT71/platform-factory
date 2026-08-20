@@ -232,7 +232,7 @@ func replicaSetFixture(namespace, name string, revisions int) (*appsv1.Deploymen
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: name, Image: "app:v" + itoa(revisions)}}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: name, Image: "app:v" + itoa(revisions)}}},
 			},
 		},
 	}

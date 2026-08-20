@@ -181,7 +181,9 @@ func TestReadOnlyCommandsRejectMalformedRequests(t *testing.T) {
 		{"compose-invalid-layout", func(o, e *bytes.Buffer) int { return runCompose([]string{"missing-a", "missing-b"}, o, e) }, "compose"},
 		{"import-help", func(o, e *bytes.Buffer) int { return runImport(context.Background(), []string{"--help"}, o, e) }, ""},
 		{"import-args", func(o, e *bytes.Buffer) int { return runImport(context.Background(), nil, o, e) }, "usage"},
-		{"import-runtime", func(o, e *bytes.Buffer) int { return runImport(context.Background(), []string{"--runtime", "bad", "image"}, o, e) }, "usage"},
+		{"import-runtime", func(o, e *bytes.Buffer) int {
+			return runImport(context.Background(), []string{"--runtime", "bad", "image"}, o, e)
+		}, "usage"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
