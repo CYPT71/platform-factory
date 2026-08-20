@@ -77,6 +77,18 @@ func TestPrepareBranchCreatesAndChecksOutANewBranch(t *testing.T) {
 	}
 }
 
+// TestPrepareBranchPropagatesAStatusError covers PrepareBranch's own
+// r.Status error branch: on a directory that was never `git init`-ed,
+// Status itself fails, which PrepareBranch must propagate rather than
+// treating as a "not dirty" or otherwise recoverable state.
+func TestPrepareBranchPropagatesAStatusError(t *testing.T) {
+	dir := t.TempDir() // deliberately never `git init`-ed
+	r := New(dir)
+	if _, err := r.PrepareBranch(context.Background(), "mcp/feat/example"); err == nil {
+		t.Fatal("expected an error for a non-repository directory")
+	}
+}
+
 func TestPrepareBranchRefusesAProtectedName(t *testing.T) {
 	dir := newTestRepo(t)
 	r := New(dir)
@@ -160,11 +172,32 @@ func TestCommitRefusesAnEmptyMessage(t *testing.T) {
 	}
 }
 
+// TestCommitPropagatesAStatusError covers Commit's own r.Status error
+// branch - every other Commit test in this file drives a real fixture
+// repo.
+func TestCommitPropagatesAStatusError(t *testing.T) {
+	dir := t.TempDir() // deliberately never `git init`-ed
+	r := New(dir)
+	if err := r.Commit(context.Background(), []string{"a.txt"}, "message"); err == nil {
+		t.Fatal("expected an error for a non-repository directory")
+	}
+}
+
 func TestPushRefusesAProtectedBranch(t *testing.T) {
 	dir := newTestRepo(t)
 	r := New(dir)
 	if err := r.Push(context.Background(), "origin"); err == nil {
 		t.Fatal("expected an error pushing main directly")
+	}
+}
+
+// TestPushPropagatesAStatusError covers Push's own r.Status error
+// branch.
+func TestPushPropagatesAStatusError(t *testing.T) {
+	dir := t.TempDir() // deliberately never `git init`-ed
+	r := New(dir)
+	if err := r.Push(context.Background(), "origin"); err == nil {
+		t.Fatal("expected an error for a non-repository directory")
 	}
 }
 
@@ -214,6 +247,19 @@ func TestCreatePRRefusesAnEmptyTitle(t *testing.T) {
 	_, err := r.CreatePR(context.Background(), PullRequest{Head: "mcp/feat/example"})
 	if err == nil {
 		t.Fatal("expected an error for an empty title")
+	}
+}
+
+// TestCreatePRRefusesAnEmptyHead covers CreatePR's own empty-Head
+// validation branch, the sibling of TestCreatePRRefusesAProtectedHead's
+// (a protected, non-empty Head) and TestCreatePRRefusesAnEmptyTitle's
+// (a valid Head, empty Title) cases.
+func TestCreatePRRefusesAnEmptyHead(t *testing.T) {
+	dir := newTestRepo(t)
+	r := New(dir)
+	_, err := r.CreatePR(context.Background(), PullRequest{Title: "x"})
+	if err == nil {
+		t.Fatal("expected an error for an empty head branch")
 	}
 }
 

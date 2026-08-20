@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"syscall"
 )
 
@@ -375,73 +374,9 @@ func execPlugin(executable string, pinned *os.File, args []string, permissions P
 	}
 }
 
-// declaresKubeconfigSecret reports whether permissions names "kubeconfig"
-// among its declared secrets - the same string kubevirt's own plugin.json
-// declares (see plugins/kubevirt/plugin.json's permissions.secrets).
-func declaresKubeconfigSecret(permissions PluginPermissions) bool {
-	for _, secret := range permissions.Secrets {
-		if secret == "kubeconfig" {
-			return true
-		}
-	}
-	return false
-}
-
-// filterPluginEnvironment filters the environment to remove sensitive
-// variables. Only PATH, PLATFORM_FACTORY_*, LANG/LC_* and TMPDIR are kept
-// unconditionally; KUBECONFIG and HOME are kept only when permissions
-// declares "kubeconfig" among its secrets, since only a plugin whose own
-// signed manifest asks for cluster credentials (KubeVirt, today) has any
-// legitimate use for them - every other plugin, including one that somehow
-// also got host network access, still cannot locate or read them.
-func filterPluginEnvironment(env []string, permissions PluginPermissions) []string {
-	needsKubeconfig := declaresKubeconfigSecret(permissions)
-	var filtered []string
-	for _, e := range env {
-		if strings.HasPrefix(e, "PATH=") {
-			filtered = append(filtered, e)
-			continue
-		}
-		if strings.HasPrefix(e, "PLATFORM_FACTORY_") {
-			filtered = append(filtered, e)
-			continue
-		}
-		// Keep minimal set of variables that plugins might need
-		if strings.HasPrefix(e, "LANG=") || strings.HasPrefix(e, "LC_") {
-			filtered = append(filtered, e)
-			continue
-		}
-		if needsKubeconfig && (strings.HasPrefix(e, "KUBECONFIG=") || strings.HasPrefix(e, "HOME=")) {
-			filtered = append(filtered, e)
-			continue
-		}
-		// isolateTempDirectory sets this to the plugin's own private
-		// scratch tmpfs; without it a filtered-out TMPDIR would silently
-		// fall back to the unfiltered value the exec'd plugin inherits
-		// from its own environment lookup default (/tmp), defeating the
-		// isolation applyResourceLimits' caller just set up.
-		if strings.HasPrefix(e, "TMPDIR=") {
-			filtered = append(filtered, e)
-			continue
-		}
-	}
-	// Ensure PATH is set
-	if !hasEnvVar(filtered, "PATH") {
-		filtered = append(filtered, "PATH=/usr/bin:/bin")
-	}
-	return filtered
-}
-
-// hasEnvVar checks if an environment variable is present in the list.
-func hasEnvVar(env []string, name string) bool {
-	prefix := name + "="
-	for _, e := range env {
-		if strings.HasPrefix(e, prefix) {
-			return true
-		}
-	}
-	return false
-}
+// declaresKubeconfigSecret and filterPluginEnvironment moved to the
+// cross-platform pluginenv.go so client.go's newPluginCommand can call them
+// on every platform, not just Linux - see that file's doc comment.
 
 func pluginSandboxFatal(what string, err error) {
 	fmt.Fprintf(os.Stderr, "plugin sandbox: %s: %v\n", what, err)

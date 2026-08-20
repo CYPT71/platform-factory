@@ -176,6 +176,18 @@ func handleForkBomb(_ context.Context, raw json.RawMessage) (any, error) {
 	return map[string]int{"attempted": params.Attempts, "succeeded": succeeded, "failed": failed}, nil
 }
 
+// handleEnvProbe reports this process's entire environment back to the
+// host, verbatim (os.Environ()). It exists to prove, from inside a
+// genuinely separate plugin subprocess, exactly which environment
+// variables internal/plugin.Start actually delivered - not merely what
+// filterPluginEnvironment computes in isolation (see
+// internal/plugin/pluginenv_test.go for that unit-level coverage), but what
+// the real exec.Cmd -> (optionally) sandbox-helper re-exec -> plugin
+// binary chain produces end to end.
+func handleEnvProbe(_ context.Context, _ json.RawMessage) (any, error) {
+	return map[string][]string{"env": os.Environ()}, nil
+}
+
 func handlePrivProbe(_ context.Context, _ json.RawMessage) (any, error) {
 	data, err := os.ReadFile("/proc/self/status")
 	if err != nil {
@@ -193,6 +205,7 @@ func main() {
 	server := plugin.NewServer("sandboxprobe", "v0.1.0")
 	server.Handle("observe.net-probe", handleNetProbe)
 	server.Handle("observe.priv-probe", handlePrivProbe)
+	server.Handle("observe.env-probe", handleEnvProbe)
 	server.Handle("observe.isolation-probe", handleIsolationProbe)
 	server.Handle("observe.tmp-probe", handleTmpProbe)
 	server.Handle("observe.netns-probe", handleNetnsProbe)

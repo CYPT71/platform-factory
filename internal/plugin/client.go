@@ -63,8 +63,12 @@ type Client struct {
 
 // Start launches executable as a plugin subprocess and performs the
 // version/capability handshake. env, if non-empty, replaces the process's
-// environment entirely; a plugin does not inherit the host's environment
-// by default.
+// environment entirely. Otherwise, the plugin's environment is derived from
+// the host's own, filtered through filterPluginEnvironment per permissions:
+// PATH, PLATFORM_FACTORY_*, LANG/LC_* and TMPDIR always pass through;
+// everything else, including KUBECONFIG and HOME, is dropped unless
+// permissions.Secrets declares "kubeconfig" - a plugin does not inherit the
+// host's environment wholesale by default.
 //
 // The subprocess must run in a fresh user, network, IPC and UTS namespace with
 // no host network access (see wrapWithPluginSandbox). If that isolation cannot
@@ -119,7 +123,7 @@ func StartAllowingUnsandboxedWithManifest(ctx context.Context, executable string
 }
 
 func start(ctx context.Context, executable string, args, env []string, allowUnsandboxed bool, family PluginFamily, permissions PluginPermissions) (*Client, error) {
-	cmd, stdin, stdout, err := newPluginCommand(ctx, executable, args, env)
+	cmd, stdin, stdout, err := newPluginCommand(ctx, executable, args, env, permissions)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +142,7 @@ func start(ctx context.Context, executable string, args, env []string, allowUnsa
 		// longer usable after a failed Start, so build a fresh,
 		// unwrapped command for the fallback below.
 		fmt.Fprintf(os.Stderr, "plugin: policy permits unsandboxed execution for %s\n", executable)
-		cmd, stdin, stdout, err = newPluginCommand(ctx, executable, args, env)
+		cmd, stdin, stdout, err = newPluginCommand(ctx, executable, args, env, permissions)
 		if err != nil {
 			return nil, err
 		}
@@ -154,12 +158,28 @@ func start(ctx context.Context, executable string, args, env []string, allowUnsa
 	return client, err
 }
 
-func newPluginCommand(ctx context.Context, executable string, args, env []string) (*exec.Cmd, io.WriteCloser, io.ReadCloser, error) {
+// newPluginCommand builds the exec.Cmd a plugin subprocess starts from.
+// When the caller supplies an explicit, non-empty env, that overrides
+// everything else - the contract Start's doc comment already promises. When
+// it does not (every manifest-driven start today: VerifyAndStart always
+// passes nil, see manifest.go's verifyAndStart), the command's environment
+// is computed from the host's own os.Environ(), filtered through
+// filterPluginEnvironment per permissions - not a hardcoded PATH-only stub.
+// This is the seed both the unsandboxed path (this becomes the plugin's
+// final environment directly) and the sandboxed path (this becomes what the
+// re-exec'd sandbox helper inherits into its own os.Environ(), which it
+// filters again in execPlugin - a harmless no-op re-application of the same
+// predicate) build on; previously this always produced
+// []string{"PATH=/usr/bin:/bin"}, which as a non-nil cmd.Env replaces (not
+// merges with) the child's environment, silently discarding the real host
+// environment - including KUBECONFIG/HOME - before either path could ever
+// see it.
+func newPluginCommand(ctx context.Context, executable string, args, env []string, permissions PluginPermissions) (*exec.Cmd, io.WriteCloser, io.ReadCloser, error) {
 	cmd := exec.CommandContext(ctx, executable, args...)
 	if len(env) > 0 {
 		cmd.Env = env
 	} else {
-		cmd.Env = []string{"PATH=/usr/bin:/bin"}
+		cmd.Env = filterPluginEnvironment(os.Environ(), permissions)
 	}
 	// The RPC protocol only uses stdin/stdout; leaving Stderr at its zero
 	// value sends it to /dev/null (see os/exec's docs for a nil Stderr),
@@ -286,7 +306,7 @@ func isReadOnlyMethod(method string) bool {
 		"v1.runtime.logs", "v1.runtime.status",
 		"v1.analyzer.scan", "v1.analyzer.verify", "v1.registry.list",
 		"v1.observe.net-probe", "v1.observe.priv-probe", "v1.observe.isolation-probe", "v1.observe.tmp-probe", "v1.observe.netns-probe",
-		"v1.observe.memory-bomb", "v1.observe.fork-bomb":
+		"v1.observe.memory-bomb", "v1.observe.fork-bomb", "v1.observe.env-probe":
 		return true
 	default:
 		return false

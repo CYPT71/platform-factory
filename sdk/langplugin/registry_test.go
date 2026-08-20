@@ -3,6 +3,8 @@ package langplugin
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -165,5 +167,36 @@ func TestLoadTwiceOverwritesRatherThanErrors(t *testing.T) {
 	data, err := os.ReadFile(installedPath)
 	if err != nil || string(data) != "v2 content" {
 		t.Fatalf("data=%q err=%v", data, err)
+	}
+}
+
+// TestLoadNamesTheOverrideEnvVarWhenTheDefaultDirectoryIsUnwritable covers
+// the same "default writable path" blind spot F7 fixed for the operation
+// journal and workload state store (cmd/platform-factory/lifecycle.go):
+// a non-root container with no writable $HOME hits this exact failure for
+// the language-plugin directory too, and the error used to say only
+// "permission denied" with no path forward.
+func TestLoadNamesTheOverrideEnvVarWhenTheDefaultDirectoryIsUnwritable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits don't block MkdirAll the same way on windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory permission bits, so this can't be forced without one")
+	}
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+	t.Setenv(dirEnv, filepath.Join(parent, "plugins"))
+
+	source := filepath.Join(t.TempDir(), "plugin")
+	writeFakeBinary(t, source)
+	_, err := Load("python", source)
+	if err == nil {
+		t.Fatal("expected an error for an unwritable plugin directory")
+	}
+	if !strings.Contains(err.Error(), dirEnv) {
+		t.Fatalf("error %q does not name %s as the override", err.Error(), dirEnv)
 	}
 }

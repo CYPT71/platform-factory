@@ -31,6 +31,13 @@ type fakeEngine struct {
 	lastLoad []byte
 	loadErr  string // non-empty: /images/load succeeds (HTTP 200) but streams this as a load-time error
 	failLoad bool   // true: /images/load itself returns a non-2xx status
+	// existsStatus, when non-zero, overrides the GET /images/{name}/json
+	// response with this status code and an empty body - used to exercise
+	// ImageExists's "anything but 200/404 is an error" branch, which a
+	// real docker/podman Engine API would only ever return for a genuinely
+	// unexpected condition (a malformed reference is normally still a
+	// clean 404, not this).
+	existsStatus int
 }
 
 func newFakeEngineSocket(t *testing.T) (*fakeEngine, string) {
@@ -89,6 +96,13 @@ func (e *fakeEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"stream":"Loaded image\n"}`))
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/json") && strings.HasPrefix(r.URL.Path, "/images/"):
+		e.mu.Lock()
+		status := e.existsStatus
+		e.mu.Unlock()
+		if status != 0 {
+			w.WriteHeader(status)
+			return
+		}
 		reference := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/images/"), "/json")
 		e.mu.Lock()
 		exists := e.loaded[reference]
@@ -425,6 +439,60 @@ func TestWriteDockerArchiveErrors(t *testing.T) {
 	}
 }
 
+// TestWriteDockerArchiveSurfacesAPipeWriteFailure covers
+// WriteDockerArchive's tar-writer error-propagation branches (writing
+// through the tar.Writer to the underlying *io.PipeWriter): closing the
+// pipe's read side with an error before WriteDockerArchive ever writes
+// anything makes its very first tw.WriteHeader call fail, exercising a
+// real io error rather than a data-shape problem the way every other
+// WriteDockerArchive test in this file does.
+func TestWriteDockerArchiveSurfacesAPipeWriteFailure(t *testing.T) {
+	root := buildLayout(t, "example/service", "v1")
+	reader, writer := io.Pipe()
+	closeErr := errors.New("reader gone")
+	if err := reader.CloseWithError(closeErr); err != nil {
+		t.Fatal(err)
+	}
+	err := WriteDockerArchive(writer, root, "example/service:v1")
+	if err == nil {
+		t.Fatal("expected a write error once the pipe's reader side is closed")
+	}
+}
+
+// TestWriteDockerArchiveSurfacesAMissingConfigBlob covers
+// WriteDockerArchive's own "write config" error-wrapping branch -
+// distinct from TestWriteDockerArchiveErrors' missing top-level
+// manifest blob case, this leaves the manifest itself intact and
+// readable but removes the config blob the manifest references,
+// exercising copyBlobToArchive's failure path through
+// WriteDockerArchive rather than in isolation.
+func TestWriteDockerArchiveSurfacesAMissingConfigBlob(t *testing.T) {
+	root := buildLayout(t, "example/noconfig", "v1")
+	descriptor, err := selectManifest(root, "example/noconfig:v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest ociManifest
+	if err := readLayoutJSON(root, descriptor.Digest, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	configBlob, err := blobPath(root, manifest.Config.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(configBlob); err != nil {
+		t.Fatal(err)
+	}
+	reader, writer := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- WriteDockerArchive(writer, root, "example/noconfig:v1") }()
+	_, _ = io.Copy(io.Discard, reader)
+	err = <-done
+	if err == nil || !strings.Contains(err.Error(), "write config") {
+		t.Fatalf("err=%v, want a 'write config' error", err)
+	}
+}
+
 // stubRuntimeClient is a minimal RuntimeClient test double: LoadArchive
 // delegates to load (nil means "succeed, discarding the body"), and
 // ImageExists is never exercised by the streamLayoutToRuntime-focused
@@ -524,6 +592,70 @@ func TestWriteLayoutArchiveRejectsUnsafeBlob(t *testing.T) {
 	}()
 	if err := writeLayoutArchive(writer, layoutName); err == nil {
 		t.Fatal("unsafe blob accepted")
+	}
+	<-done
+}
+
+// TestWriteLayoutArchiveSurfacesAPipeWriteFailure is
+// TestWriteDockerArchiveSurfacesAPipeWriteFailure's writeLayoutArchive
+// counterpart.
+func TestWriteLayoutArchiveSurfacesAPipeWriteFailure(t *testing.T) {
+	layoutName := buildLayout(t, "example/service", "v1")
+	reader, writer := io.Pipe()
+	closeErr := errors.New("reader gone")
+	if err := reader.CloseWithError(closeErr); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLayoutArchive(writer, layoutName); err == nil {
+		t.Fatal("expected a write error once the pipe's reader side is closed")
+	}
+}
+
+// TestWriteLayoutArchiveSurfacesAMissingTopLevelFile covers
+// writeLayoutArchive's own os.Lstat error branch for one of its two
+// fixed top-level names (oci-layout/index.json) - distinct from
+// TestWriteLayoutArchiveRejectsUnsafeBlob's unsafe-entry-under-blobs
+// case, which never reaches this code path (it fails earlier, while
+// listing blobs/sha256).
+func TestWriteLayoutArchiveSurfacesAMissingTopLevelFile(t *testing.T) {
+	layoutName := buildLayout(t, "example/service", "v1")
+	if err := os.Remove(filepath.Join(layoutName, "oci-layout")); err != nil {
+		t.Fatal(err)
+	}
+	reader, writer := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		_, _ = io.Copy(io.Discard, reader)
+		done <- reader.Close()
+	}()
+	if err := writeLayoutArchive(writer, layoutName); err == nil {
+		t.Fatal("expected an error for a missing oci-layout file")
+	}
+	<-done
+}
+
+// TestWriteLayoutArchiveRejectsASymlinkedTopLevelFile covers
+// writeLayoutArchive's "is not a regular file" branch for a top-level
+// name (index.json), the counterpart to
+// TestWriteLayoutArchiveRejectsUnsafeBlob's symlink-under-blobs case.
+func TestWriteLayoutArchiveRejectsASymlinkedTopLevelFile(t *testing.T) {
+	layoutName := buildLayout(t, "example/service", "v1")
+	real := filepath.Join(layoutName, "index.json")
+	renamed := real + ".real"
+	if err := os.Rename(real, renamed); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(renamed, real); err != nil {
+		t.Fatal(err)
+	}
+	reader, writer := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		_, _ = io.Copy(io.Discard, reader)
+		done <- reader.Close()
+	}()
+	if err := writeLayoutArchive(writer, layoutName); err == nil {
+		t.Fatal("expected an error for a symlinked top-level file")
 	}
 	<-done
 }

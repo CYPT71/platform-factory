@@ -1,8 +1,10 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -16,7 +18,9 @@ import (
 
 	projectapp "github.com/CYPT71/platform-factory/internal/app/project"
 	"github.com/CYPT71/platform-factory/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/plugin"
 	"github.com/CYPT71/platform-factory/internal/project"
+	api "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
 func writeProjectTestFile(t *testing.T, name, content string, mode os.FileMode) {
@@ -909,6 +913,45 @@ func TestPlanProjectSurfacesFreezeResolutionError(t *testing.T) {
 	}
 }
 
+// TestPlanProjectDetectedBlockReflectsAmbiguousLanguagePlugins is
+// planProject's half of the same fix as
+// TestSuggestProjectConfigDetectsAmbiguousLanguagePluginsForADirectory:
+// its own "detected" block used detect.Path directly too, so it could
+// never actually surface an ambiguous multi-plugin match either. A
+// go-configured project whose root ALSO carries a package.json (e.g. a
+// go backend with a node-based frontend build alongside it) matches
+// both the ambient go and node language plugins TestMain loads.
+func TestPlanProjectDetectedBlockReflectsAmbiguousLanguagePlugins(t *testing.T) {
+	loaded := loadProjectTest(t, "language: go\nartifact: app\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "go.mod"), "module x\n", 0o644)
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "package.json"), "{}", 0o644)
+	var stdout, stderr bytes.Buffer
+	if code := planProject(loaded, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	var result struct {
+		Detected struct {
+			Kind            string   `json:"kind"`
+			Ambiguous       bool     `json:"ambiguous"`
+			Candidates      []string `json:"candidates"`
+			MatchesLanguage bool     `json:"matches_language"`
+		} `json:"detected"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("stdout=%s err=%v", stdout.String(), err)
+	}
+	if !result.Detected.Ambiguous || result.Detected.Kind != "ambiguous" {
+		t.Fatalf("detected=%+v stdout=%s", result.Detected, stdout.String())
+	}
+	if len(result.Detected.Candidates) != 2 || result.Detected.Candidates[0] != "go" || result.Detected.Candidates[1] != "node" {
+		t.Fatalf("candidates=%v", result.Detected.Candidates)
+	}
+	if result.Detected.MatchesLanguage {
+		t.Fatalf("an ambiguous detection must never report matches_language=true, got %+v", result.Detected)
+	}
+}
+
 func TestFreezeProjectSurfacesResolutionErrorOutputFileAndInventoryFailures(t *testing.T) {
 	unsupported := loadProjectTest(t, "language: cobol\nartifact: app\n")
 	writeProjectTestFile(t, filepath.Join(unsupported.Root, "app"), "binary", 0o755)
@@ -1380,6 +1423,52 @@ func TestSuggestProjectConfig(t *testing.T) {
 	}
 }
 
+// TestSuggestProjectConfigDetectsAmbiguousLanguagePluginsForADirectory
+// covers the real fix for the bug the previous dead-code sweep found:
+// detect.Path alone can never set Ambiguous for a directory anymore
+// (ecosystem classification moved to the language-plugin system - see
+// suggestProjectConfig's own doc comment), so this branch used to be
+// unreachable through this function even though internal/detect.Result
+// still has the field and detectionFromPlugins (main.go's
+// TestRunDetectSurfacesAmbiguousLanguagePlugins covers the same
+// mechanism from `platform-factory detect` itself) can still set it. A
+// directory carrying both go.mod and package.json matches the ambient
+// go and node language plugins TestMain loads for this whole test
+// binary simultaneously.
+func TestSuggestProjectConfigDetectsAmbiguousLanguagePluginsForADirectory(t *testing.T) {
+	root := t.TempDir()
+	writeProjectTestFile(t, filepath.Join(root, "go.mod"), "module x\n", 0o644)
+	writeProjectTestFile(t, filepath.Join(root, "package.json"), "{}", 0o644)
+	var stderr bytes.Buffer
+	code := suggestProjectConfig("run", root, &stderr)
+	if code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "detected multiple ecosystems") || !strings.Contains(out, "go") || !strings.Contains(out, "node") {
+		t.Fatalf("stderr=%q", out)
+	}
+}
+
+// TestSuggestProjectConfigDetectsASingleLanguagePluginMatchForADirectory
+// is the non-ambiguous half of the same fix: a directory matching
+// exactly one loaded language plugin now suggests `pf init` naming that
+// language, instead of falling through to the generic "undetected
+// directory" message every directory target used to get.
+func TestSuggestProjectConfigDetectsASingleLanguagePluginMatchForADirectory(t *testing.T) {
+	root := t.TempDir()
+	writeProjectTestFile(t, filepath.Join(root, "go.mod"), "module x\n", 0o644)
+	var stderr bytes.Buffer
+	code := suggestProjectConfig("build", root, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "detected a go project") {
+		t.Fatalf("stderr=%q", out)
+	}
+}
+
 func TestWrapperCommand(t *testing.T) {
 	got := wrapperCommand("dotnet")
 	if runtime.GOOS == "windows" {
@@ -1390,5 +1479,582 @@ func TestWrapperCommand(t *testing.T) {
 	}
 	if got != "dotnet" {
 		t.Fatalf("non-windows: wrapperCommand = %q", got)
+	}
+}
+
+// TestRunProjectContextRejectsMalformedFlags proves a genuine
+// flag.Parse failure (a flag missing its required value) is handled
+// distinctly from flag.ErrHelp - the surrounding switch only special-
+// cases the latter.
+func TestRunProjectContextRejectsMalformedFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runProject([]string{"show", "--config"}, &stdout, &stderr, nil, nil, nil)
+	if code != 2 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestRunProjectBuildRejectsNegativeCPUBudgetWithoutAByteLimitError
+// exercises the resource-budget validation's other error source: a
+// negative duration flag with a perfectly valid --max-memory, so
+// budgetErr itself is nil and the code has to synthesize its own
+// "time budgets cannot be negative" error.
+func TestRunProjectBuildRejectsNegativeCPUBudgetWithoutAByteLimitError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runProject([]string{"build", "--dry-run", "--max-cpu=-1s", t.TempDir()}, &stdout, &stderr,
+		func(string, []string, string, io.Writer, io.Writer) error { return nil }, nil, nil)
+	if code != 2 || !strings.Contains(stderr.String(), "time budgets cannot be negative") {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestRunProjectBuildBlocksOnUnresolvedDependencyManagementBeforeAnyWork
+// proves the dependency-state gate in runProjectContext itself (not
+// buildProjectContextWithBudget, which TestProjectBuildRejectsChangedFrozenInputsBeforeRunningBuildCommand
+// exercises directly) stops an unresolved/unknown dependency state
+// before starting plugins or running any command.
+func TestRunProjectBuildBlocksOnUnresolvedDependencyManagementBeforeAnyWork(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\ndependency_management:\n  mode: unresolved\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	execute := func(string, []string, string, io.Writer, io.Writer) error {
+		t.Fatal("build command executed despite an unresolved dependency state")
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := runProject([]string{"build", "--config", loaded.File}, &stdout, &stderr, execute, nil, nil)
+	if code != 2 || !strings.Contains(stderr.String(), "dependency state is unresolved") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunProjectRunWatchStopsWhenContainerExitsOnItsOwn exercises the
+// `run --watch` dispatch branch in runProjectContext together with
+// runConfiguredProjectWatch's own "the container ended on its own"
+// select case (as opposed to a rebuild-triggered stop, which
+// TestRunConfiguredProjectWatchRebuildsOnChangeAndStopsOnCancel already
+// covers) and the watch loop's own none-to-bridge network upgrade for
+// published ports.
+func TestRunProjectRunWatchStopsWhenContainerExitsOnItsOwn(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nports: [9191:91]\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	pointBothRuntimeSocketsAtFakeEngine(t)
+	var runArgs []string
+	containerExecute := func(_ string, args []string, _ io.Reader, _, _ io.Writer) error {
+		if len(args) > 0 && args[0] == "run" {
+			runArgs = append([]string(nil), args...)
+		}
+		// Returning immediately (rather than blocking until a "stop"
+		// call, as watchContainerExecuteStub does) simulates the
+		// container crashing or running to completion on its own.
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := runProject([]string{"run", "--watch", "--config", loaded.File}, &stdout, &stderr, execute, containerExecute, nil)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	joined := strings.Join(runArgs, " ")
+	if !strings.Contains(joined, "--network=bridge") || !strings.Contains(joined, "--publish=9191:91") {
+		t.Fatalf("run args=%v", runArgs)
+	}
+}
+
+// TestProjectLaunchWatchDispatchesToWatchLoop exercises launch's own
+// --watch branch (distinct from run's - each has its own flag-guarded
+// dispatch in runProjectContext) after launch's freeze-if-missing step.
+func TestProjectLaunchWatchDispatchesToWatchLoop(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	pointBothRuntimeSocketsAtFakeEngine(t)
+	ranContainer := false
+	containerExecute := func(_ string, args []string, _ io.Reader, _, _ io.Writer) error {
+		if len(args) > 0 && args[0] == "run" {
+			ranContainer = true
+		}
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := runProject([]string{"launch", "--watch", "--config", loaded.File}, &stdout, &stderr, execute, containerExecute, nil)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !ranContainer {
+		t.Fatal("expected launch --watch to run the container at least once")
+	}
+	if _, err := os.Stat(filepath.Join(loaded.Root, ".platform-factory", "freeze.lock.json")); err != nil {
+		t.Fatalf("expected launch --watch to freeze first: %v", err)
+	}
+}
+
+// TestProjectLaunchAcceptsRuntimeOverrideAndRejectsInvalid mirrors
+// TestRunProjectRunAcceptsARuntimeOverride for the "launch" action,
+// which has its own separate --runtime validation branch.
+func TestProjectLaunchAcceptsRuntimeOverrideAndRejectsInvalid(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nruntime_engine: podman\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	pointBothRuntimeSocketsAtFakeEngine(t)
+	var runtimesSeen []string
+	containerExecute := func(name string, args []string, _ io.Reader, _, _ io.Writer) error {
+		if len(args) > 0 && args[0] == "run" {
+			runtimesSeen = append(runtimesSeen, name)
+		}
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runProject([]string{"launch", "--config", loaded.File, "--runtime", "docker"}, &stdout, &stderr, execute, containerExecute, nil); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	for _, name := range runtimesSeen {
+		if name != "docker" {
+			t.Fatalf("runtimesSeen=%v, want every call to use docker", runtimesSeen)
+		}
+	}
+	if code := runProject([]string{"launch", "--config", loaded.File, "--runtime", "bogus"}, &stdout, &stderr, execute, containerExecute, nil); code != 2 {
+		t.Fatalf("expected an invalid --runtime value to be rejected, code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestResolveFreezeStepsSurfacesGenericPluginFreezeError proves that a
+// plugin-side freeze error unrelated to "no plugin provides a freeze
+// adapter" (here: the plugin declares the capability but returns an
+// invalid step) surfaces unchanged, rather than being folded into the
+// built-in "no built-in freeze adapter" message the way errNoPluginFreeze
+// is.
+func TestResolveFreezeStepsSurfacesGenericPluginFreezeError(t *testing.T) {
+	loaded := loadProjectTest(t, "language: zig\nartifact: app\n")
+	host := &pluginHost{clients: []pluginClient{&stubPlugin{
+		hello:  plugin.HelloResult{Name: "broken-adapter", Capabilities: []string{"freeze"}},
+		freeze: api.FreezeResult{Steps: [][]string{{}}},
+	}}}
+	_, err := resolveFreezeSteps(loaded, host)
+	if err == nil {
+		t.Fatal("expected the plugin's own freeze error")
+	}
+	if strings.Contains(err.Error(), "no built-in freeze adapter") {
+		t.Fatalf("err=%v, want the plugin's own error to surface unchanged", err)
+	}
+}
+
+// TestExplainProjectActionSurfacesBuildCapabilityFailure exercises the
+// dry-run build's own capability-preflight branch, distinct from the
+// freeze-resolution failure TestExplainProjectActionSurfacesFreezeResolutionError
+// already covers.
+func TestExplainProjectActionSurfacesBuildCapabilityFailure(t *testing.T) {
+	loaded := loadProjectTest(t, "language: python\nartifact: app\nprofile: python\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	var stdout, stderr bytes.Buffer
+	code := runProject([]string{"build", "--dry-run", "--config", loaded.File}, &stdout, &stderr,
+		func(string, []string, string, io.Writer, io.Writer) error { return nil }, nil, nil)
+	if code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"valid": false`) || !strings.Contains(stdout.String(), "does not fetch or build") {
+		t.Fatalf("stdout=%s", stdout.String())
+	}
+}
+
+// TestBuildProjectSurfacesCapabilityPreflightFailure exercises the same
+// ValidateBuildCapability failure as
+// TestExplainProjectActionSurfacesBuildCapabilityFailure, but through a
+// real (non-dry-run) build.
+func TestBuildProjectSurfacesCapabilityPreflightFailure(t *testing.T) {
+	loaded := loadProjectTest(t, "language: python\nartifact: app\nprofile: python\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 2 || !strings.Contains(stderr.String(), "capability preflight failed") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestBuildProjectSurfacesImageFilesErrorWhenFreezeIsNotRequired
+// exercises loaded.ImageFiles()'s own direct error branch inside
+// buildProjectContextWithBudget - reached only when RequiresFrozenInputs
+// is false (so VerifyFreezeInventory's own, earlier ImageFiles call
+// never runs). A symlink under the project root, picked up by the
+// implicit "." dependency every non-go/compiled/custom language adds,
+// is rejected regardless of any freeze state.
+func TestBuildProjectSurfacesImageFilesErrorWhenFreezeIsNotRequired(t *testing.T) {
+	loaded := loadProjectTest(t, "language: rust\nartifact: app\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	if err := os.Symlink(filepath.Join(loaded.Root, "app"), filepath.Join(loaded.Root, "bad-link")); err != nil {
+		t.Fatal(err)
+	}
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 1 || !strings.Contains(stderr.String(), "dependencies:") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestBuildProjectSurfacesLanguagePluginResolutionFailure exercises
+// buildProjectContextWithBudget's own error-forwarding around
+// projectapp.LanguagePluginLayer, using the real production resolver
+// (resolveLoadedPlugin) against a language with no loaded plugin.
+func TestBuildProjectSurfacesLanguagePluginResolutionFailure(t *testing.T) {
+	loaded := loadProjectTest(t, "language: cobol\nartifact: app\nlanguage_plugin: true\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 1 || !strings.Contains(stderr.String(), "isn't installed") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestBuildProjectIncludesLanguagePluginLayer is
+// TestBuildProjectSurfacesLanguagePluginResolutionFailure's positive
+// counterpart: language "python" is already loaded for this whole test
+// binary (see TestMain), so resolveLoadedPlugin succeeds for real, and
+// this test's own execute stub simulates the plugin's build-layer
+// subcommand by writing a minimal valid tar to the requested --output
+// path - proving the resulting layer is actually threaded into the
+// build as an extra OCI layer.
+func TestBuildProjectIncludesLanguagePluginLayer(t *testing.T) {
+	// A bare "artifact: app" leaves the default entrypoint's basename as
+	// "app", which oci.BuildConfig.Validate() then rejects for the
+	// "python" profile ("python profile requires a matching runtime
+	// entrypoint") - "runtime: python" + "args: [app]" is the same
+	// working shape TestBuildProjectUsesRuntimeEntrypointDefault already
+	// uses to get a real python-profile build past that check.
+	loaded := loadProjectTest(t, "language: python\nruntime: python\nargs: [app]\nlanguage_plugin: true\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "python"), "binary", 0o755)
+	execute := func(_ string, args []string, _ string, _, _ io.Writer) error {
+		if len(args) == 0 || args[0] != "build-layer" {
+			return nil
+		}
+		output := ""
+		for index, argument := range args {
+			if argument == "--output" && index+1 < len(args) {
+				output = args[index+1]
+			}
+		}
+		if output == "" {
+			t.Fatal("build-layer invoked without --output")
+		}
+		file, err := os.Create(output)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		writer := tar.NewWriter(file)
+		content := []byte("marker")
+		if err := writer.WriteHeader(&tar.Header{
+			Name: "app/.platform-factory/deps/python/marker", Typeflag: tar.TypeReg,
+			Mode: 0o644, Size: int64(len(content)),
+		}); err != nil {
+			return err
+		}
+		if _, err := writer.Write(content); err != nil {
+			return err
+		}
+		return writer.Close()
+	}
+	var stdout, stderr bytes.Buffer
+	digest, code := buildProject(loaded, &stdout, &stderr, execute)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if digest == "" {
+		t.Fatal("expected a digest")
+	}
+	if _, err := layout.Verify(loaded.Output()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBuildProjectFallsBackToNowWhenNoProjectFileHasABirthTime exercises
+// earliestProjectFileTime's zero-value fallback: the project's config
+// file lives outside its own Root (via an explicit `project:` override)
+// and the only file under Root sits inside a skipped directory ("dist"),
+// so the walk finds no regular file to time at all.
+func TestBuildProjectFallsBackToNowWhenNoProjectFileHasABirthTime(t *testing.T) {
+	configDir := t.TempDir()
+	root := t.TempDir()
+	writeProjectTestFile(t, filepath.Join(configDir, ".config_image.yaml"),
+		"language: compiled\nartifact: dist/app\nproject: "+root+"\noutput: build-out\n", 0o644)
+	writeProjectTestFile(t, filepath.Join(root, "dist", "app"), "binary", 0o755)
+	loaded, err := project.Load(filepath.Join(configDir, ".config_image.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Root != root {
+		t.Fatalf("root=%q, want %q (test fixture assumption broken)", loaded.Root, root)
+	}
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := layout.Verify(loaded.Output()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBuildProjectSurfacesReleaseSBOMWriteFailure, ...ReportWriteFailure,
+// ...EvidenceWriteFailure and ...MetricsWriteFailure each block exactly
+// one of the four late-stage release writes buildProjectContextWithBudget
+// performs after a successful oci.Build, in pipeline order - each test
+// leaves every earlier write free to succeed so only its own targeted
+// write fails. output: build-out keeps the real build artifact outside
+// .platform-factory entirely, so none of these collisions ever affect
+// oci.Build itself.
+func TestBuildProjectSurfacesReleaseSBOMWriteFailure(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\noutput: build-out\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	// .platform-factory exists as a plain file, not a directory, so
+	// WriteSBOMToDist's own MkdirAll(releaseDir) fails first.
+	writeProjectTestFile(t, filepath.Join(loaded.Root, ".platform-factory"), "not a directory", 0o644)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 1 || !strings.Contains(stderr.String(), "write release SBOM") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestBuildProjectSurfacesBuildReportWriteFailure(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\noutput: build-out\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	releaseDir := filepath.Join(loaded.Root, ".platform-factory", "release")
+	if err := os.MkdirAll(releaseDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// "reports" already exists as a plain file, not a directory, so the
+	// build report's own MkdirAll(reportsDir) fails - sbom.json (written
+	// directly into releaseDir, above) already succeeded.
+	writeProjectTestFile(t, filepath.Join(releaseDir, "reports"), "not a directory", 0o644)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 1 || !strings.Contains(stderr.String(), "write build report") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestBuildProjectSurfacesReleaseEvidenceWriteFailure(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\noutput: build-out\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	releaseDir := filepath.Join(loaded.Root, ".platform-factory", "release")
+	reportsDir := filepath.Join(releaseDir, "reports")
+	if err := os.MkdirAll(reportsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// provenance.json already exists as a directory, not a file, so
+	// WriteBuildEvidence's own atomic rename onto it fails with EISDIR -
+	// sbom.json and build.json already succeeded.
+	if err := os.MkdirAll(filepath.Join(releaseDir, "provenance.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 1 || !strings.Contains(stderr.String(), "write release evidence") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestBuildProjectSurfacesMetricsWriteFailure(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\noutput: build-out\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	reportsDir := filepath.Join(loaded.Root, ".platform-factory", "release", "reports")
+	// metrics.json already exists as a directory, not a file, so only the
+	// very last write (after build.json, provenance.json and
+	// layout.Verify have all already succeeded) fails with EISDIR.
+	if err := os.MkdirAll(filepath.Join(reportsDir, "metrics.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if _, code := buildProject(loaded, &stdout, &stderr, execute); code != 1 || !strings.Contains(stderr.String(), "write metrics") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRebuildProjectLayoutSurfacesAutomaticFreezeFailure exercises
+// rebuildProjectLayout's own automatic re-freeze: an explicit include
+// makes RequiresFrozenInputs true, no freeze.lock.json exists yet, and
+// "cobol" has no built-in freeze adapter, so the automatic freeze itself
+// fails and rebuildProjectLayout must surface that failure without ever
+// reaching os.RemoveAll or a build.
+func TestRebuildProjectLayoutSurfacesAutomaticFreezeFailure(t *testing.T) {
+	loaded := loadProjectTest(t, "language: cobol\nartifact: app\ninclude:\n  - {source: app, destination: /app/app}\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	code := rebuildProjectLayout(context.Background(), loaded, nil, &stdout, &stderr, execute)
+	if code != 2 || !strings.Contains(stderr.String(), "no built-in freeze adapter") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(loaded.Output()); !os.IsNotExist(err) {
+		t.Fatalf("expected no layout to be produced: %v", err)
+	}
+}
+
+// TestRebuildProjectLayoutSurfacesStaleOutputRemovalFailure exercises
+// rebuildProjectLayout's os.RemoveAll error branch: the stale output
+// directory's parent is read-only, so RemoveAll can list its "image"
+// entry but cannot unlink it.
+func TestRebuildProjectLayoutSurfacesStaleOutputRemovalFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory write permissions")
+	}
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	writeProjectTestFile(t, filepath.Join(loaded.Output(), "marker"), "stale", 0o644)
+	parent := filepath.Dir(loaded.Output())
+	if err := os.Chmod(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(parent, 0o755)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	code := rebuildProjectLayout(context.Background(), loaded, nil, &stdout, &stderr, execute)
+	if code != 1 || !strings.Contains(stderr.String(), "remove stale output") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunConfiguredProjectSurfacesNeedsRebuildStatError and its watch
+// counterpart exercise NeedsRebuild's other error path: an os.Stat
+// failure that is not ENOENT (here, ENOTDIR - loaded.Output() itself is
+// a plain file, so stat'ing index.json inside it cannot succeed or
+// report a clean "missing").
+func TestRunConfiguredProjectSurfacesNeedsRebuildStatError(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	writeProjectTestFile(t, loaded.Output(), "not a directory", 0o644)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	code := runConfiguredProject(context.Background(), loaded, nil, &stdout, &stderr, execute, nil, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "stat image") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunConfiguredProjectWatchSurfacesNeedsRebuildStatError(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	writeProjectTestFile(t, loaded.Output(), "not a directory", 0o644)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	containerExecute := func(string, []string, io.Reader, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	code := runConfiguredProjectWatch(context.Background(), loaded, nil, &stdout, &stderr, execute, containerExecute, time.Second)
+	if code != 1 || !strings.Contains(stderr.String(), "stat image") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunConfiguredProjectWatchRejectsMicroVMIsolation exercises the
+// watch loop's own microvm guard - it returns before ever registering
+// the stopWatchedContainer defer, so passing nil executors is safe.
+func TestRunConfiguredProjectWatchRejectsMicroVMIsolation(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nisolation: microvm\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	var stdout, stderr bytes.Buffer
+	code := runConfiguredProjectWatch(context.Background(), loaded, nil, &stdout, &stderr, nil, nil, time.Second)
+	if code != 2 || !strings.Contains(stderr.String(), "does not support microvm isolation") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunConfiguredProjectWatchSurfacesRebuildFailure exercises the
+// watch loop's own propagation of a failing rebuildProjectLayout call
+// (here: the configured build_command itself fails), before any
+// container is ever started.
+func TestRunConfiguredProjectWatchSurfacesRebuildFailure(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nbuild_command: [tool, build]\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	execute := func(_ string, args []string, _ string, _, _ io.Writer) error {
+		if len(args) > 0 && args[0] == "build" {
+			return errors.New("build failed")
+		}
+		return nil
+	}
+	containerExecute := func(string, []string, io.Reader, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	code := runConfiguredProjectWatch(context.Background(), loaded, nil, &stdout, &stderr, execute, containerExecute, time.Second)
+	if code != 1 || !strings.Contains(stderr.String(), "command failed") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunConfiguredProjectWatchReturnsImmediatelyWhenContextAlreadyCanceled
+// exercises the watch loop's ctx.Err() check between a (skipped)
+// rebuild and starting a container: with a fresh, already-current
+// layout (rebuild=false) and an already-canceled context, the loop must
+// return before ever running a container.
+func TestRunConfiguredProjectWatchReturnsImmediatelyWhenContextAlreadyCanceled(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	if _, code := buildProject(loaded, io.Discard, io.Discard, execute); code != 0 {
+		t.Fatalf("prebuild code=%d", code)
+	}
+	ranContainer := false
+	containerExecute := func(_ string, args []string, _ io.Reader, _, _ io.Writer) error {
+		if len(args) > 0 && args[0] == "run" {
+			ranContainer = true
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr bytes.Buffer
+	code := runConfiguredProjectWatch(ctx, loaded, nil, &stdout, &stderr, execute, containerExecute, time.Second)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if ranContainer {
+		t.Fatal("expected the watch loop to exit before starting a container when ctx is already canceled")
+	}
+}
+
+// TestFreezeStepsHonorsDependencyManagementModes exercises every
+// dependency_management.mode branch freezeSteps itself checks before
+// ever consulting the language - "none"/"external" skip freezing
+// entirely, "unresolved"/"unknown" refuse to freeze at all.
+func TestFreezeStepsHonorsDependencyManagementModes(t *testing.T) {
+	none := loadProjectTest(t, "language: go\nartifact: app\ndependency_management:\n  mode: none\n")
+	if steps, err := freezeSteps(none); err != nil || steps != nil {
+		t.Fatalf("mode=none steps=%v err=%v", steps, err)
+	}
+	external := loadProjectTest(t, "language: go\nartifact: app\ndependency_management:\n  mode: external\n")
+	if steps, err := freezeSteps(external); err != nil || steps != nil {
+		t.Fatalf("mode=external steps=%v err=%v", steps, err)
+	}
+	unresolved := loadProjectTest(t, "language: go\nartifact: app\ndependency_management:\n  mode: unresolved\n")
+	if _, err := freezeSteps(unresolved); err == nil || !strings.Contains(err.Error(), "dependency state is unresolved") {
+		t.Fatalf("mode=unresolved err=%v", err)
+	}
+	unknown := loadProjectTest(t, "language: go\nartifact: app\ndependency_management:\n  mode: unknown\n")
+	if _, err := freezeSteps(unknown); err == nil || !strings.Contains(err.Error(), "dependency state is unknown") {
+		t.Fatalf("mode=unknown err=%v", err)
+	}
+}
+
+// TestMigrateProjectSurfacesValidationFailureOnMigratedDocument
+// exercises migrateProject's own post-migration validation: this
+// document migrates cleanly (no "version" field just means the v0->v1
+// step stamps version: 1), but the migrated result is still missing
+// "language", so loading it back to validate fails - distinct from
+// every other migrate failure mode already covered, which all fail
+// before ever producing a document to validate.
+func TestMigrateProjectSurfacesValidationFailureOnMigratedDocument(t *testing.T) {
+	root := t.TempDir()
+	filename := filepath.Join(root, ".config_image.yaml")
+	writeProjectTestFile(t, filename, "artifact: app\n", 0o644)
+	var stdout, stderr bytes.Buffer
+	code := runProject([]string{"migrate", "--config", filename}, &stdout, &stderr, nil, nil, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "migrated config does not validate") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".migrate-") {
+			t.Fatalf("temporary migration file left behind: %s", entry.Name())
+		}
 	}
 }

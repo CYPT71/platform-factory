@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/CYPT71/platform-factory/internal/app/publish"
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
 	"github.com/CYPT71/platform-factory/internal/core"
 	"github.com/CYPT71/platform-factory/internal/idempotency"
 	"github.com/CYPT71/platform-factory/internal/layout"
@@ -203,6 +204,44 @@ func TestRunPublishTransitionsWorkloadStateThroughStateMachine(t *testing.T) {
 	})
 }
 
+// TestRunPublishReplaysAnAlreadyCompletedOperationWithoutRepushing
+// covers runPublish's claimOperation "done" replay branch: a second
+// call with the identical operation identity (same layout, same
+// registry/repository/tag) against the same operation journal must
+// report success without invoking pushOCI/tagOCI/pushOCIArtifact again
+// - proving the idempotency claim, not just that a fresh call succeeds
+// once (every other runPublish success test here calls
+// freshOperationJournal per case and never repeats an identity).
+func TestRunPublishReplaysAnAlreadyCompletedOperationWithoutRepushing(t *testing.T) {
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	digest := "sha256:" + strings.Repeat("e", 64)
+	stubRegistryPush(t, digest, nil)
+	args := []string{"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/replay:v1"}
+
+	var stdout, stderr bytes.Buffer
+	if code := runPublish(context.Background(), args, &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("first call code=%d stderr=%s", code, stderr.String())
+	}
+
+	pushCalled := false
+	pushOCI = func(context.Context, string, registry.Reference, string, string, string, string, string, string) (registry.Result, error) {
+		pushCalled = true
+		return registry.Result{}, errors.New("must not be called on a replay")
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code := runPublish(context.Background(), args, &stdout, &stderr, nil)
+	if code != 0 {
+		t.Fatalf("replay code=%d stderr=%s", code, stderr.String())
+	}
+	if pushCalled {
+		t.Fatal("pushOCI must not be called again for an already-completed operation")
+	}
+	if !strings.Contains(stderr.String(), "already published") {
+		t.Fatalf("expected an 'already published' notice, stderr=%q", stderr.String())
+	}
+}
+
 func TestRunPublishReferenceOutput(t *testing.T) {
 	layoutName := buildPublishLayout(t, "example/service", "v1")
 	digest := "sha256:" + strings.Repeat("e", 64)
@@ -322,6 +361,26 @@ func TestPushOCIAndTagOCIAndArtifactDefaultsFailFast(t *testing.T) {
 	if _, err := pushOCIArtifact(context.Background(), target, registry.Result{Digest: "not-a-digest"},
 		"artifact-type", "payload-type", []byte("x"), "https", "", ""); err == nil {
 		t.Fatal("expected pushOCIArtifact to fail for an invalid subject digest before any network call")
+	}
+}
+
+func TestRunPublishRejectsMutuallyExclusivePushOnlyAndDeployOnly(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{"--push-only", "--deploy-only"}, &stdout, &stderr, nil)
+	if code != 2 || !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishDeployOnlyRejectsAnExplicitImageArgument covers
+// runPublish's --deploy-only NArg()!=0 usage check:
+// TestRunDeployAndRollbackWithoutAConfiguredPluginFailCleanly-adjacent
+// tests only ever call --deploy-only with zero positional arguments.
+func TestRunPublishDeployOnlyRejectsAnExplicitImageArgument(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{"--deploy-only", "registry.example/service:v1"}, &stdout, &stderr, nil)
+	if code != 2 || !strings.Contains(stderr.String(), "--deploy-only consumes the persisted project digest") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 }
 
@@ -712,6 +771,133 @@ func TestRunDeploySelectsJobForInitializedProjectWithoutPorts(t *testing.T) {
 	}
 }
 
+// TestRunDeployRejectsAFlagParseFailure covers runDeploy's flags.Parse
+// error branch (distinct from flag.ErrHelp, and distinct from the
+// NArg()/name/namespace/replicas/port usage-validation check right
+// after it): a flag given a value its own type cannot parse fails
+// inside flag.FlagSet.Parse itself.
+func TestRunDeployRejectsAFlagParseFailure(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runDeploy(context.Background(), []string{"--replicas", "not-a-number", "ghcr.io/example/api@sha256:" + strings.Repeat("a", 64)}, &stdout, &stderr, nil)
+	if code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunDeployRejectsATagWithoutADigestGivenDirectly covers
+// validDigestReference's rejection when IMAGE is passed as a positional
+// argument (flags.NArg()==1) rather than auto-discovered from a
+// project's published.json - the sibling of TestRunDeployDryRunEmitsHardenedManifest's
+// mutable-tag case, but reached with --dry-run already set so it proves
+// the digest check itself fires rather than the earlier --yes/--dry-run gate.
+func TestRunDeployRejectsATagWithoutADigestGivenDirectly(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runDeploy(context.Background(), []string{"--dry-run", "example/api:latest"}, &stdout, &stderr, nil)
+	if code != 2 || !strings.Contains(stderr.String(), "IMAGE must be pinned by sha256 digest") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunDeployAutoDiscoversAPublishedProject covers the IMAGE-omitted
+// path (flags.NArg()==0) that reads the digest platform-factory publish
+// already recorded, rather than the project.Discover error/no-project
+// path other tests exercise: no pf.yaml at all (discover itself fails),
+// a project with no published.json yet (no verified release), and one
+// with a published.json whose fields do not agree with each other
+// (persisted publication is inconsistent) - none of which any existing
+// runDeploy test drives, since they all pass IMAGE directly.
+func TestRunDeployAutoDiscoversAPublishedProject(t *testing.T) {
+	t.Run("no project at all", func(t *testing.T) {
+		root := t.TempDir()
+		t.Chdir(root)
+		var stdout, stderr bytes.Buffer
+		code := runDeploy(context.Background(), []string{"--dry-run"}, &stdout, &stderr, nil)
+		if code != 2 || !strings.Contains(stderr.String(), "discover project publication") {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+	})
+	t.Run("project without a published release", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "pf.yaml"), []byte(
+			"version: 1\nlanguage: compiled\nprofile: static\nartifact: app\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(root)
+		var stdout, stderr bytes.Buffer
+		code := runDeploy(context.Background(), []string{"--dry-run"}, &stdout, &stderr, nil)
+		if code != 1 || !strings.Contains(stderr.String(), "no verified published release") {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+	})
+	t.Run("inconsistent persisted publication", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "pf.yaml"), []byte(
+			"version: 1\nlanguage: compiled\nprofile: static\nartifact: app\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		published := map[string]any{
+			"api_version": "platform-factory.dev/publication/v1",
+			"digest":      "sha256:" + strings.Repeat("a", 64),
+			// Reference deliberately does not equal repository+"@"+digest.
+			"reference":  "registry.example/app@sha256:" + strings.Repeat("b", 64),
+			"repository": "registry.example/app",
+			"scheme":     "https",
+		}
+		if err := atomicfile.WriteJSONSensitive(filepath.Join(root, ".platform-factory", "published.json"), published); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(root)
+		var stdout, stderr bytes.Buffer
+		code := runDeploy(context.Background(), []string{"--dry-run"}, &stdout, &stderr, nil)
+		if code != 1 || !strings.Contains(stderr.String(), "persisted publication is inconsistent") {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+	})
+}
+
+// TestRunDeployReportsAnOperationJournalFailure covers runDeploy's
+// operationJournalFor() error branch, reached only after every flag/
+// policy/manifest-generation check passes and --dry-run is not set (the
+// real-cluster path every other runDeploy test in this file avoids by
+// always passing --dry-run) - forced deterministically the same way
+// TestRunPublishReportsAJournalFailure presumably would, by pointing the
+// operationJournalFor seam at a func that always errors.
+func TestRunDeployReportsAnOperationJournalFailure(t *testing.T) {
+	previous := operationJournalFor
+	operationJournalFor = func() (core.OperationJournal, error) {
+		return nil, errors.New("journal store is unavailable")
+	}
+	t.Cleanup(func() { operationJournalFor = previous })
+
+	var stdout, stderr bytes.Buffer
+	image := "ghcr.io/example/api@sha256:" + strings.Repeat("a", 64)
+	code := runDeploy(context.Background(), []string{"--yes", image}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "journal store is unavailable") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunDeployReportsAPluginHostStartFailure covers runDeploy's
+// pluginFlags.startWithJournal error branch: a --plugin-key that cannot
+// be read fails plugin verification setup before any plugin is even
+// discovered, the same trigger plugins_flags_test.go's
+// TestPluginOptionsStartRejectsMissingKey uses directly against
+// pluginOptions.start.
+func TestRunDeployReportsAPluginHostStartFailure(t *testing.T) {
+	freshOperationJournal(t)
+	var stdout, stderr bytes.Buffer
+	image := "ghcr.io/example/api@sha256:" + strings.Repeat("a", 64)
+	code := runDeploy(context.Background(), []string{
+		"--yes", "--plugin-dir", t.TempDir(), "--plugin-key", "/does/not/exist.pem", image,
+	}, &stdout, &stderr, nil)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "platform-factory deploy:") {
+		t.Fatalf("expected the plugin host start failure to be reported, stderr=%q", stderr.String())
+	}
+}
+
 func TestRunPublishDiscoversInitializedProjectLayout(t *testing.T) {
 	layoutName := buildPublishLayout(t, "example/hello", "v1")
 	root := t.TempDir()
@@ -832,6 +1018,510 @@ func TestRunPublishDiscoversCompleteProjectReleaseBundle(t *testing.T) {
 		t.Fatalf("missing remote digest code=%d stderr=%s", code, stderr.String())
 	}
 	verifyRemoteDigest = workingRemoteVerify
+}
+
+// TestRunPublishFlagParseHelpAndError covers runPublish's own
+// flags.Parse error handling: "-help" (single dash) slips past
+// containsHelpFlag's literal "-h"/"--help" check but is still special-
+// cased inside the flag package itself as flag.ErrHelp, while a flag
+// missing its required value is a genuine, non-help parse failure.
+func TestRunPublishFlagParseHelpAndError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runPublish(context.Background(), []string{"-help"}, &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPublish(context.Background(), []string{"--policy"}, &stdout, &stderr, nil); code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishDeployOnlyForwardsYesFlag covers the --yes-forwarding
+// branch of --deploy-only (deployArgs gets "--yes" appended before
+// handing off to runDeploy) - every other --deploy-only test here omits
+// --yes.
+func TestRunPublishDeployOnlyForwardsYesFlag(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{"--deploy-only", "--yes"}, &stdout, &stderr, nil)
+	if code == 0 {
+		t.Fatalf("expected --deploy-only --yes with no project to still fail downstream, code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}
+
+// TestRunPublishSurfacesProjectDiscoveryFailure covers the NArg()==1
+// project.Discover error branch: a bare IMAGE argument with no pf.yaml
+// anywhere above the working directory.
+func TestRunPublishSurfacesProjectDiscoveryFailure(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{"--yes", "registry.example/service:v1"}, &stdout, &stderr, nil)
+	if code != 2 || !strings.Contains(stderr.String(), "discover project build") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishSupportsInsecureRegistryScheme covers the
+// --insecure-registry -> scheme="http" assignment.
+func TestRunPublishSupportsInsecureRegistryScheme(t *testing.T) {
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--dry-run", "--allow-incomplete-evidence", "--insecure-registry", layoutName, "registry.example/service:v1",
+	}, &stdout, &stderr, nil)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishReportsAnOperationJournalFailure covers runPublish's
+// operationJournalFor() error branch, mirroring
+// TestRunDeployReportsAnOperationJournalFailure.
+func TestRunPublishReportsAnOperationJournalFailure(t *testing.T) {
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	previous := operationJournalFor
+	operationJournalFor = func() (core.OperationJournal, error) {
+		return nil, errors.New("journal store is unavailable")
+	}
+	t.Cleanup(func() { operationJournalFor = previous })
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/service:v1",
+	}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "journal store is unavailable") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishReportsAWorkloadStateStoreFailure covers runPublish's
+// workloadStateStoreFor() error branch, reached only after the
+// operation journal claim already succeeded.
+func TestRunPublishReportsAWorkloadStateStoreFailure(t *testing.T) {
+	freshOperationJournal(t)
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	previous := workloadStateStoreFor
+	workloadStateStoreFor = func() (workloadstate.Store, error) {
+		return nil, errors.New("state store is unavailable")
+	}
+	t.Cleanup(func() { workloadStateStoreFor = previous })
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/service:v1",
+	}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "state store is unavailable") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishReplaysAPreviouslyFailedOperationWithoutRetrying covers
+// claimOperation's "done, but with an error" replay branch for a prior
+// *failed* operation (as opposed to TestRunPublishReplaysAnAlreadyCompletedOperationWithoutRepushing's
+// completed-operation replay): the exact same operation identity,
+// against the exact same journal, that already failed once must refuse
+// to retry rather than silently re-attempting the push.
+func TestRunPublishReplaysAPreviouslyFailedOperationWithoutRetrying(t *testing.T) {
+	freshOperationJournal(t)
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	pushOCI = func(context.Context, string, registry.Reference, string, string, string, string, string, string) (registry.Result, error) {
+		return registry.Result{}, errors.New("registry unavailable")
+	}
+	args := []string{"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/failed-replay:v1"}
+	var stdout, stderr bytes.Buffer
+	if code := runPublish(context.Background(), args, &stdout, &stderr, nil); code != 1 {
+		t.Fatalf("first call code=%d stderr=%s", code, stderr.String())
+	}
+	// Same journal, same identity: this must hit the "previously failed"
+	// replay branch, not attempt pushOCI again.
+	pushOCI = func(context.Context, string, registry.Reference, string, string, string, string, string, string) (registry.Result, error) {
+		t.Fatal("pushOCI must not be called again for a previously failed operation")
+		return registry.Result{}, nil
+	}
+	stdout.Reset()
+	stderr.Reset()
+	code := runPublish(context.Background(), args, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "previously failed") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishSurfacesAConflictingOperationClaim covers runPublish's
+// own "!proceed" branch (as opposed to the "done" branch
+// TestRunPublishReplaysAnAlreadyCompletedOperationWithoutRepushing and
+// TestRunPublishReplaysAPreviouslyFailedOperationWithoutRetrying already
+// cover - claimOperation's Completed/Failed/indeterminate switch cases
+// all report done=true, not done=false): a genuine journal.Start()
+// failure, here a scope collision on the same operation identity, is
+// claimOperation's only other done=false source short of corrupting the
+// journal directly.
+func TestRunPublishSurfacesAConflictingOperationClaim(t *testing.T) {
+	freshOperationJournal(t)
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	journal, err := operationJournalFor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	opID := cliOperationID("publish", "registry.example", "service", "v1", "explicit-ref")
+	if _, err := journal.Start(opID, "publish:some-other-scope"); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--allow-incomplete-evidence", "--source-ref", "explicit-ref",
+		layoutName, "registry.example/service:v1",
+	}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "collides with a different operation scope") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishWarnsOnIllegalWorkloadStateTransitions covers all three
+// publish.TransitionWorkload !ok warning branches in runPublish: entering
+// PhasePublishing, and then either PhasePublished (success) or
+// PhaseFailed (failure) - each only a warning, never a fatal error,
+// since a workload starting from an already-Running phase can never
+// legally transition straight to Publishing/Published/Failed.
+func TestRunPublishWarnsOnIllegalWorkloadStateTransitions(t *testing.T) {
+	t.Run("success path warns entering Publishing and Published", func(t *testing.T) {
+		freshOperationJournal(t)
+		layoutName := buildPublishLayout(t, "example/service", "v1")
+		stubRegistryPush(t, "sha256:"+strings.Repeat("1", 64), nil)
+		store, err := workloadStateStoreFor()
+		if err != nil {
+			t.Fatal(err)
+		}
+		workloadID := cliWorkloadID("publish", "registry.example", "illegal-success", "v1")
+		if err := store.Save(workloadID, core.RuntimeState{Phase: core.PhaseRunning}); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := runPublish(context.Background(), []string{
+			"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/illegal-success:v1",
+		}, &stdout, &stderr, nil); code != 0 {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+		if strings.Count(stderr.String(), "workload state:") < 2 {
+			t.Fatalf("expected both the Publishing and Published transition warnings, stderr=%s", stderr.String())
+		}
+	})
+
+	t.Run("failure path warns entering Failed", func(t *testing.T) {
+		freshOperationJournal(t)
+		layoutName := buildPublishLayout(t, "example/service", "v1")
+		stubRegistryPush(t, "sha256:"+strings.Repeat("2", 64), errors.New("registry unavailable"))
+		store, err := workloadStateStoreFor()
+		if err != nil {
+			t.Fatal(err)
+		}
+		workloadID := cliWorkloadID("publish", "registry.example", "illegal-failure", "v1")
+		if err := store.Save(workloadID, core.RuntimeState{Phase: core.PhaseRunning}); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		code := runPublish(context.Background(), []string{
+			"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/illegal-failure:v1",
+		}, &stdout, &stderr, nil)
+		if code != 1 {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "workload state:") {
+			t.Fatalf("expected a workload state transition warning, stderr=%s", stderr.String())
+		}
+	})
+}
+
+// TestRunPublishRejectsAnInvalidRegistryDigestReference covers
+// validDigestReference's rejection of a malformed registry-returned
+// reference, independent of any project discovery.
+func TestRunPublishRejectsAnInvalidRegistryDigestReference(t *testing.T) {
+	freshOperationJournal(t)
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	previousPush := pushOCI
+	pushOCI = func(context.Context, string, registry.Reference, string, string, string, string, string, string) (registry.Result, error) {
+		return registry.Result{Digest: "sha256:" + strings.Repeat("a", 64), Reference: "not-a-valid-digest-reference"}, nil
+	}
+	t.Cleanup(func() { pushOCI = previousPush })
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/service:v1",
+	}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "registry returned invalid digest") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishSurfacesBuildArtifactsFailure covers the native-evidence
+// build error branch: --journal pointing at a file that does not exist
+// fails inside publish.BuildArtifacts (os.Open) before any artifact is
+// ever pushed.
+func TestRunPublishSurfacesBuildArtifactsFailure(t *testing.T) {
+	freshOperationJournal(t)
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	stubRegistryPush(t, "sha256:"+strings.Repeat("3", 64), nil)
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--allow-incomplete-evidence", "--journal", filepath.Join(t.TempDir(), "missing-journal.json"),
+		layoutName, "registry.example/service:v1",
+	}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "build native evidence") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishSurfacesTagMoveFailure covers tagOCI's own error branch,
+// reached only after every artifact has already pushed successfully.
+func TestRunPublishSurfacesTagMoveFailure(t *testing.T) {
+	freshOperationJournal(t)
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	digest := "sha256:" + strings.Repeat("4", 64)
+	previousPush, previousTag := pushOCI, tagOCI
+	pushOCI = func(_ context.Context, _ string, target registry.Reference, _, _, _, _, _, _ string) (registry.Result, error) {
+		return registry.Result{Digest: digest, Reference: target.Registry + "/" + target.Repository + "@" + digest}, nil
+	}
+	tagOCI = func(context.Context, string, registry.Reference, string, string, string, string) error {
+		return errors.New("tag move refused")
+	}
+	t.Cleanup(func() { pushOCI, tagOCI = previousPush, previousTag })
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/service:v1",
+	}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "move registry tag after evidence") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishPostPushPolicyEvaluationErrors and
+// TestRunPublishPostPushPolicyDiffersFromPreflight both exercise
+// runPublish's *second*, post-push --policy re-evaluation (lines
+// 415-426), as distinct from TestRunPublishAppliesPolicyDecision's
+// pre-push preflight check (lines 305-320). Because both calls read the
+// same static policy/evidence files with the same hasSBOM/hasProvenance/
+// hasSignature flags, the two evaluations are otherwise always
+// identical - the only way to make them genuinely disagree is to mutate
+// the evidence file in the window between them, which pushOCI's own
+// stub can do deterministically here (no goroutine/race needed: pushOCI
+// runs synchronously between the two EvaluatePolicy calls).
+func TestRunPublishPostPushPolicyEvaluationErrors(t *testing.T) {
+	freshOperationJournal(t)
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	root := t.TempDir()
+	policyPath := filepath.Join(root, "policy.json")
+	evidencePath := filepath.Join(root, "evidence.json")
+	if err := os.WriteFile(policyPath, []byte(`{"api_version":"platform-factory.dev/policy/v1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evidencePath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("8", 64)
+	previousPush := pushOCI
+	pushOCI = func(_ context.Context, _ string, target registry.Reference, _, _, _, _, _, _ string) (registry.Result, error) {
+		if err := os.WriteFile(evidencePath, []byte(`not json`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return registry.Result{Digest: digest, Reference: target.Registry + "/" + target.Repository + "@" + digest}, nil
+	}
+	t.Cleanup(func() { pushOCI = previousPush })
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--allow-incomplete-evidence", "--policy", policyPath, "--evidence", evidencePath,
+		layoutName, "registry.example/service:v1",
+	}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "platform-factory publish: policy:") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunPublishPostPushPolicyDiffersFromPreflight(t *testing.T) {
+	freshOperationJournal(t)
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	root := t.TempDir()
+	policyPath := filepath.Join(root, "policy.json")
+	evidencePath := filepath.Join(root, "evidence.json")
+	if err := os.WriteFile(policyPath, []byte(`{"api_version":"platform-factory.dev/policy/v1","require_reproducible":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(evidencePath, []byte(`{"reproducible":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("7", 64)
+	previousPush := pushOCI
+	pushOCI = func(_ context.Context, _ string, target registry.Reference, _, _, _, _, _, _ string) (registry.Result, error) {
+		// The preflight check already read and allowed reproducible=true;
+		// flipping it here simulates the evidence going stale in the
+		// window between preflight and the post-push re-check.
+		if err := os.WriteFile(evidencePath, []byte(`{"reproducible":false}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return registry.Result{Digest: digest, Reference: target.Registry + "/" + target.Repository + "@" + digest}, nil
+	}
+	t.Cleanup(func() { pushOCI = previousPush })
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--allow-incomplete-evidence", "--policy", policyPath, "--evidence", evidencePath,
+		layoutName, "registry.example/service:v1",
+	}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "policy denied tag update") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishWarnsWhenMetricsCannotBeWritten covers the metrics-write
+// failure at the very end of runPublish: it is deliberately only a
+// warning (publication has already durably succeeded by this point), so
+// the command must still report success.
+func TestRunPublishWarnsWhenMetricsCannotBeWritten(t *testing.T) {
+	freshOperationJournal(t)
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	stubRegistryPush(t, "sha256:"+strings.Repeat("5", 64), nil)
+	reportsDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(reportsDir, "metrics.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--allow-incomplete-evidence", "--reports", reportsDir,
+		layoutName, "registry.example/service:v1",
+	}, &stdout, &stderr, nil)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "publication succeeded but metrics could not be written") {
+		t.Fatalf("stderr=%s", stderr.String())
+	}
+}
+
+// setupDiscoveredPublishProject builds a project whose release bundle is
+// complete enough for runPublish's automatic single-IMAGE-argument
+// discovery to succeed without any explicit --sbom/--sign/--provenance/
+// --policy/--evidence flags, mirroring
+// TestRunPublishDiscoversCompleteProjectReleaseBundle's own fixture.
+func setupDiscoveredPublishProject(t *testing.T, image string) (root, layoutName string) {
+	t.Helper()
+	layoutName = buildPublishLayout(t, image, "v1")
+	root = t.TempDir()
+	relative, err := filepath.Rel(root, layoutName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := "version: 1\nlanguage: compiled\nprofile: static\nartifact: app\noutput: " + relative + "\n"
+	if err := os.WriteFile(filepath.Join(root, "pf.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	releaseDir := filepath.Join(root, ".platform-factory", "release")
+	reportsDir := filepath.Join(releaseDir, "reports")
+	if err := os.MkdirAll(reportsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFile(t, filepath.Join(releaseDir, "sbom.json"), map[string]any{"components": []any{}})
+	writeJSONFile(t, filepath.Join(releaseDir, "provenance.json"), map[string]any{"subject_digest": "sha256:" + strings.Repeat("a", 64)})
+	writeJSONFile(t, filepath.Join(reportsDir, "policy-rules.json"), policy.Rules{
+		APIVersion: policy.APIVersion, RequireSBOM: true, RequireProvenance: true,
+		RequireSignature: true, RequireReproducible: true,
+	})
+	writeJSONFile(t, filepath.Join(reportsDir, "evidence.json"), policy.Evidence{
+		SBOM: true, Provenance: true, Signature: true, Reproducible: true,
+	})
+	return root, layoutName
+}
+
+// TestRunPublishRejectsRegistryDigestMismatchForDiscoveredProject covers
+// the discovered-project-only registry-vs-verified-build digest
+// consistency check: a registry that returns a digest different from
+// the locally verified layout's own digest.
+func TestRunPublishRejectsRegistryDigestMismatchForDiscoveredProject(t *testing.T) {
+	root, _ := setupDiscoveredPublishProject(t, "example/digest-mismatch")
+	t.Chdir(root)
+	stubRegistryPush(t, "sha256:"+strings.Repeat("9", 64), nil)
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--key-dir", filepath.Join(root, "keys"), "registry.example/digest-mismatch:v1",
+	}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "does not match verified build digest") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunPublishSurfacesPublicationPolicyWriteFailure,
+// ...EvidenceWriteFailure and ...PublishedReferenceWriteFailure each
+// block exactly one of the three discovered-project persistence writes
+// runPublish performs after a successful tag move, in order - each test
+// leaves every earlier write free to succeed so only its own targeted
+// write fails.
+func TestRunPublishSurfacesPublicationPolicyWriteFailure(t *testing.T) {
+	root, layoutName := setupDiscoveredPublishProject(t, "example/policy-write-failure")
+	// policy.json already exists as a directory, not a file, so the
+	// first of the three post-tag persistence writes fails.
+	if err := os.MkdirAll(filepath.Join(root, ".platform-factory", "publication", "policy.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	report, err := layout.Verify(layoutName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubRegistryPush(t, report.Platforms[0].Digest, nil)
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--key-dir", filepath.Join(root, "keys"), "registry.example/policy-write-failure:v1",
+	}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "persist publication policy") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunPublishSurfacesPublicationEvidenceWriteFailure(t *testing.T) {
+	root, layoutName := setupDiscoveredPublishProject(t, "example/evidence-write-failure")
+	publicationDir := filepath.Join(root, ".platform-factory", "publication")
+	if err := os.MkdirAll(publicationDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// evidence.json already exists as a directory, not a file, so this
+	// write fails after policy.json (written directly into
+	// publicationDir, which already exists here) already succeeded.
+	if err := os.MkdirAll(filepath.Join(publicationDir, "evidence.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	report, err := layout.Verify(layoutName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubRegistryPush(t, report.Platforms[0].Digest, nil)
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--key-dir", filepath.Join(root, "keys"), "registry.example/evidence-write-failure:v1",
+	}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "persist publication evidence") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunPublishSurfacesPublishedReferenceWriteFailure(t *testing.T) {
+	root, layoutName := setupDiscoveredPublishProject(t, "example/published-write-failure")
+	// published.json already exists as a directory, not a file, so this
+	// final persistence write fails after policy.json and evidence.json
+	// (both written into a separate "publication" subdirectory) already
+	// succeeded.
+	if err := os.MkdirAll(filepath.Join(root, ".platform-factory", "published.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	report, err := layout.Verify(layoutName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubRegistryPush(t, report.Platforms[0].Digest, nil)
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{
+		"--yes", "--key-dir", filepath.Join(root, "keys"), "registry.example/published-write-failure:v1",
+	}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "persist immutable published reference") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
 }
 
 func TestRunPublishRejectsIncompleteAutomaticReleaseBundle(t *testing.T) {
@@ -981,6 +1671,11 @@ func TestRollbackClusterSurfacesMissingCapabilitiesAndErrors(t *testing.T) {
 		!strings.Contains(err.Error(), api.CapabilityDeploymentRollback) {
 		t.Fatalf("err=%v", err)
 	}
+	rollbackOnly := &pluginHost{clients: []pluginClient{&stubDeploymentPlugin{capabilities: []string{api.CapabilityDeploymentRollback}}}}
+	if _, err := rollbackCluster(context.Background(), rollbackOnly, "prod", "api", 0, "2m"); err == nil ||
+		!strings.Contains(err.Error(), api.CapabilityDeploymentObserve) {
+		t.Fatalf("err=%v", err)
+	}
 	failing := &pluginHost{clients: []pluginClient{&stubDeploymentPlugin{capabilities: allDeploymentCapabilities(), err: errors.New("rollback refused")}}}
 	if _, err := rollbackCluster(context.Background(), failing, "prod", "api", 0, "2m"); err == nil ||
 		!strings.Contains(err.Error(), "rollback refused") {
@@ -1013,6 +1708,76 @@ func TestRunDeployAndRollbackWithoutAConfiguredPluginFailCleanly(t *testing.T) {
 	if code := runRollback(context.Background(), []string{"--yes", "--namespace", "prod", "--to-revision", "2", "api"}, &stdout, &stderr, execute); code != 1 ||
 		!strings.Contains(stderr.String(), "no installed plugin provides "+api.CapabilityDeploymentRollback) {
 		t.Fatalf("rollback code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunRollbackFlagAndUsageValidation covers runRollback's own
+// flag.FlagSet plumbing that TestRollbackUsesPersistedServiceAndRejectsJob/
+// TestRunDeployAndRollbackWithoutAConfiguredPluginFailCleanly never
+// reach: a genuine flags.Parse failure (distinct from flag.ErrHelp),
+// the NArg()/namespace/--to-revision usage-validation check, and an
+// explicit positional DEPLOYMENT argument that is not a valid
+// Kubernetes name.
+func TestRunRollbackFlagAndUsageValidation(t *testing.T) {
+	t.Run("flag parse failure", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runRollback(context.Background(), []string{"--to-revision", "not-a-number"}, &stdout, &stderr, nil)
+		if code != 2 {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+	})
+	t.Run("negative to-revision is rejected", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runRollback(context.Background(), []string{"--to-revision", "-1", "api"}, &stdout, &stderr, nil)
+		if code != 2 || !strings.Contains(stderr.String(), "usage: platform-factory rollback") {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+	})
+	t.Run("too many positional arguments", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runRollback(context.Background(), []string{"api", "extra"}, &stdout, &stderr, nil)
+		if code != 2 || !strings.Contains(stderr.String(), "usage: platform-factory rollback") {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+	})
+	t.Run("an explicit deployment name that is not a valid Kubernetes name", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runRollback(context.Background(), []string{"--dry-run", "Not_A_Valid_Name"}, &stdout, &stderr, nil)
+		if code != 2 || !strings.Contains(stderr.String(), "deployment name must be a valid Kubernetes name") {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+	})
+}
+
+// TestRunRollbackReportsAnOperationJournalFailure and
+// TestRunRollbackReportsAPluginHostStartFailure are runRollback's
+// counterparts to TestRunDeployReportsAnOperationJournalFailure/
+// TestRunDeployReportsAPluginHostStartFailure.
+func TestRunRollbackReportsAnOperationJournalFailure(t *testing.T) {
+	previous := operationJournalFor
+	operationJournalFor = func() (core.OperationJournal, error) {
+		return nil, errors.New("journal store is unavailable")
+	}
+	t.Cleanup(func() { operationJournalFor = previous })
+
+	var stdout, stderr bytes.Buffer
+	code := runRollback(context.Background(), []string{"--yes", "api"}, &stdout, &stderr, nil)
+	if code != 1 || !strings.Contains(stderr.String(), "journal store is unavailable") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunRollbackReportsAPluginHostStartFailure(t *testing.T) {
+	freshOperationJournal(t)
+	var stdout, stderr bytes.Buffer
+	code := runRollback(context.Background(), []string{
+		"--yes", "--plugin-dir", t.TempDir(), "--plugin-key", "/does/not/exist.pem", "api",
+	}, &stdout, &stderr, nil)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "platform-factory rollback:") {
+		t.Fatalf("expected the plugin host start failure to be reported, stderr=%q", stderr.String())
 	}
 }
 
@@ -1163,6 +1928,28 @@ func TestDefaultLifecycleRootFallsBackWithoutConfiguration(t *testing.T) {
 	got := defaultOperationJournalRoot()
 	if !strings.HasSuffix(got, filepath.Join("platform-factory", "operation-journal")) {
 		t.Fatalf("operation journal root=%q", got)
+	}
+}
+
+// TestDefaultLifecycleRootFallsBackToARelativePathWhenUserCacheDirFails
+// covers defaultLifecycleRoot's last-resort branch: with no explicit
+// $PLATFORM_FACTORY_*_DIR override and os.UserCacheDir() itself unable
+// to resolve a cache directory (every variable it consults on this OS
+// cleared), it must fall back to a repo-relative ".platform-factory/<name>"
+// rather than propagating the error - the same non-writable-HOME
+// scenario the var's own doc comment (operationJournalFor) describes.
+func TestDefaultLifecycleRootFallsBackToARelativePathWhenUserCacheDirFails(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_OPERATION_JOURNAL_DIR", "")
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("LocalAppData", "")
+	if _, err := os.UserCacheDir(); err == nil {
+		t.Skip("os.UserCacheDir() still resolves on this OS/environment with HOME/XDG_CACHE_HOME cleared - nothing to force the fallback branch with here")
+	}
+	got := defaultLifecycleRoot("PLATFORM_FACTORY_OPERATION_JOURNAL_DIR", "operation-journal")
+	want := filepath.Join(".platform-factory", "operation-journal")
+	if got != want {
+		t.Fatalf("defaultLifecycleRoot=%q, want %q", got, want)
 	}
 }
 

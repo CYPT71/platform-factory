@@ -241,6 +241,20 @@ func TestPrepareContainerImageLoadsALayoutContainingASecretShapedBinary(t *testi
 	}
 }
 
+// TestPrepareContainerImageSurfacesAnUnsupportedRuntimeName covers
+// prepareContainerImage's own dockersave.NewRuntimeClientForName error
+// branch. runImport (main.go) never reaches it through the CLI - its
+// own --runtime flag validation rejects anything but "docker"/"podman"
+// first - so it is only reachable by calling prepareContainerImage
+// directly, the same way this file's other prepareContainerImage tests
+// already do.
+func TestPrepareContainerImageSurfacesAnUnsupportedRuntimeName(t *testing.T) {
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	if _, err := prepareContainerImage(context.Background(), "containerd", "example/service:v1", layoutName, io.Discard); err == nil {
+		t.Fatal("expected an unsupported runtime name to be rejected")
+	}
+}
+
 func TestPrepareContainerImageRejectsInvalidOrMismatchedLayout(t *testing.T) {
 	layoutName := buildPublishLayout(t, "example/service", "v1")
 	if _, err := prepareContainerImage(

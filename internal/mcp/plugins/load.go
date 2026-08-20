@@ -52,14 +52,18 @@ func Load(ctx context.Context, backend LanguagePluginBackend, req LoadRequest) (
 	if source == "" {
 		found, err := pluginapp.LocateBuiltinPluginBinary(name)
 		if err != nil {
-			return LoadResult{}, err
+			// LocateBuiltinPluginBinary's own message already names the
+			// exact fix (build the binary, or pass --from) - safe to
+			// surface verbatim, and a well-defined, expected condition
+			// rather than an internal failure.
+			return LoadResult{}, toolerror.New(toolerror.ErrNotFound, "%v", err)
 		}
 		source = found
 	} else {
 		resolved, cleanup, err := pluginapp.PrepareSource(source)
 		defer cleanup()
 		if err != nil {
-			return LoadResult{}, err
+			return LoadResult{}, toolerror.New(toolerror.ErrInvalidArgument, "%v", err)
 		}
 		source = resolved
 	}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -76,6 +77,249 @@ func TestClassifyRejectsANonJSONReply(t *testing.T) {
 	client := fakeClient(t, []string{"I would suggest a plugin."})
 	if _, err := classify(context.Background(), client, "add bun support"); err == nil {
 		t.Fatal("expected an error for a non-JSON reply")
+	}
+}
+
+// TestImplementPropagatesAClassifyError covers Implement's own
+// classify() error branch - TestClassifyRejectsAnUnrecognizedStrategy/
+// TestClassifyRejectsANonJSONReply exercise classify directly, never
+// through Implement.
+func TestImplementPropagatesAClassifyError(t *testing.T) {
+	dir := fixtureRepo(t)
+	client := fakeClient(t, []string{"not json at all"})
+	_, err := Implement(context.Background(), client, dir, "add something")
+	if err == nil {
+		t.Fatal("expected classify's error to propagate out of Implement")
+	}
+}
+
+// TestImplementPropagatesAPrepareBranchFailure covers Implement's own
+// PrepareBranch error branch: PrepareBranch requires a clean working
+// tree, so a dirty fixtureRepo (an untracked file, never committed)
+// makes it fail before any plugin/core work starts.
+func TestImplementPropagatesAPrepareBranchFailure(t *testing.T) {
+	dir := fixtureRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "dirty.txt"), []byte("uncommitted"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan := `{"strategy": "plugin_only", "reasoning": "x", "plugin": {"name": "widget", "action": "create", "description": "d", "capabilities": ["detect"], "request": ""}}`
+	client := fakeClient(t, []string{plan})
+	_, err := Implement(context.Background(), client, dir, "add widget")
+	if err == nil || !strings.Contains(err.Error(), "prepare branch:") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestImplementCreatesAPluginThenAppliesAFollowUpModifyRequest covers
+// the nested ModifyPlugin call inside Implement's "create" branch
+// (plan.Plugin.Request != "") - TestImplementPluginOnlyCreatesAndOpensAPR
+// uses an empty Request, which skips this block entirely and only
+// exercises the immediate-success path below it.
+func TestImplementCreatesAPluginThenAppliesAFollowUpModifyRequest(t *testing.T) {
+	dir := fixtureRepo(t)
+	remote := t.TempDir()
+	runFixtureGitCommand(t, remote, "init", "--bare", "--initial-branch=main")
+	runFixtureGitCommand(t, dir, "remote", "add", "origin", remote)
+	t.Setenv("PATH", fakeGHOnPath(t)+":"+os.Getenv("PATH"))
+
+	plan := `{
+		"strategy": "plugin_only",
+		"reasoning": "Bun needs a new plugin with an immediate follow-up tweak.",
+		"plugin": {"name": "bun-builder", "action": "create", "description": "Support Bun applications.", "capabilities": ["detect", "build"], "request": "add a note to the README"}
+	}`
+	edit := `[{"path":"plugins/bun-builder/README.md","content":"# bun-builder\n\nSupport Bun applications.\n\nExtra note.\n"}]`
+	client := fakeClient(t, []string{plan, edit})
+
+	result, err := Implement(context.Background(), client, dir, "add Bun support with a README tweak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Plugin == nil || !result.Plugin.Success {
+		t.Fatalf("result=%+v", result)
+	}
+	// FilesEdited must combine both the scaffolded files from Create and
+	// the follow-up ModifyPlugin edit.
+	foundScaffold, foundEdit := false, false
+	for _, f := range result.Plugin.FilesEdited {
+		if strings.Contains(f, "plugin.json") {
+			foundScaffold = true
+		}
+		if strings.Contains(f, "README.md") {
+			foundEdit = true
+		}
+	}
+	if !foundScaffold || !foundEdit {
+		t.Fatalf("expected both scaffolded and follow-up-edited files, got %v", result.Plugin.FilesEdited)
+	}
+}
+
+// TestImplementPropagatesACreateFailure covers Implement's own
+// plugins.Create error branch: creating a plugin whose directory
+// already exists fails immediately.
+func TestImplementPropagatesACreateFailure(t *testing.T) {
+	dir := fixtureRepo(t)
+	createFixturePlugin(t, dir, "widget")
+	runFixtureGitCommand(t, dir, "add", "-A")
+	runFixtureGitCommand(t, dir, "commit", "-m", "add the widget fixture plugin")
+
+	plan := `{"strategy": "plugin_only", "reasoning": "x", "plugin": {"name": "widget", "action": "create", "description": "d", "capabilities": ["detect"], "request": ""}}`
+	client := fakeClient(t, []string{plan})
+	_, err := Implement(context.Background(), client, dir, "recreate widget")
+	if err == nil || !strings.Contains(err.Error(), "create plugin") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestImplementPropagatesAModifyFailureOnAnExistingPlugin covers
+// Implement's "modify" (action != create) branch's own ModifyPlugin
+// error propagation - TestImplementModifiesAnExistingPluginWithoutCreatingIt
+// only exercises the success case.
+func TestImplementPropagatesAModifyFailureOnAnExistingPlugin(t *testing.T) {
+	dir := fixtureRepo(t)
+	createFixturePlugin(t, dir, "widget")
+	runFixtureGitCommand(t, dir, "add", "-A")
+	runFixtureGitCommand(t, dir, "commit", "-m", "add the widget fixture plugin")
+
+	plan := `{"strategy": "plugin_only", "reasoning": "x", "plugin": {"name": "widget", "action": "modify", "request": "do something"}}`
+	bad := "not json at all"
+	client := fakeClient(t, []string{plan, bad, bad, bad})
+	_, err := Implement(context.Background(), client, dir, "modify widget")
+	if err == nil || !strings.Contains(err.Error(), "modify plugin") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestImplementPropagatesAProposeChangeFailure covers Implement's own
+// "change validated but commit/push/PR failed" branch: a successful
+// plugin create with no git remote configured makes proposeChange's own
+// Push fail.
+func TestImplementPropagatesAProposeChangeFailure(t *testing.T) {
+	dir := fixtureRepo(t)
+	plan := `{"strategy": "plugin_only", "reasoning": "x", "plugin": {"name": "bun-builder", "action": "create", "description": "d", "capabilities": ["detect"], "request": ""}}`
+	client := fakeClient(t, []string{plan})
+	_, err := Implement(context.Background(), client, dir, "add bun support")
+	if err == nil || !strings.Contains(err.Error(), "change validated but commit/push/PR failed") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestImplementModifiesAnExistingPluginWithoutCreatingIt covers
+// Implement's "action != create" branch (the else at implement.go's own
+// plugin block): it goes straight to ModifyPlugin, skipping
+// plugins.Create entirely, unlike TestImplementPluginOnlyCreatesAndOpensAPR
+// which only exercises the "create" branch.
+func TestImplementModifiesAnExistingPluginWithoutCreatingIt(t *testing.T) {
+	dir := fixtureRepo(t)
+	createFixturePlugin(t, dir, "widget")
+	// Implement's PrepareBranch requires a clean working tree, so the
+	// plugin fixture's own files must be committed first - unlike
+	// TestModifyPluginSucceedsOnFirstValidAttempt, which drives
+	// ModifyPlugin directly and never reaches PrepareBranch.
+	runFixtureGitCommand(t, dir, "add", "-A")
+	runFixtureGitCommand(t, dir, "commit", "-m", "add the widget fixture plugin")
+	remote := t.TempDir()
+	runFixtureGitCommand(t, remote, "init", "--bare", "--initial-branch=main")
+	runFixtureGitCommand(t, dir, "remote", "add", "origin", remote)
+	t.Setenv("PATH", fakeGHOnPath(t)+":"+os.Getenv("PATH"))
+
+	plan := `{
+		"strategy": "plugin_only",
+		"reasoning": "The widget plugin already exists; just needs docs.",
+		"plugin": {"name": "widget", "action": "modify", "request": "add a README"}
+	}`
+	edit := `[{"path":"plugins/widget/README.md","content":"# widget\n\nUpdated.\n"}]`
+	client := fakeClient(t, []string{plan, edit})
+
+	result, err := Implement(context.Background(), client, dir, "document the widget plugin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Plugin == nil || !result.Plugin.Success {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.PullRequest == nil || *result.PullRequest == "" {
+		t.Fatalf("expected a PR to be opened, result=%+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "plugins", "widget", "README.md")); err != nil {
+		t.Fatalf("expected the modify request to have written README.md: %v", err)
+	}
+}
+
+// TestImplementCoreOnlyPropagatesAPatchCoreFailure covers Implement's
+// "plan.Core != nil" branch and its error-wrapping ("patch core: %w") -
+// nothing in this file previously drove a core_only or core_and_plugin
+// plan through Implement at all. PatchCore's own SelfCheck step (`go
+// test ./internal/archtest/...`) cannot succeed against fixtureRepo (it
+// has no internal/archtest package to run), so every attempt here
+// exhausts maxIterations and PatchCore itself fails - which is exactly
+// what proves Implement's error-propagation path, without needing a
+// real archtest-passing fixture.
+func TestImplementCoreOnlyPropagatesAPatchCoreFailure(t *testing.T) {
+	dir := fixtureRepo(t)
+	plan := `{
+		"strategy": "core_only",
+		"reasoning": "This needs a new capability the plugin protocol does not expose.",
+		"core": {"reason": "new extension point", "allowed_paths": ["internal/example/x.go"], "request": "add a function"}
+	}`
+	edit := `[{"path":"internal/example/x.go","content":"package example\n"}]`
+	client := fakeClient(t, []string{plan, edit, edit, edit})
+
+	_, err := Implement(context.Background(), client, dir, "add a new internal capability")
+	if err == nil || !strings.Contains(err.Error(), "patch core:") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestBuildPRBodyIncludesEveryOptionalSection covers buildPRBody's
+// branches TestImplementPluginOnlyCreatesAndOpensAPR's plugin-only,
+// no-explanation, no-core-reason plan never reaches: a bug-report-shaped
+// Explanation (both root cause and fix), a Core step with its own
+// Reason and AllowedPaths, and FilesEdited on both the Plugin and Core
+// halves of the result.
+func TestBuildPRBodyIncludesEveryOptionalSection(t *testing.T) {
+	plan := Plan{
+		Strategy:  "core_and_plugin",
+		Reasoning: "Needs both a plugin change and a new core extension point.",
+		Explanation: &Explanation{
+			RootCause: "The plugin protocol has no hook for this.",
+			Fix:       "Add the hook and wire the plugin to it.",
+		},
+		Core: &CoreStep{Reason: "expose the new hook", AllowedPaths: []string{"internal/example/x.go"}},
+	}
+	result := ImplementResult{
+		Strategy: "core_and_plugin",
+		Plugin:   &ModifyResult{Success: true, Iterations: 2, FilesEdited: []string{"plugins/widget/main.go"}},
+		Core:     &ModifyResult{Success: true, Iterations: 1, FilesEdited: []string{"internal/example/x.go"}},
+	}
+	body := buildPRBody("add a new hook", plan, result)
+	for _, want := range []string{
+		"## Bug: Root Cause", "The plugin protocol has no hook for this.",
+		"## Fix", "Add the hook and wire the plugin to it.",
+		"## Why A Core Change Was Needed", "expose the new hook",
+		"## Plugin Changes", "plugins/widget/main.go",
+		"## Core Changes", "internal/example/x.go",
+		"pf_plugin_validate: 2 iteration(s), success=true",
+		"go test ./internal/archtest/... (self-check): 1 iteration(s), success=true",
+		"Core changes were confined to: internal/example/x.go.",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("PR body missing %q: %s", want, body)
+		}
+	}
+}
+
+// TestBuildPRBodyReportsMissingExplanationFields covers the
+// "(not provided)" fallback for an Explanation present but missing one
+// of its two fields - a case TestBuildPRBodyIncludesEveryOptionalSection
+// (both fields populated) does not reach.
+func TestBuildPRBodyReportsMissingExplanationFields(t *testing.T) {
+	plan := Plan{Explanation: &Explanation{RootCause: "only the cause is known"}}
+	body := buildPRBody("fix the bug", plan, ImplementResult{})
+	if !strings.Contains(body, "only the cause is known") {
+		t.Fatalf("body=%s", body)
+	}
+	if !strings.Contains(body, "## Fix\n(not provided)") {
+		t.Fatalf("expected a (not provided) fallback for the missing Fix, body=%s", body)
 	}
 }
 

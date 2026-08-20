@@ -307,6 +307,31 @@ func TestRunLaunchRejectsMissingIsolation(t *testing.T) {
 	}
 }
 
+// TestValidVolumeSpec covers validVolumeSpec's branches directly:
+// TestRunContainerRejectsUnsafeOrInvalidOptions only exercises the
+// too-few-parts and empty-host cases through the full CLI; a NUL byte
+// and an empty container path are covered here since a NUL byte cannot
+// travel through a shell-style os.Args string in a realistic CLI test.
+func TestValidVolumeSpec(t *testing.T) {
+	cases := []struct {
+		value   string
+		wantErr bool
+	}{
+		{"/host/data:/data", false},
+		{"/host/data:/data:ro", false},
+		{"/host/data:/data:ro\x00", true},
+		{"bad", true},
+		{":/container", true},
+		{"/host/data:", true},
+	}
+	for _, c := range cases {
+		err := validVolumeSpec(c.value)
+		if (err != nil) != c.wantErr {
+			t.Errorf("validVolumeSpec(%q) error=%v, wantErr=%v", c.value, err, c.wantErr)
+		}
+	}
+}
+
 func TestRunContainerRejectsUnsafeOrInvalidOptions(t *testing.T) {
 	execute := func(string, []string, io.Reader, io.Writer, io.Writer) error {
 		t.Fatal("executor called for invalid arguments")
@@ -1152,6 +1177,37 @@ func TestRunBuildRebuildWritesDistSBOMAlongsideReproducibilityReport(t *testing.
 	}
 }
 
+// TestRunBuildRebuildSurfacesADistSBOMWriteFailure covers
+// runReproducibleBuild's WriteSBOMToDist error branch - the sibling
+// success case is TestRunBuildRebuildWritesDistSBOMAlongsideReproducibilityReport.
+// Pointing --dist at a path whose parent is a regular file (not a
+// directory) makes buildapp.WriteSBOMToDist's own os.MkdirAll(distDir)
+// fail deterministically, without needing a real permission-denied
+// filesystem setup.
+func TestRunBuildRebuildSurfacesADistSBOMWriteFailure(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("reproducible dist payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dist := filepath.Join(blocker, "dist")
+	output := filepath.Join(root, "layout")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"build", "--rebuild=2", "--require-identical", "--dist", dist, "--output", output, binary,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "write SBOM") {
+		t.Fatalf("expected a write-SBOM error, stderr=%q", stderr.String())
+	}
+}
+
 func TestRunDetectAndInspectTextFormat(t *testing.T) {
 	root := t.TempDir()
 	binary := filepath.Join(root, "service")
@@ -1253,6 +1309,74 @@ func TestRunBuildRebuildVerifiesReproducibility(t *testing.T) {
 		"--platform", "linux/arm64=" + binary, "--output", filepath.Join(root, "multi"),
 	}, &stdout, &stderr); code != 2 {
 		t.Fatalf("multi-platform rebuild code=%d", code)
+	}
+}
+
+// TestRunBuildRebuildSurfacesAnOutputParentCreationFailure covers
+// runReproducibleBuild's own os.MkdirAll(filepath.Dir(output)) error
+// branch: a read-only ancestor directory makes creating output's own
+// parent directory fail with a permission error. Skipped when running
+// as root (e.g. some CI/container setups), where permission bits on a
+// directory the process itself owns are not enforced.
+func TestRunBuildRebuildSurfacesAnOutputParentCreationFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission bits are not enforced")
+	}
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	readonly := filepath.Join(root, "readonly")
+	if err := os.Mkdir(readonly, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(readonly, 0o755) })
+	if err := os.Chmod(readonly, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(readonly, "sub", "layout")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"build", "--rebuild=2", "--output", output, binary}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "create output parent") {
+		t.Fatalf("expected a create-output-parent error, stderr=%q", stderr.String())
+	}
+}
+
+// TestRunBuildRebuildSurfacesATemporaryDirectoryCreationFailure covers
+// runReproducibleBuild's own os.MkdirTemp error branch, distinct from
+// the MkdirAll failure above: output's parent directory already exists
+// (so MkdirAll trivially succeeds without needing write access) but is
+// itself read-only, so creating a new temporary directory inside it
+// fails.
+func TestRunBuildRebuildSurfacesATemporaryDirectoryCreationFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission bits are not enforced")
+	}
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	readonly := filepath.Join(root, "readonly")
+	if err := os.Mkdir(readonly, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(readonly, 0o755) })
+	if err := os.Chmod(readonly, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(readonly, "layout")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"build", "--rebuild=2", "--output", output, binary}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "create temporary directory") {
+		t.Fatalf("expected a create-temporary-directory error, stderr=%q", stderr.String())
 	}
 }
 
@@ -1555,6 +1679,52 @@ func TestRunBuildMultiPlatformInOneCommand(t *testing.T) {
 		if !strings.Contains(stdout.String(), value) {
 			t.Fatalf("stdout missing %s: %s", value, stdout.String())
 		}
+	}
+}
+
+// TestRunBuildRejectsAFlagParseFailure covers runBuild's flags.Parse
+// error branch (distinct from flag.ErrHelp and from every individual
+// usage-validation check further down): a flag given a value its own
+// type cannot parse fails inside flag.FlagSet.Parse itself.
+func TestRunBuildRejectsAFlagParseFailure(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"build", "--max-cpu", "not-a-duration", binary}, &stdout, &stderr); code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunBuildMultiPlatformTextOutputPluralizes covers runBuild's text-
+// format multi-platform summary line, including the "platforms" (not
+// "platform") pluralization branch - TestBuildAndComposeTextOutput's own
+// text-format case only ever builds one platform per invocation, and
+// TestRunBuildMultiPlatformInOneCommand never asks for text output.
+func TestRunBuildMultiPlatformTextOutputPluralizes(t *testing.T) {
+	root := t.TempDir()
+	amd64 := filepath.Join(root, "service-amd64")
+	arm64 := filepath.Join(root, "service-arm64")
+	if err := os.WriteFile(amd64, []byte("amd64 executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(arm64, []byte("arm64 executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "multi")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"build", "--format", "text", "-o", output,
+		"--platform", "linux/amd64=" + amd64,
+		"--platform", "linux/arm64=" + arm64,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "(2 platforms)") {
+		t.Fatalf("expected pluralized platform count, stdout=%s", stdout.String())
 	}
 }
 
@@ -2162,5 +2332,592 @@ func TestCommandExecutorsPropagateProcessSuccessAndFailure(t *testing.T) {
 	if err := executeContainerRuntime(filepath.Join(t.TempDir(), "missing"), nil,
 		nil, &stdout, &stderr); err == nil {
 		t.Fatal("missing executable succeeded")
+	}
+}
+
+// TestRunBuildHelpFlagWithSingleDash covers runBuild's own flag.ErrHelp
+// branch inside its flags.Parse error handling. containsHelpFlag only
+// short-circuits on the exact literals "-h" and "--help"; a single-dash
+// spelling of the long form ("-help") slips past that check but is still
+// recognized by the flag package itself, which prints usage and returns
+// flag.ErrHelp from Parse - a distinct path from both containsHelpFlag's
+// early return and TestRunBuildRejectsAFlagParseFailure's genuine parse
+// error.
+func TestRunBuildHelpFlagWithSingleDash(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"build", "-help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Usage of build") {
+		t.Fatalf("expected flag-package usage output, stderr=%q", stderr.String())
+	}
+}
+
+// TestRunBuildConfigSystemFilesAreAddedAsExtraFiles covers runBuild's
+// loop that turns a strict config's system_files (CA bundle, timezone,
+// locale archive) into extra files layered into the image - none of the
+// other --config tests populate system_files, so that loop's append
+// branch is otherwise never taken.
+func TestRunBuildConfigSystemFilesAreAddedAsExtraFiles(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ca := filepath.Join(root, "ca.crt")
+	tz := filepath.Join(root, "localtime")
+	locale := filepath.Join(root, "locale-archive")
+	for _, file := range []string{ca, tz, locale} {
+		if err := os.WriteFile(file, []byte("contents of "+file), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := filepath.Join(root, "config.json")
+	encoded, err := json.Marshal(map[string]any{
+		"entrypoint": "/opt/service",
+		"system_files": map[string]string{
+			"ca_certificates": ca,
+			"timezone":        tz,
+			"locale_archive":  locale,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "layout")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"build", "--config", config, "--output", output, binary}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	report, err := layout.Verify(output)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if report.Manifests != 1 {
+		t.Fatalf("report=%+v", report)
+	}
+}
+
+// TestRunBuildMultiPlatformSurfacesAnOutputParentCreationFailure covers
+// runBuild's own os.MkdirAll(filepath.Dir(output)) error branch on the
+// len(targets) > 1 path - distinct from runReproducibleBuild's identical
+// check (TestRunBuildRebuildSurfacesAnOutputParentCreationFailure), which
+// only ever drives a single target through --rebuild.
+func TestRunBuildMultiPlatformSurfacesAnOutputParentCreationFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission bits are not enforced")
+	}
+	root := t.TempDir()
+	amd64 := filepath.Join(root, "service-amd64")
+	arm64 := filepath.Join(root, "service-arm64")
+	if err := os.WriteFile(amd64, []byte("amd64 executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(arm64, []byte("arm64 executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	readonly := filepath.Join(root, "readonly")
+	if err := os.Mkdir(readonly, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(readonly, 0o755) })
+	if err := os.Chmod(readonly, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(readonly, "sub", "multi")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"build", "-o", output,
+		"--platform", "linux/amd64=" + amd64, "--platform", "linux/arm64=" + arm64,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "create output parent") {
+		t.Fatalf("expected a create-output-parent error, stderr=%q", stderr.String())
+	}
+}
+
+// TestRunBuildMultiPlatformSurfacesATemporaryDirectoryCreationFailure
+// covers runBuild's own os.MkdirTemp error branch on the len(targets) > 1
+// path, distinct from the MkdirAll failure above the same way
+// TestRunBuildRebuildSurfacesATemporaryDirectoryCreationFailure is
+// distinct from TestRunBuildRebuildSurfacesAnOutputParentCreationFailure:
+// output's parent directory already exists (MkdirAll trivially succeeds)
+// but is itself read-only, so creating the per-platform temporary
+// directory inside it fails.
+func TestRunBuildMultiPlatformSurfacesATemporaryDirectoryCreationFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission bits are not enforced")
+	}
+	root := t.TempDir()
+	amd64 := filepath.Join(root, "service-amd64")
+	arm64 := filepath.Join(root, "service-arm64")
+	if err := os.WriteFile(amd64, []byte("amd64 executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(arm64, []byte("arm64 executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	readonly := filepath.Join(root, "readonly")
+	if err := os.Mkdir(readonly, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(readonly, 0o755) })
+	if err := os.Chmod(readonly, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(readonly, "multi")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"build", "-o", output,
+		"--platform", "linux/amd64=" + amd64, "--platform", "linux/arm64=" + arm64,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "create temporary directory") {
+		t.Fatalf("expected a create-temporary-directory error, stderr=%q", stderr.String())
+	}
+}
+
+// TestRunBuildMultiPlatformSurfacesASecondPlatformBuildFailure covers
+// runBuild's per-platform buildapp.BuildImage error branch inside the
+// multi-platform loop: the first --platform builds successfully into its
+// own temporary directory before the second one's missing input surfaces
+// an error, proving the loop (not just a first-iteration failure) is
+// checked on every pass.
+func TestRunBuildMultiPlatformSurfacesASecondPlatformBuildFailure(t *testing.T) {
+	root := t.TempDir()
+	amd64 := filepath.Join(root, "service-amd64")
+	if err := os.WriteFile(amd64, []byte("amd64 executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	missingARM64 := filepath.Join(root, "service-arm64")
+	output := filepath.Join(root, "multi")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"build", "-o", output,
+		"--platform", "linux/amd64=" + amd64, "--platform", "linux/arm64=" + missingARM64,
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("missing second-platform input unexpectedly succeeded: %s", stdout.String())
+	}
+	if _, err := os.Stat(output); !os.IsNotExist(err) {
+		t.Fatalf("failed multi-platform build left an output: %v", err)
+	}
+}
+
+// TestRunBuildMultiPlatformSurfacesAComposeFailure covers runBuild's
+// layout.Compose error branch: both per-platform builds succeed into
+// their own temporary directories, but something already sits at the
+// final --output path, so layout.Compose itself refuses to install over
+// it.
+func TestRunBuildMultiPlatformSurfacesAComposeFailure(t *testing.T) {
+	root := t.TempDir()
+	amd64 := filepath.Join(root, "service-amd64")
+	arm64 := filepath.Join(root, "service-arm64")
+	if err := os.WriteFile(amd64, []byte("amd64 executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(arm64, []byte("arm64 executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "multi")
+	if err := os.WriteFile(output, []byte("preexisting, not a layout"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"build", "-o", output,
+		"--platform", "linux/amd64=" + amd64, "--platform", "linux/arm64=" + arm64,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "compose platforms") {
+		t.Fatalf("expected a compose-platforms error, stderr=%q", stderr.String())
+	}
+}
+
+// TestRunBuildSurfacesABuildReportWriteFailure covers runBuild's
+// atomicfile.WriteJSON error branch for reports/build.json: pre-creating
+// a directory at that exact path makes the atomic rename that finishes
+// the write collide with an existing entry, the same directory-collision
+// trick TestRunBuildSurfacesAMetricsWriteFailure uses for metrics.json.
+func TestRunBuildSurfacesABuildReportWriteFailure(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reports := filepath.Join(root, "reports")
+	if err := os.MkdirAll(filepath.Join(reports, "build.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "layout")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"build", "--reports", reports, "--output", output, binary}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "write build report") {
+		t.Fatalf("expected a write-build-report error, stderr=%q", stderr.String())
+	}
+}
+
+// TestRunBuildSurfacesADistSBOMWriteFailure covers runBuild's own (non-
+// rebuild) buildapp.WriteSBOMToDist error branch - the sibling of
+// TestRunBuildRebuildSurfacesADistSBOMWriteFailure, which only exercises
+// that same helper from runReproducibleBuild. Pointing --dist at a path
+// whose parent is a regular file makes WriteSBOMToDist's own
+// os.MkdirAll(distDir) fail deterministically.
+func TestRunBuildSurfacesADistSBOMWriteFailure(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dist := filepath.Join(blocker, "dist")
+	output := filepath.Join(root, "layout")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"build", "--dist", dist, "--output", output, binary}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "write SBOM") {
+		t.Fatalf("expected a write-SBOM error, stderr=%q", stderr.String())
+	}
+}
+
+// TestRunBuildSurfacesAReleaseEvidenceWriteFailure covers runBuild's own
+// buildapp.WriteBuildEvidence error branch. --dist is valid (so the
+// preceding SBOM write succeeds) but --sign-key-dir points under a
+// regular file, so signing.NewFileKeyStore's own directory creation
+// fails once WriteBuildEvidence reaches the signing step.
+func TestRunBuildSurfacesAReleaseEvidenceWriteFailure(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dist := filepath.Join(root, "dist")
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	signKeyDir := filepath.Join(blocker, "keys")
+	output := filepath.Join(root, "layout")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"build", "--dist", dist, "--sign-key-dir", signKeyDir, "--output", output, binary,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "write release evidence") {
+		t.Fatalf("expected a write-release-evidence error, stderr=%q", stderr.String())
+	}
+}
+
+// TestRunBuildSurfacesAMetricsWriteFailure covers runBuild's
+// atomicfile.WriteJSON error branch for reports/metrics.json - reached
+// only after layout.Verify(output) succeeds, so the failure has to come
+// from the write itself rather than from an unusable output layout. Pre-
+// creating a directory at that exact path makes the atomic rename that
+// finishes the write collide with an existing entry.
+func TestRunBuildSurfacesAMetricsWriteFailure(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reports := filepath.Join(root, "reports")
+	if err := os.MkdirAll(filepath.Join(reports, "metrics.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "layout")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"build", "--reports", reports, "--output", output, binary}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "write metrics") {
+		t.Fatalf("expected a write-metrics error, stderr=%q", stderr.String())
+	}
+}
+
+// TestRunBuildRebuildSurfacesANonNotExistStatError covers
+// runReproducibleBuild's os.Stat(output) branch for an error other than
+// "not exist" - distinct from TestRunBuildRebuildTextAndExistingOutput's
+// "output already exists" case. Pointing output through a path component
+// that is a regular file (not a directory) makes the stat fail with
+// ENOTDIR, which errors.Is does not treat as os.ErrNotExist.
+func TestRunBuildRebuildSurfacesANonNotExistStatError(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(blocker, "sub", "layout")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"build", "--rebuild=2", "--output", output, binary}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stat output") {
+		t.Fatalf("expected a stat-output error, stderr=%q", stderr.String())
+	}
+}
+
+// TestRunDispatchesInitToRunInit covers run()'s "init" dispatch line
+// itself (main.go's `if args[0] == "init" { return runInit(...) }`).
+// runInit's own behavior is already covered thoroughly elsewhere
+// (init_test.go, init_e2e_test.go, init_ux_test.go) via direct calls to
+// runInit; no existing test drives it through the top-level run()
+// entry point. A single invalid --engine value reaches one of runInit's
+// earliest validation branches, so this stays fast and side-effect-free.
+func TestRunDispatchesInitToRunInit(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"init", "--engine=bogus"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--engine must be docker or podman") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+// TestRunDispatchesImportToRunImport covers run()'s "import" dispatch
+// line, the sibling of TestRunDispatchesInitToRunInit above - runImport
+// itself is already covered directly in import_test.go. A bare `import`
+// with no flags fails its own usage check immediately.
+func TestRunDispatchesImportToRunImport(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"import"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "usage: platform-factory import") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+// TestRunDispatchesLogsAndEventsToRunProjectObservation covers run()'s
+// "logs"/"events" dispatch line (both command names share one branch).
+// With no deployed project in a fresh directory, runProjectObservation
+// fails fast on its own project.Discover call before touching any
+// container runtime.
+func TestRunDispatchesLogsAndEventsToRunProjectObservation(t *testing.T) {
+	oldDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldDirectory) })
+	for _, command := range []string{"logs", "events"} {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{command}, &stdout, &stderr); code != 1 {
+			t.Fatalf("%s code=%d stderr=%s", command, code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "no deployed project") {
+			t.Fatalf("%s stderr=%q", command, stderr.String())
+		}
+	}
+}
+
+// TestRunBuildDispatchesToProjectModeWhenAProjectIsDiscovered covers
+// run()'s build-dispatch success branch: a bare `pf build` (no
+// EXECUTABLE argument) with a real project config in the current
+// directory takes the project.Discover(".", "") == nil path and hands
+// off to runProjectContext, instead of falling through to the low-level
+// runBuild(single executable) path every other build test uses. A
+// "compiled" project with no build_command packages its existing
+// artifact directly, so this needs no real toolchain or container
+// runtime.
+func TestRunBuildDispatchesToProjectModeWhenAProjectIsDiscovered(t *testing.T) {
+	oldDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".config_image.yaml"), []byte("language: compiled\nartifact: app\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "app"), []byte("binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldDirectory) })
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"build"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"valid": true`) {
+		t.Fatalf("stdout=%s", stdout.String())
+	}
+	if _, err := layout.Verify(filepath.Join(root, ".platform-factory", "image")); err != nil {
+		t.Fatalf("project-mode build did not produce a valid layout: %v", err)
+	}
+}
+
+// TestRunDetectSurfacesAmbiguousLanguagePlugins covers detect's
+// Ambiguous-without---accept-ambiguous branch. detect.Path's own
+// built-in classifier never sets Ambiguous; only the loaded-language-
+// plugin fallback can (main.go's detectionFromPlugins), and only when
+// two or more loaded plugins match the same directory -
+// TestRunDetectUsesLoadedLanguagePlugins only ever gives one plugin a
+// matching marker. A directory carrying both go.mod and package.json
+// matches the go and node plugins simultaneously.
+func TestRunDetectSurfacesAmbiguousLanguagePlugins(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"detect", root}, &stdout, &stderr); code != 2 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"kind": "ambiguous"`) {
+		t.Fatalf("stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "ambiguous detection requires --accept-ambiguous") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+// TestRunDetectSurfacesLanguagePluginInspectionFailure covers detect's
+// langplugin.InspectLoaded error branch. Pointing
+// PLATFORM_FACTORY_LANG_PLUGIN_DIR (t.Setenv, restored automatically)
+// at a directory containing a same-prefix file that isn't executable
+// makes List() pick it up but RunInspection's exec fail, the same
+// env-var override TestMain itself and provisionruntime_test.go/
+// plugin_test.go already use to point at a controlled plugin directory.
+func TestRunDetectSurfacesLanguagePluginInspectionFailure(t *testing.T) {
+	root := t.TempDir()
+	pluginDir := t.TempDir()
+	t.Setenv("PLATFORM_FACTORY_LANG_PLUGIN_DIR", pluginDir)
+	broken := filepath.Join(pluginDir, "platform-factory-lang-broken")
+	if err := os.WriteFile(broken, []byte("not an executable"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"detect", root}, &stdout, &stderr); code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "inspect language plugins") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+// TestRunInspectSurfacesAGenuineFlagParseFailure covers runInspect's
+// flags.Parse error branch for an error other than flag.ErrHelp -
+// distinct from TestRunInspectHandlesHelpAndUsageDirectly's --help case.
+// "--format" given no value fails inside flag.FlagSet.Parse itself.
+func TestRunInspectSurfacesAGenuineFlagParseFailure(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runInspect("inspect", []string{"--format"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// TestRunInspectRejectsSHA256WithoutArchiveFormat covers runInspect's
+// own --sha256-without---archive-format validation branch.
+func TestRunInspectRejectsSHA256WithoutArchiveFormat(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runInspect("inspect", []string{"--sha256", "abcd", "somelayout"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--sha256 requires --archive-format") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+// TestRunInspectSurfacesAnArchiveOpenFailure covers runInspect's
+// os.Open(archive) error branch: a nonexistent archive path, past every
+// flag-validation check, fails at the open itself.
+func TestRunInspectSurfacesAnArchiveOpenFailure(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(root, "missing.tar.gz")
+	var stdout, stderr bytes.Buffer
+	code := runInspect("inspect", []string{"--archive-format", "oci-layout.tar.gz", missing}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "open archive") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+// TestRunInspectArchiveVerificationTextFormat covers runInspect's
+// --format text output for a valid archive verification -
+// TestRunInspectAndVerifyOCIArchive only ever asks for the default json
+// format.
+func TestRunInspectArchiveVerificationTextFormat(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	layoutDir := filepath.Join(root, "layout")
+	if _, err := oci.Build(oci.Options{Binary: binary, Output: layoutDir}); err != nil {
+		t.Fatal(err)
+	}
+	archiveName := filepath.Join(root, "layout.tar.gz")
+	archive, err := os.Create(archiveName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(archive)
+	tw := tar.NewWriter(gz)
+	if err := filepath.Walk(layoutDir, func(name string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || name == layoutDir {
+			return walkErr
+		}
+		relative, _ := filepath.Rel(layoutDir, name)
+		header, _ := tar.FileInfoHeader(info, "")
+		header.Name = filepath.ToSlash(relative)
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			file, err := os.Open(name)
+			if err != nil {
+				return err
+			}
+			_, copyErr := io.Copy(tw, file)
+			closeErr := file.Close()
+			return errors.Join(copyErr, closeErr)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(tw.Close(), gz.Close(), archive.Close()); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runInspect("inspect", []string{"--format", "text", "--archive-format", "oci-layout.tar.gz", archiveName}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "valid: oci-layout.tar.gz archive sha256:") {
+		t.Fatalf("stdout=%q", stdout.String())
 	}
 }

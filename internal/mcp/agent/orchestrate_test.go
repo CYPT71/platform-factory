@@ -31,6 +31,12 @@ func fixtureRepo(t *testing.T) string {
 		}
 	}
 	write("go.mod", "module github.com/CYPT71/platform-factory\n\ngo 1.25.12\n")
+	// plugins.Create's own addPluginToGoWork appends every newly
+	// scaffolded plugin's module path into this file's "use (...)"
+	// block, so a minimal one must exist here too - see
+	// internal/mcp/plugins/plugins_test.go's fixtureRepo for the same
+	// fix, needed for the identical reason.
+	write("go.work", "go 1.25.12\n\nuse (\n\t.\n)\n")
 	write(".github/workflows/ci-security.yml", "steps:\n  - run: |\n      find cmd internal -name '*.go' -type f \\\n        -exec grep -nE 'os/exec|exec\\.Command' {} + || true\n")
 
 	sdkPluginDir := findRealSDKPluginDir(t)
@@ -105,6 +111,28 @@ func createFixturePlugin(t *testing.T, repoRoot, name string) {
 	}
 	if err := os.WriteFile(full, []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
+	}
+	// fixtureRepo's own go.work only lists "." by default; a plugin
+	// module built directly here (rather than through plugins.Create,
+	// which registers its own scaffolds automatically via
+	// addPluginToGoWork) must be added the same way, or go's workspace
+	// mode resolves plugins/<name> as orphaned from the workspace and
+	// `go build`/`go vet` inside it behaves differently than it would
+	// standalone.
+	workPath := filepath.Join(repoRoot, "go.work")
+	data, err := os.ReadFile(workPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := "./plugins/" + name
+	if !strings.Contains(string(data), entry) {
+		updated := strings.Replace(string(data), "\t.\n)", "\t.\n\t"+entry+"\n)", 1)
+		if updated == string(data) {
+			t.Fatalf("could not register %s in go.work's use block", entry)
+		}
+		if err := os.WriteFile(workPath, []byte(updated), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -221,6 +249,49 @@ func TestModifyPluginRequiresANonEmptyRequest(t *testing.T) {
 	}
 }
 
+// TestModifyPluginPropagatesAnInspectPluginFailure covers ModifyPlugin's
+// own plugins.InspectPlugin error branch - every other ModifyPlugin
+// test in this file targets a plugin that createFixturePlugin actually
+// scaffolded.
+func TestModifyPluginPropagatesAnInspectPluginFailure(t *testing.T) {
+	dir := fixtureRepo(t)
+	client := fakeClient(t, nil)
+	if _, err := ModifyPlugin(context.Background(), client, dir, ModifyPluginRequest{
+		Plugin: "does-not-exist", Request: "do something",
+	}); err == nil {
+		t.Fatal("expected plugins.InspectPlugin's error to propagate")
+	}
+}
+
+// TestModifyPluginPropagatesAClientCompleteFailure covers ModifyPlugin's
+// own client.Complete error branch - fakeClient's usual roundTripFunc
+// always returns HTTP 200; this one returns a non-200 status with an
+// API error body instead, the same shape TestCompleteSurfacesAnAPIError
+// (anthropic_test.go) uses to exercise Complete() itself, layered here
+// to prove ModifyPlugin propagates it rather than retrying past it.
+func TestModifyPluginPropagatesAClientCompleteFailure(t *testing.T) {
+	dir := fixtureRepo(t)
+	createFixturePlugin(t, dir, "widget")
+	client := &Client{
+		APIKey: "test", Model: "test", BaseURL: apiURL,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) *http.Response {
+			payload, _ := json.Marshal(messagesResponse{
+				Error: &struct {
+					Type    string `json:"type"`
+					Message string `json:"message"`
+				}{Type: "overloaded_error", Message: "the API is temporarily overloaded"},
+			})
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(bytes.NewReader(payload))}
+		})},
+	}
+	_, err := ModifyPlugin(context.Background(), client, dir, ModifyPluginRequest{
+		Plugin: "widget", Request: "do something",
+	})
+	if err == nil || !strings.Contains(err.Error(), "overloaded") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestPatchCoreRequiresAllowedPaths(t *testing.T) {
 	dir := fixtureRepo(t)
 	client := fakeClient(t, nil)
@@ -250,6 +321,30 @@ func TestPatchCoreRejectsAnEditOutsideAllowedPaths(t *testing.T) {
 	}
 }
 
+// TestPatchCorePropagatesAClientCompleteFailure is PatchCore's
+// counterpart to TestModifyPluginPropagatesAClientCompleteFailure.
+func TestPatchCorePropagatesAClientCompleteFailure(t *testing.T) {
+	dir := fixtureRepo(t)
+	client := &Client{
+		APIKey: "test", Model: "test", BaseURL: apiURL,
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) *http.Response {
+			payload, _ := json.Marshal(messagesResponse{
+				Error: &struct {
+					Type    string `json:"type"`
+					Message string `json:"message"`
+				}{Type: "overloaded_error", Message: "the API is temporarily overloaded"},
+			})
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Body: io.NopCloser(bytes.NewReader(payload))}
+		})},
+	}
+	_, err := PatchCore(context.Background(), client, dir, PatchCoreRequest{
+		Request: "x", Reason: "y", AllowedPaths: []string{"internal/example/x.go"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "overloaded") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestModifyPluginToolHandlerReturnsUnavailableErrorWithoutAnAPIKey(t *testing.T) {
 	t.Setenv(apiKeyEnv, "")
 	handler := ModifyPluginToolHandler(t.TempDir())
@@ -274,5 +369,34 @@ func TestImplementToolHandlerReturnsUnavailableErrorWithoutAnAPIKey(t *testing.T
 	_, err := handler(context.Background(), json.RawMessage(`{"request":"add bun support"}`))
 	if err == nil || !strings.Contains(err.Error(), "agent_unavailable") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+// TestToolHandlersRejectInvalidJSONOnceAnAPIKeyIsConfigured covers each
+// *ToolHandler's own json.Unmarshal(arguments, &args) branch, which
+// TestModifyPluginToolHandlerReturnsUnavailableErrorWithoutAnAPIKey/
+// TestPatchCoreToolHandlerReturnsUnavailableErrorWithoutAnAPIKey/
+// TestImplementToolHandlerReturnsUnavailableErrorWithoutAnAPIKey never
+// reach - it is checked only after FromEnv() succeeds. A configured (but
+// fake, never-dialed) API key is enough: malformed JSON is rejected
+// before Client.Complete would ever be called, so no real network access
+// happens here.
+func TestToolHandlersRejectInvalidJSONOnceAnAPIKeyIsConfigured(t *testing.T) {
+	t.Setenv(apiKeyEnv, "test-key")
+	cases := []struct {
+		name    string
+		handler func(context.Context, json.RawMessage) (string, error)
+	}{
+		{"pf_plugin_modify", ModifyPluginToolHandler(t.TempDir())},
+		{"pf_core_patch", PatchCoreToolHandler(t.TempDir())},
+		{"pf_implement", ImplementToolHandler(t.TempDir())},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := c.handler(context.Background(), json.RawMessage(`{not json`))
+			if err == nil || !strings.Contains(err.Error(), "invalid_argument") {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	}
 }

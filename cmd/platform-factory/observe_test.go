@@ -113,6 +113,89 @@ func TestProjectLogsFailWithOneSafeNextAction(t *testing.T) {
 	}
 }
 
+// TestRunProjectObservationFlagHandling covers runProjectObservation's
+// own flag.FlagSet plumbing: the -h/--help early return, a rejected
+// unknown flag, and the three usage-validation cases (unwanted
+// positional args, a non-positive --tail, and --follow combined with
+// "events" which has no notion of following) - none of which reach
+// observeapp.LoadDeployedProject, so they need no deployed-project
+// fixture at all.
+func TestRunProjectObservationFlagHandling(t *testing.T) {
+	t.Run("help flag returns 0 without an error", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runProjectObservation(context.Background(), "logs", []string{"--help"}, &stdout, &stderr, nil)
+		if code != 0 {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+	})
+	t.Run("unknown flag returns 2", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runProjectObservation(context.Background(), "logs", []string{"--bogus"}, &stdout, &stderr, nil)
+		if code != 2 {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+	})
+	t.Run("unexpected positional argument", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runProjectObservation(context.Background(), "logs", []string{"extra"}, &stdout, &stderr, nil)
+		if code != 2 || !strings.Contains(stderr.String(), "usage: platform-factory logs") {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "--follow") {
+			t.Fatalf("expected the logs usage line to mention --follow: %s", stderr.String())
+		}
+	})
+	t.Run("non-positive tail is rejected", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runProjectObservation(context.Background(), "logs", []string{"--tail", "0"}, &stdout, &stderr, nil)
+		if code != 2 || !strings.Contains(stderr.String(), "usage:") {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+	})
+	t.Run("events does not support --follow", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := runProjectObservation(context.Background(), "events", []string{"--follow"}, &stdout, &stderr, nil)
+		if code != 2 || !strings.Contains(stderr.String(), "usage: platform-factory events") {
+			t.Fatalf("code=%d stderr=%s", code, stderr.String())
+		}
+		if strings.Contains(stderr.String(), "--follow]") {
+			t.Fatalf("the events usage line must not advertise --follow: %s", stderr.String())
+		}
+	})
+}
+
+// TestRunProjectObservationSurfacesAPluginStartFailure covers
+// runProjectObservation's pluginFlags.start(ctx) error branch - reached
+// after a deployed-project state is found (so it must get past
+// observeapp.LoadDeployedProject first), triggered here the same way
+// plugins_flags_test.go's TestPluginOptionsStartRejectsMissingKey does:
+// a --plugin-key that does not resolve to a readable file.
+func TestRunProjectObservationSurfacesAPluginStartFailure(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "pf.yaml"), []byte(
+		"version: 1\nlanguage: compiled\nprofile: static\nartifact: app\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicfile.WriteJSONSensitive(filepath.Join(root, ".platform-factory", "deployed.json"), map[string]any{
+		"api_version": "platform-factory.dev/deployment/v1",
+		"image":       "registry.example/app@sha256:" + strings.Repeat("a", 64),
+		"name":        "hello", "namespace": "prod", "workload": "job",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	var stdout, stderr bytes.Buffer
+	code := runProjectObservation(context.Background(), "logs",
+		[]string{"--plugin-dir", t.TempDir(), "--plugin-key", "/does/not/exist.pem"},
+		&stdout, &stderr, nil)
+	if code != 1 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "platform-factory logs:") {
+		t.Fatalf("expected the plugin start failure to be reported, stderr=%q", stderr.String())
+	}
+}
+
 func TestRollbackUsesPersistedServiceAndRejectsJob(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "pf.yaml"), []byte(

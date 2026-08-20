@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -123,6 +124,124 @@ func TestWriteFileRefusesASymlinkedParentDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outside, "escape.txt")); err == nil {
 		t.Fatal("a write escaped through a symlinked parent directory")
+	}
+}
+
+func TestReadFileToolHandlerRoundTripsValidArguments(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := WriteFile(dir, "a/b.txt", "hello"); err != nil {
+		t.Fatal(err)
+	}
+	handler := ReadFileToolHandler(dir)
+	out, err := handler(context.Background(), json.RawMessage(`{"path":"a/b.txt"}`))
+	if err != nil {
+		t.Fatalf("handler returned an error: %v", err)
+	}
+	var result ReadFileResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("handler output is not valid JSON: %v (%s)", err, out)
+	}
+	if result.Content != "hello" {
+		t.Fatalf("content=%q", result.Content)
+	}
+}
+
+func TestReadFileToolHandlerRejectsInvalidJSON(t *testing.T) {
+	handler := ReadFileToolHandler(t.TempDir())
+	if _, err := handler(context.Background(), json.RawMessage(`{not json`)); err == nil {
+		t.Fatal("expected an error for malformed JSON arguments")
+	}
+}
+
+func TestWriteFileToolHandlerRoundTripsValidArguments(t *testing.T) {
+	dir := t.TempDir()
+	handler := WriteFileToolHandler(dir)
+	out, err := handler(context.Background(), json.RawMessage(`{"path":"a/b.txt","content":"hello"}`))
+	if err != nil {
+		t.Fatalf("handler returned an error: %v", err)
+	}
+	var result WriteFileResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("handler output is not valid JSON: %v (%s)", err, out)
+	}
+	if !result.Written || result.Path != "a/b.txt" {
+		t.Fatalf("result=%+v", result)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "a", "b.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("content=%q", data)
+	}
+}
+
+func TestWriteFileToolHandlerRejectsInvalidJSON(t *testing.T) {
+	handler := WriteFileToolHandler(t.TempDir())
+	if _, err := handler(context.Background(), json.RawMessage(`{not json`)); err == nil {
+		t.Fatal("expected an error for malformed JSON arguments")
+	}
+}
+
+func TestSelfCheckToolHandlerReturnsAStepResult(t *testing.T) {
+	// A fake repoRoot with no Go module context is enough to exercise the
+	// handler's own JSON-encoding wrapper around SelfCheck without paying
+	// for a real "go test ./internal/archtest/..." run the way
+	// TestSelfCheckRunsArchtestAgainstTheRealRepo (below) already does
+	// against the real repo.
+	handler := SelfCheckToolHandler(t.TempDir())
+	out, err := handler(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("handler returned an error: %v", err)
+	}
+	var step StepResult
+	if err := json.Unmarshal([]byte(out), &step); err != nil {
+		t.Fatalf("handler output is not valid JSON: %v (%s)", err, out)
+	}
+	if step.Name == "" {
+		t.Fatalf("step=%+v", step)
+	}
+}
+
+// TestReadFileSurfacesANonNotExistError covers ReadFile's generic
+// error-propagation branch (distinct from the os.IsNotExist ->
+// toolerror.ErrNotFound branch every other ReadFile test in this file
+// exercises): os.ReadFile on a path that is a directory, not a
+// nonexistent one, fails with an "is a directory" error that ReadFile
+// must return unwrapped.
+func TestReadFileSurfacesANonNotExistError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "a-directory"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFile(dir, "a-directory"); err == nil {
+		t.Fatal("expected an error reading a directory as a file")
+	}
+}
+
+// TestWriteFileSurfacesAMkdirAllFailure covers WriteFile's own
+// os.MkdirAll error branch: a path component that already exists as a
+// regular file (not a directory) makes MkdirAll fail.
+func TestWriteFileSurfacesAMkdirAllFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "blocker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteFile(dir, "blocker/child.txt", "content"); err == nil {
+		t.Fatal("expected an error when a path component is an existing regular file")
+	}
+}
+
+// TestWriteFileSurfacesAWriteFailure covers WriteFile's own
+// os.WriteFile error branch: writing to a path that is already an
+// existing directory fails with "is a directory".
+func TestWriteFileSurfacesAWriteFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "already-a-dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteFile(dir, "already-a-dir", "content"); err == nil {
+		t.Fatal("expected an error writing to a path that is already a directory")
 	}
 }
 

@@ -104,6 +104,24 @@ jobs:
           # explains what the package is NOT for); the package itself only
           # formats a command line as a string for logging and never
           # imports os/exec or executes anything.
+          # internal/dockersave/cliclient.go is the fallback path
+          # PrepareContainerImage's RuntimeClient falls back to when the
+          # docker/podman Engine API socket is not reachable - most local
+          # podman installs do not run a background API service unless one
+          # has been started explicitly, so the primary socket-based
+          # transport alone regresses every such environment. It shells
+          # only the fixed `docker`/`podman` binary named by its own
+          # runtimeName field (never a caller-controlled string) with
+          # explicit argument arrays, no shell - the same allowlisted
+          # shape cmd/platform-factory/main.go's executeContainerRuntime
+          # already used for this exact class of action before the socket
+          # client existed.
+          # kubernetes_plugin_test.go builds and launches a throwaway
+          # plugins/kubernetes-kubernetes test fixture binary via `go
+          # build`, the same pattern as the other *_test.go entries above.
+          # validate_test.go's own os/exec import is exec.LookPath only
+          # (skipping a govulncheck-dependent test when the tool is not on
+          # PATH) - it never executes anything itself.
           # Process execution remains forbidden elsewhere.
           test -z "$(find cmd internal -name '*.go' -type f \
               ! -path 'cmd/microvm-init/main.go' \
@@ -111,6 +129,7 @@ jobs:
               ! -path 'cmd/microvm-init/identity_linux.go' \
               ! -path 'cmd/microvm-init/identity_other.go' \
             ! -path 'cmd/platform-factory/main.go' \
+            ! -path 'cmd/platform-factory/kubernetes_plugin_test.go' \
             ! -path 'cmd/platform-factory/exitcriteria_test.go' \
             ! -path 'cmd/platform-factory/kubevirt_plugin_test.go' \
             ! -path 'cmd/platform-factory/microvm_native_darwin.go' \
@@ -160,11 +179,13 @@ jobs:
             ! -path 'internal/app/provisionruntime/provisionruntime.go' \
             ! -path 'internal/marketplace/sync.go' \
             ! -path 'internal/marketplace/gitfixture_test.go' \
+            ! -path 'internal/dockersave/cliclient.go' \
             ! -path 'internal/mcp/git/exec.go' \
             ! -path 'internal/mcp/git/git_edge_test.go' \
             ! -path 'internal/mcp/git/gitfixture_test.go' \
             ! -path 'internal/mcp/project/inspect_test.go' \
             ! -path 'internal/mcp/core/validate.go' \
+            ! -path 'internal/mcp/core/validate_test.go' \
             ! -path 'internal/mcp/core/affected.go' \
             ! -path 'internal/mcp/core/affected_test.go' \
             ! -path 'internal/mcp/plugins/validate.go' \

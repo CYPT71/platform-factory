@@ -102,7 +102,8 @@ func Load(name, sourcePath string) (installedPath string, err error) {
 		return "", err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("create plugin directory %s: %w", dir, err)
+		return "", fmt.Errorf("create plugin directory %s: %w (if it is not writable - e.g. "+
+			"non-root container, no $HOME - set $%s to a writable path instead)", dir, err, dirEnv)
 	}
 	destination := filepath.Join(dir, binaryName(name))
 	temporary := destination + ".loading"

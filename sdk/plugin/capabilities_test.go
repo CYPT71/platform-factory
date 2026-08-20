@@ -197,3 +197,32 @@ func TestValidateCapabilityAcceptsValidNames(t *testing.T) {
 		}
 	}
 }
+
+// TestHasCapability verifies the membership check pf_plugin dispatch and
+// internal/plugin.Client/Registry build on: it must find an exact match
+// anywhere in the list, reject a capability that is merely a substring
+// or prefix of a declared one, and treat a nil/empty list the same as
+// "not found" rather than panicking.
+func TestHasCapability(t *testing.T) {
+	cases := []struct {
+		name         string
+		capabilities []string
+		cap          string
+		want         bool
+	}{
+		{"found in the middle of a multi-entry list", []string{CapabilityDetect, CapabilityRuntimeCreate, CapabilityBuilderBuild}, CapabilityRuntimeCreate, true},
+		{"found as the only entry", []string{CapabilityDeploymentApply}, CapabilityDeploymentApply, true},
+		{"not present", []string{CapabilityDetect, CapabilityFreeze}, CapabilityBuilderBuild, false},
+		{"nil list", nil, CapabilityDetect, false},
+		{"empty list", []string{}, CapabilityDetect, false},
+		{"prefix is not a match", []string{"runtime.create.extra"}, "runtime.create", false},
+		{"case-sensitive: no match on differing case", []string{"Runtime.Create"}, "runtime.create", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := HasCapability(c.capabilities, c.cap); got != c.want {
+				t.Errorf("HasCapability(%v, %q) = %v, want %v", c.capabilities, c.cap, got, c.want)
+			}
+		})
+	}
+}

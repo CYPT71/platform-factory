@@ -101,6 +101,25 @@ func TestInspectDetectsADirtyWorkingTree(t *testing.T) {
 	}
 }
 
+func TestInspectReportsAnEmptyModuleNameWithNoGoMod(t *testing.T) {
+	dir := t.TempDir()
+	info, err := Inspect(context.Background(), dir, "1.2.3", "summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Module != "" {
+		t.Fatalf("module=%q, want empty for a directory with no go.mod", info.Module)
+	}
+}
+
+func TestInspectToolHandlerRejectsInvalidJSON(t *testing.T) {
+	dir := fixtureRepo(t)
+	handler := InspectToolHandler(dir, "1.2.3")
+	if _, err := handler(context.Background(), json.RawMessage(`{not json`)); err == nil {
+		t.Fatal("expected an error for malformed JSON arguments")
+	}
+}
+
 func TestInspectToolHandlerRejectsAnInvalidDepth(t *testing.T) {
 	dir := fixtureRepo(t)
 	handler := InspectToolHandler(dir, "1.2.3")

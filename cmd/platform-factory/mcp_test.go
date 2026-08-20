@@ -49,6 +49,20 @@ func TestPrintMCPUsage(t *testing.T) {
 	}
 }
 
+// TestRunMCPServeHandlesTheStandardFlagPackageHelpFlag covers
+// runMCPServe's own flag.ErrHelp branch inside flags.Parse's error
+// check: unlike runBuild/runInspect/etc., this subcommand has no
+// containsHelpFlag pre-check ahead of flags.Parse, so "-h"/"--help" is
+// only ever handled by the flag package's own built-in ErrHelp - a
+// distinct branch from TestRunMCPServeUsageErrors' "--bogus-flag" case,
+// which hits the same if-statement's other (return 2) branch.
+func TestRunMCPServeHandlesTheStandardFlagPackageHelpFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runMCPServe([]string{"--help"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
 func TestRunMCPServeUsageErrors(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := runMCPServe([]string{"--bogus-flag"}, &stdout, &stderr); code != 2 {
@@ -146,6 +160,68 @@ func TestRunMCPServeDefaultsRepoToCurrentDirectory(t *testing.T) {
 	code := runMCPServe(nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+// withOversizedLineStdin replaces os.Stdin with a pipe carrying one
+// line longer than mcp.Server.Serve's 16 MiB scanner buffer cap, the
+// only deterministic way (short of an actual read error on a real fd)
+// to make Serve return a non-nil error and drive runMCPServe's own
+// "server.Serve failed" branch.
+func withOversizedLineStdin(t *testing.T) {
+	t.Helper()
+	original := os.Stdin
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = read
+	t.Cleanup(func() {
+		os.Stdin = original
+		_ = read.Close()
+	})
+	go func() {
+		defer write.Close()
+		chunk := bytes.Repeat([]byte("x"), 1<<20)
+		for i := 0; i < 17; i++ {
+			if _, err := write.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+}
+
+func TestRunMCPServeReportsAServeFailure(t *testing.T) {
+	withOversizedLineStdin(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/x\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runMCPServe([]string{"--repo", dir}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "platform-factory mcp serve:") {
+		t.Fatalf("expected the Serve error to be reported, stderr=%q", stderr.String())
+	}
+}
+
+func TestMCPLanguagePluginBackendWiresRealSDKLangpluginFunctions(t *testing.T) {
+	backend := mcpLanguagePluginBackend()
+
+	if _, err := backend.Load("not-a-real-language", filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
+		t.Fatal("expected backend.Load to surface an error for a nonexistent source")
+	}
+	if err := backend.Inspect(filepath.Join(t.TempDir(), "no-such-binary"), t.TempDir()); err == nil {
+		t.Fatal("expected backend.Inspect to surface an error for a nonexistent binary")
+	}
+	// Unloading a language plugin that was never loaded is documented as
+	// a no-op success (sdk/langplugin.Unload's own doc comment: "the end
+	// state ... is what the caller asked for either way") - this still
+	// exercises backend.Unload's wiring to the real function.
+	if err := backend.Unload("not-a-loaded-plugin"); err != nil {
+		t.Fatalf("backend.Unload of a never-loaded plugin should be a no-op, got: %v", err)
 	}
 }
 
