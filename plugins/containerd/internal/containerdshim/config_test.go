@@ -28,11 +28,11 @@ func TestContainerdConfigSelectsShimSandboxer(t *testing.T) {
 }
 
 func TestRuntimeClassMatchesHandler(t *testing.T) {
-	got, err := (Config{Handler: "secure-oci-prod"}).RuntimeClass()
+	got, err := (Config{Handler: "platform-factory"}).RuntimeClass()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "name: secure-oci-prod\nhandler: secure-oci-prod") {
+	if !strings.Contains(got, "name: platform-factory: platform-factory") {
 		t.Fatalf("unexpected RuntimeClass:\n%s", got)
 	}
 }

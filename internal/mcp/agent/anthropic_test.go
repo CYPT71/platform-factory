@@ -112,7 +112,7 @@ func TestCompleteFailsClosedOnEmptyTextContent(t *testing.T) {
 // TestCompleteAgainstRealAnthropicAPI is a real, opt-in, env-var-gated
 // integration test - skipped by default, matching how
 // cmd/platform-factory/imagepull_test.go gates its own real Docker Hub
-// pull test in the sibling secure-oci-base repo. Run with:
+// pull test in the sibling platform-factory repo. Run with:
 //
 //	PLATFORM_FACTORY_TEST_LIVE_ANTHROPIC=1 PLATFORM_FACTORY_MCP_ANTHROPIC_API_KEY=sk-... go test ./internal/mcp/agent/... -run RealAnthropic
 func TestCompleteAgainstRealAnthropicAPI(t *testing.T) {

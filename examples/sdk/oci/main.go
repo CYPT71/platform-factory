@@ -16,7 +16,7 @@ import (
 )
 
 func main() {
-	dir, err := os.MkdirTemp("", "secure-oci-sdk-oci-example-*")
+	dir, err := os.MkdirTemp("", "platform-factory-oci-example-*")
 	if err != nil {
 		log.Fatal(err)
 	}
