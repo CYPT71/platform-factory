@@ -78,7 +78,10 @@ func TestValidateBuildCapability(t *testing.T) {
 	if err := ValidateBuildCapability(missingRuntime); err == nil {
 		t.Fatal("expected an error for an interpreted profile with no runtime field")
 	}
-	withRuntime := loadTestProject(t, "version: 1\nlanguage: python\nprofile: python\nartifact: app.py\nruntime: /usr/bin/python3\n")
+	withRuntime := loadTestProject(t, "version: 1\nlanguage: python\nprofile: python\nartifact: app.py\nruntime: python3\n")
+	if err := os.WriteFile(filepath.Join(withRuntime.Root, "python3"), []byte("runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := ValidateBuildCapability(withRuntime); err != nil {
 		t.Fatalf("expected no error once runtime is set: %v", err)
 	}

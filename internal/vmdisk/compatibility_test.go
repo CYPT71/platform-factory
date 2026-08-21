@@ -71,3 +71,39 @@ func TestCompatibilityRejectsUnknownStrategyAndAmbiguousEncapsulation(t *testing
 		t.Fatal("expected invalid strategy")
 	}
 }
+
+func TestCompatibilityClassifiesCompleteContainerEvidence(t *testing.T) {
+	main := finding("/usr/bin/demo", "main_process", "high", "ExecStart in demo.service")
+	discovery := DiscoveryReport{Disks: []DiskDiscovery{{
+		Filesystems:    []FilesystemInventory{{Filesystem: "ext4"}},
+		System:         &SystemInventory{Services: []string{"/etc/systemd/system/demo.service"}},
+		PersistentData: []string{"/srv/data"},
+		Applications: []ApplicationInventory{{
+			MainProcess:     &main,
+			SharedLibraries: []ApplicationFinding{finding("/usr/lib/libc.so", "shared_library", "high", "fixture")},
+			ELFDependencies: []ApplicationFinding{finding("libc.so", "elf_dependency", "high", "fixture")},
+		}},
+	}}}
+	report, err := BuildCompatibilityReport(discovery, ModeAuto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.RecommendedMode != ModeContainer || report.DeploymentBlocked || !report.AutomaticDecision || report.Classification.SafeOCIExtraction.Decision != "yes" || report.Classification.DataSeparable.Decision != "yes" {
+		t.Fatalf("report=%+v", report)
+	}
+}
+
+func TestCompatibilityRequiresMicroVMForKernelCoupling(t *testing.T) {
+	main := finding("/usr/bin/demo", "main_process", "high", "fixture")
+	discovery := DiscoveryReport{Disks: []DiskDiscovery{{
+		Filesystems: []FilesystemInventory{{Filesystem: "ext4"}}, System: &SystemInventory{},
+		Applications: []ApplicationInventory{{MainProcess: &main, SpecialPaths: []ApplicationFinding{finding("/dev", "special_filesystem_dependency", "medium", "fixture")}}},
+	}}}
+	report, err := BuildCompatibilityReport(discovery, ModeAuto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.RecommendedMode != ModeUnsupported || !report.DeploymentBlocked || report.Classification.MicroVMRequired.Decision != "yes" || report.Classification.DeviceRequired.Decision != "no" {
+		t.Fatalf("report=%+v", report)
+	}
+}

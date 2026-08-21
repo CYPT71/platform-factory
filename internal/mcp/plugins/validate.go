@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CYPT71/platform-factory/internal/marketplace"
 	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 	hostplugin "github.com/CYPT71/platform-factory/internal/plugin"
 )
@@ -27,6 +28,8 @@ type ValidationReport struct {
 	Build         string   `json:"build"`
 	Tests         string   `json:"tests"`
 	Compatibility string   `json:"compatibility"`
+	Marketplace   string   `json:"marketplace"`
+	Security      string   `json:"security"`
 	Issues        []string `json:"issues,omitempty"`
 }
 
@@ -47,6 +50,12 @@ func Validate(ctx context.Context, repoRoot, name string) (ValidationReport, err
 	dir := filepath.Join(pluginsDir(repoRoot), name)
 	summary := summarize(repoRoot, name)
 	report := ValidationReport{Plugin: name, Valid: true}
+	report.Marketplace = validateMarketplaceManifest(dir, name)
+	if report.Marketplace != "ok" && !strings.HasPrefix(report.Marketplace, "not published") {
+		report.Valid = false
+		report.Issues = append(report.Issues, "marketplace: "+report.Marketplace)
+	}
+	report.Security = "ok"
 
 	if summary.Kind != "rpc" {
 		report.Manifest = "n/a (language-command plugin, no plugin.json)"
@@ -86,11 +95,56 @@ func Validate(ctx context.Context, repoRoot, name string) (ValidationReport, err
 
 	if len(testFiles(dir)) == 0 {
 		report.Tests = "no _test.go files found"
+		report.Issues = append(report.Issues, "tests: no _test.go files found")
 	} else {
-		report.Tests = "present (not executed by pf_plugin_validate; run pf_core_validate or `go test` in the plugin directory for real results)"
+		report.Tests = runGoTests(ctx, dir)
+		if strings.HasPrefix(report.Tests, "error:") {
+			report.Valid = false
+			report.Issues = append(report.Issues, "tests: "+report.Tests)
+		}
 	}
 
 	return report, nil
+}
+
+func validateMarketplaceManifest(dir, name string) string {
+	file, err := os.Open(filepath.Join(dir, marketplace.ManifestFileName))
+	if os.IsNotExist(err) {
+		return "not published (plugin.yaml absent)"
+	}
+	if err != nil {
+		return err.Error()
+	}
+	defer file.Close()
+	manifest, err := marketplace.DecodeManifest(file)
+	if err != nil {
+		return err.Error()
+	}
+	if manifest.Name != name {
+		return fmt.Sprintf("name %q does not match directory %q", manifest.Name, name)
+	}
+	entrypoint := filepath.Join(dir, filepath.FromSlash(manifest.Entrypoint))
+	info, err := os.Lstat(entrypoint)
+	if err != nil {
+		return fmt.Sprintf("entrypoint: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "entrypoint must not be a symlink"
+	}
+	return "ok"
+}
+
+func runGoTests(ctx context.Context, dir string) string {
+	testCtx, cancel := context.WithTimeout(ctx, buildTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(testCtx, "go", "test", "./...")
+	cmd.Dir = dir
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Run(); err != nil {
+		return fmt.Sprintf("error: %s", strings.TrimSpace(output.String()))
+	}
+	return "ok"
 }
 
 func executableExists(dir, executable string) bool {

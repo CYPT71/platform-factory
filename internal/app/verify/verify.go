@@ -8,18 +8,23 @@
 package verify
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/CYPT71/platform-factory/internal/attestation"
 	"github.com/CYPT71/platform-factory/internal/layout"
 	"github.com/CYPT71/platform-factory/internal/policy"
+	provenancegen "github.com/CYPT71/platform-factory/internal/provenance"
 	"github.com/CYPT71/platform-factory/internal/sbom"
 	"github.com/CYPT71/platform-factory/internal/signing"
 )
@@ -40,20 +45,21 @@ type Decision = policy.Decision
 // signature, provenance, SBOM, and policy decision, re-verified against
 // artifacts already staged locally.
 type VerificationResult struct {
-	Path             string    `json:"path"`
-	Digest           string    `json:"digest"`
-	Reference        string    `json:"reference,omitempty"`
-	Valid            bool      `json:"valid"`
-	LayoutValid      bool      `json:"layout_valid"`
-	SignatureValid   bool      `json:"signature_valid,omitempty"`
-	SignatureError   string    `json:"signature_error,omitempty"`
-	ProvenanceValid  bool      `json:"provenance_valid,omitempty"`
-	ProvenanceSigned bool      `json:"provenance_signed,omitempty"`
-	ProvenanceError  string    `json:"provenance_error,omitempty"`
-	SBOMValid        bool      `json:"sbom_valid,omitempty"`
-	SBOMError        string    `json:"sbom_error,omitempty"`
-	PolicyDecision   *Decision `json:"policy_decision,omitempty"`
-	PolicyError      string    `json:"policy_error,omitempty"`
+	Path                   string    `json:"path"`
+	Digest                 string    `json:"digest"`
+	Reference              string    `json:"reference,omitempty"`
+	Valid                  bool      `json:"valid"`
+	LayoutValid            bool      `json:"layout_valid"`
+	SignatureValid         bool      `json:"signature_valid,omitempty"`
+	SignatureError         string    `json:"signature_error,omitempty"`
+	ProvenanceValid        bool      `json:"provenance_valid,omitempty"`
+	ProvenanceSigned       bool      `json:"provenance_signed,omitempty"`
+	ProvenanceJournalValid bool      `json:"provenance_journal_valid,omitempty"`
+	ProvenanceError        string    `json:"provenance_error,omitempty"`
+	SBOMValid              bool      `json:"sbom_valid,omitempty"`
+	SBOMError              string    `json:"sbom_error,omitempty"`
+	PolicyDecision         *Decision `json:"policy_decision,omitempty"`
+	PolicyError            string    `json:"policy_error,omitempty"`
 }
 
 // VerifyOptions is every input Verify needs - the layout to check plus
@@ -61,16 +67,21 @@ type VerificationResult struct {
 // path skips that step entirely (matching runVerifyRelease's original
 // "only verify what was given" contract).
 type VerifyOptions struct {
-	LayoutPath      string
-	SourceReference string
-	SignatureFile   string
-	ProvenanceFile  string
-	SBOMFile        string
-	PolicyFile      string
-	EvidenceFile    string
-	TrustedKeyFlags []string
-	KeyDir          string
-	KeyName         string
+	LayoutPath        string
+	SourceReference   string
+	SignatureFile     string
+	ProvenanceFile    string
+	JournalFile       string
+	BuilderID         string
+	SBOMFile          string
+	PolicyFile        string
+	EvidenceFile      string
+	TrustedKeyFlags   []string
+	KeyDir            string
+	KeyName           string
+	CertificateFile   string
+	IntermediateFiles []string
+	RootFiles         []string
 }
 
 // Service is the narrow contract cmd/platform-factory depends on for
@@ -128,7 +139,8 @@ func (s *service) Verify(opts VerifyOptions) (VerificationResult, error) {
 
 	result := VerificationResult{Path: opts.LayoutPath, Digest: digest, Reference: reference, LayoutValid: true}
 
-	trustedKeys, err := s.LoadTrustedKeys(opts.TrustedKeyFlags, opts.KeyDir, opts.KeyName)
+	trustedKeys, err := s.LoadTrustedKeysWithCertificates(opts.TrustedKeyFlags, opts.KeyDir, opts.KeyName,
+		opts.CertificateFile, opts.IntermediateFiles, opts.RootFiles)
 	if err != nil {
 		return VerificationResult{}, err
 	}
@@ -143,13 +155,20 @@ func (s *service) Verify(opts VerifyOptions) (VerificationResult, error) {
 		}
 	}
 	if opts.ProvenanceFile != "" {
-		signed, err := s.VerifyProvenance(opts.ProvenanceFile, trustedKeys)
+		var signed bool
+		var err error
+		if opts.JournalFile != "" {
+			signed, err = s.VerifyProvenanceAgainstJournal(opts.ProvenanceFile, opts.JournalFile, opts.BuilderID, trustedKeys)
+		} else {
+			signed, err = s.VerifyProvenance(opts.ProvenanceFile, trustedKeys)
+		}
 		if err != nil {
 			result.ProvenanceError = err.Error()
 			ok = false
 		} else {
 			result.ProvenanceValid = true
 			result.ProvenanceSigned = signed
+			result.ProvenanceJournalValid = opts.JournalFile != ""
 		}
 	}
 	if opts.SBOMFile != "" {
@@ -213,6 +232,13 @@ func SelectPlatform(report layout.Report, sourceReference string) (digest, refer
 // against. Trust is never inferred from an envelope's own claimed key
 // ID (see the package doc comment's threat-model note).
 func (s *service) LoadTrustedKeys(flagged []string, keyDir, keyName string) (map[string]ed25519.PublicKey, error) {
+	return s.LoadTrustedKeysWithCertificates(flagged, keyDir, keyName, "", nil, nil)
+}
+
+// LoadTrustedKeysWithCertificates extends the pinned Ed25519 trust set with a
+// leaf certificate only after its complete X.509 chain validates against the
+// caller-provided roots. The envelope never supplies its own trust anchor.
+func (s *service) LoadTrustedKeysWithCertificates(flagged []string, keyDir, keyName, certificateFile string, intermediateFiles, rootFiles []string) (map[string]ed25519.PublicKey, error) {
 	keys := map[string]ed25519.PublicKey{}
 	for _, raw := range flagged {
 		algo, encoded, found := strings.Cut(raw, ":")
@@ -233,7 +259,74 @@ func (s *service) LoadTrustedKeys(flagged []string, keyDir, keyName string) (map
 		keyID := "ed25519:" + base64.RawURLEncoding.EncodeToString(publicKey)
 		keys[keyID] = publicKey
 	}
+	certificateConfigured := certificateFile != "" || len(intermediateFiles) > 0 || len(rootFiles) > 0
+	if certificateConfigured {
+		if certificateFile == "" || len(rootFiles) == 0 {
+			return nil, errors.New("X.509 trust requires --certificate and at least one --root-certificate")
+		}
+		leaf, err := loadCertificate(certificateFile)
+		if err != nil {
+			return nil, fmt.Errorf("load leaf certificate: %w", err)
+		}
+		intermediates, err := loadCertificates(intermediateFiles)
+		if err != nil {
+			return nil, fmt.Errorf("load intermediate certificate: %w", err)
+		}
+		roots, err := loadCertificates(rootFiles)
+		if err != nil {
+			return nil, fmt.Errorf("load root certificate: %w", err)
+		}
+		if _, err := signing.VerifyChain(leaf, intermediates, roots, x509.VerifyOptions{}); err != nil {
+			return nil, err
+		}
+		publicKey, ok := leaf.PublicKey.(ed25519.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("X.509 leaf public key is %T; DSSE verification currently requires Ed25519", leaf.PublicKey)
+		}
+		keyID := "ed25519:" + base64.RawURLEncoding.EncodeToString(publicKey)
+		keys[keyID] = publicKey
+	}
 	return keys, nil
+}
+
+const maxCertificateBytes = 1 << 20
+
+func loadCertificates(paths []string) ([]*x509.Certificate, error) {
+	certificates := make([]*x509.Certificate, 0, len(paths))
+	for _, path := range paths {
+		certificate, err := loadCertificate(path)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		certificates = append(certificates, certificate)
+	}
+	return certificates, nil
+}
+
+func loadCertificate(path string) (*x509.Certificate, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, errors.New("certificate must be a regular non-symlink file")
+	}
+	if info.Size() <= 0 || info.Size() > maxCertificateBytes {
+		return nil, fmt.Errorf("certificate size must be between 1 and %d bytes", maxCertificateBytes)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block, rest := pem.Decode(raw)
+	if block == nil || block.Type != "CERTIFICATE" || len(rest) != 0 {
+		return nil, errors.New("expected exactly one PEM CERTIFICATE block")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse certificate: %w", err)
+	}
+	return certificate, nil
 }
 
 // VerifySignature checks path's DSSE envelope against trustedKeys and
@@ -268,24 +361,82 @@ func (s *service) VerifySignature(path, wantDigest string, trustedKeys map[strin
 // well-formed JSON), matching runPublish's own --provenance contract
 // where signing provenance is controlled by --sign, not mandatory.
 func (s *service) VerifyProvenance(path string, trustedKeys map[string]ed25519.PublicKey) (signed bool, err error) {
+	_, signed, err = s.verifiedProvenancePayload(path, trustedKeys)
+	return signed, err
+}
+
+func (s *service) verifiedProvenancePayload(path string, trustedKeys map[string]ed25519.PublicKey) ([]byte, bool, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
 	var envelope attestation.Envelope
 	if json.Unmarshal(raw, &envelope) == nil && envelope.PayloadType != "" && len(envelope.Signatures) > 0 {
 		if len(trustedKeys) == 0 {
-			return false, errors.New("provenance is signed but no trusted key pinned: pass --trusted-key or --key-dir/--key-name")
+			return nil, false, errors.New("provenance is signed but no trusted key pinned: pass --trusted-key, --key-dir, or a validated certificate chain")
 		}
-		if _, err := attestation.Verify(envelope, trustedKeys); err != nil {
-			return false, err
+		payload, err := attestation.Verify(envelope, trustedKeys)
+		if err != nil {
+			return nil, false, err
 		}
-		return true, nil
+		return payload, true, nil
 	}
 	if !json.Valid(raw) {
-		return false, errors.New("provenance predicate must be valid JSON")
+		return nil, false, errors.New("provenance predicate must be valid JSON")
 	}
-	return false, nil
+	return raw, false, nil
+}
+
+// VerifyProvenanceAgainstJournal independently regenerates the SLSA
+// predicate from journalPath and requires the verified provenance payload to
+// match it structurally. A valid signature over another build is insufficient.
+func (s *service) VerifyProvenanceAgainstJournal(provenancePath, journalPath, builderID string, trustedKeys map[string]ed25519.PublicKey) (bool, error) {
+	payload, signed, err := s.verifiedProvenancePayload(provenancePath, trustedKeys)
+	if err != nil {
+		return false, err
+	}
+	journal, err := openRegularEvidence(journalPath, 16<<20)
+	if err != nil {
+		return false, fmt.Errorf("open journal: %w", err)
+	}
+	defer journal.Close()
+	expected, err := provenancegen.FromJournal(journal, builderID)
+	if err != nil {
+		return false, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var actual provenancegen.JournalPredicate
+	if err := decoder.Decode(&actual); err != nil {
+		return false, fmt.Errorf("decode journal-derived provenance: %w", err)
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return false, errors.New("journal-derived provenance must contain exactly one JSON object")
+	}
+	if !reflect.DeepEqual(actual, expected) {
+		return false, errors.New("provenance predicate is inconsistent with the supplied build journal")
+	}
+	return signed, nil
+}
+
+func openRegularEvidence(path string, maxBytes int64) (*os.File, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || before.Size() > maxBytes {
+		return nil, fmt.Errorf("evidence must be a regular non-symlink file of at most %d bytes", maxBytes)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	after, err := file.Stat()
+	if err != nil || !os.SameFile(before, after) {
+		_ = file.Close()
+		return nil, errors.New("evidence file changed while it was being opened")
+	}
+	return file, nil
 }
 
 // VerifySBOM confirms path decodes as exactly one well-formed

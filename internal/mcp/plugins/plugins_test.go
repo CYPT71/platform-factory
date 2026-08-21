@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CYPT71/platform-factory/internal/marketplace"
 	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 	hostplugin "github.com/CYPT71/platform-factory/internal/plugin"
 )
@@ -227,8 +228,8 @@ func TestCreateScaffoldsARealBuildablePlugin(t *testing.T) {
 	if result.Plugin != "bun-builder" || result.Path != "plugins/bun-builder" {
 		t.Fatalf("result=%+v", result)
 	}
-	if len(result.Files) != 4 {
-		t.Fatalf("expected 4 files written, got %v", result.Files)
+	if len(result.Files) != 6 {
+		t.Fatalf("expected 6 files written, got %v", result.Files)
 	}
 
 	manifestPath := filepath.Join(dir, "plugins", "bun-builder", "plugin.json")
@@ -241,6 +242,15 @@ func TestCreateScaffoldsARealBuildablePlugin(t *testing.T) {
 	}
 	if !manifest.HasCapability("detect") || !manifest.HasCapability("build") {
 		t.Fatalf("capabilities=%v", manifest.Capabilities)
+	}
+	marketplaceFile, err := os.Open(filepath.Join(dir, "plugins", "bun-builder", marketplace.ManifestFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	marketplaceManifest, err := marketplace.DecodeManifest(marketplaceFile)
+	_ = marketplaceFile.Close()
+	if err != nil || marketplaceManifest.Name != "bun-builder" {
+		t.Fatalf("generated plugin.yaml is invalid: manifest=%+v err=%v", marketplaceManifest, err)
 	}
 
 	report, err := Validate(context.Background(), dir, "bun-builder")
@@ -556,11 +566,11 @@ func TestValidateFlagsADigestMismatchAgainstAnExistingExecutable(t *testing.T) {
 	}
 }
 
-// TestValidateReportsTestFilesArePresentButNotExecuted covers the
-// "tests present" branch of Validate - every other Validate test in
+// TestValidateExecutesTestFiles covers the successful test-execution
+// branch of Validate - every other Validate test in
 // this file uses a fixture with no _test.go files, hitting the "no
 // _test.go files found" branch instead.
-func TestValidateReportsTestFilesArePresentButNotExecuted(t *testing.T) {
+func TestValidateExecutesTestFiles(t *testing.T) {
 	dir := fixtureRepo(t)
 	writeManifest(t, dir, "widget-runtime", hostplugin.Manifest{
 		APIVersion: hostplugin.ManifestAPIVersion, Name: "widget-runtime", Version: "1.0.0",
@@ -573,8 +583,33 @@ func TestValidateReportsTestFilesArePresentButNotExecuted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(report.Tests, "present") {
+	if report.Tests != "ok" {
 		t.Fatalf("report.Tests=%q", report.Tests)
+	}
+}
+
+func TestValidateFailsWhenPluginTestsFail(t *testing.T) {
+	dir := fixtureRepo(t)
+	if _, err := Create(context.Background(), dir, CreateRequest{Name: "failing", Description: "fixture", Capabilities: []string{"detect"}}); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteFile(t, filepath.Join(dir, "plugins", "failing", "cmd", "platform-factory-failing", "main_test.go"), "package main\nimport \"testing\"\nfunc TestFailure(t *testing.T) { t.Fatal(\"boom\") }\n")
+	report, err := Validate(context.Background(), dir, "failing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Valid || !strings.HasPrefix(report.Tests, "error:") {
+		t.Fatalf("expected failing tests to invalidate plugin: %+v", report)
+	}
+}
+
+func TestValidateRejectsMarketplaceEntrypointTraversal(t *testing.T) {
+	dir := fixtureRepo(t)
+	pluginDir := filepath.Join(dir, "plugins", "unsafe")
+	mustMkdir(t, pluginDir)
+	mustWriteFile(t, filepath.Join(pluginDir, "plugin.yaml"), "api_version: platform-factory.dev/marketplace-manifest/v1\nname: unsafe\nversion: v0.1.0\nentrypoint: ../../outside\n")
+	if got := validateMarketplaceManifest(pluginDir, "unsafe"); !strings.Contains(got, "entrypoint") {
+		t.Fatalf("expected traversal rejection, got %q", got)
 	}
 }
 

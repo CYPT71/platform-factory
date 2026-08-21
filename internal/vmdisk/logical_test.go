@@ -240,6 +240,41 @@ func TestQCOW2LogicalDiskMapsAllocatedCluster(t *testing.T) {
 	}
 }
 
+func TestQCOW2LogicalDiskRejectsSelfReferentialMetadata(t *testing.T) {
+	file, _ := buildQCOW2(t)
+	const clusterSize = int64(4096)
+	const l1Offset = clusterSize
+	const l2Offset = l1Offset + clusterSize
+	entry := make([]byte, 8)
+	putBE64(entry, 0, uint64(l2Offset)|qcow2OFlagCopied)
+	if _, err := file.WriteAt(entry, l2Offset); err != nil {
+		t.Fatal(err)
+	}
+	ld, err := newQCOW2LogicalDisk(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ld.ReadLogical(0, 512); !errors.Is(err, ErrCannotMapLogicalDisk) {
+		t.Fatalf("self-referential L2 data pointer err=%v, want ErrCannotMapLogicalDisk", err)
+	}
+}
+
+func TestQCOW2LogicalDiskRejectsTruncatedL1Table(t *testing.T) {
+	file, _ := createTemp(t, "truncated-l1.qcow2", 4096)
+	header := make([]byte, 72)
+	copy(header[0:4], []byte{0x51, 0x46, 0x49, 0xfb})
+	putBE32(header, 4, 3)
+	putBE32(header, 20, 12)
+	putBE32(header, 36, 2)
+	putBE64(header, 40, 4096)
+	if _, err := file.WriteAt(header, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newQCOW2LogicalDisk(file); !errors.Is(err, ErrCannotMapLogicalDisk) {
+		t.Fatalf("truncated L1 err=%v, want ErrCannotMapLogicalDisk", err)
+	}
+}
+
 func TestQCOW2LogicalDiskUnallocatedClusterReadsZero(t *testing.T) {
 	file, _ := buildQCOW2(t)
 	ld, err := newQCOW2LogicalDisk(file)

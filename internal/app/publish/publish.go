@@ -12,11 +12,13 @@ package publish
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/CYPT71/platform-factory/internal/app/sbom"
 	"github.com/CYPT71/platform-factory/internal/attestation"
@@ -25,6 +27,7 @@ import (
 	provenancegen "github.com/CYPT71/platform-factory/internal/provenance"
 	"github.com/CYPT71/platform-factory/internal/registry"
 	"github.com/CYPT71/platform-factory/internal/signing"
+	"github.com/CYPT71/platform-factory/internal/strictjson"
 	"github.com/CYPT71/platform-factory/internal/workloadstate"
 )
 
@@ -60,6 +63,40 @@ type Artifact struct {
 // true; sign, when true, wraps the provenance predicate (if any) and
 // always adds a standalone signature artifact over published's digest.
 func BuildArtifacts(layoutName string, published registry.Result, includeSBOM bool, provenancePath, journalPath, builderID string, sign bool, keyDir, keyName string) ([]Artifact, error) {
+	return buildArtifacts(layoutName, published, includeSBOM, provenancePath, journalPath, builderID, sign, keyDir, keyName, nil)
+}
+
+// BuildArtifactsWithAttestations adds a validated collection of external
+// predicates. Platform Factory injects the actual published subject and signs
+// every statement; callers cannot smuggle a different subject digest.
+func BuildArtifactsWithAttestations(layoutName string, published registry.Result, includeSBOM bool, provenancePath, journalPath, builderID string, sign bool, keyDir, keyName string, externalAttestations []string) ([]Artifact, error) {
+	return buildArtifacts(layoutName, published, includeSBOM, provenancePath, journalPath, builderID, sign, keyDir, keyName, externalAttestations)
+}
+
+// ValidateExternalAttestations performs the same strict, side-effect-free
+// input validation used during artifact construction. The CLI calls it before
+// uploading the subject manifest, then construction revalidates to close the
+// mutation window before a tag can move.
+func ValidateExternalAttestations(paths []string) error {
+	for _, path := range paths {
+		if _, err := loadExternalAttestation(path); err != nil {
+			return fmt.Errorf("external attestation %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func buildArtifacts(layoutName string, published registry.Result, includeSBOM bool, provenancePath, journalPath, builderID string, sign bool, keyDir, keyName string, externalAttestations []string) ([]Artifact, error) {
+	if len(externalAttestations) > 0 && !sign {
+		return nil, errors.New("external attestations require --sign so untrusted predicates are never published unsigned")
+	}
+	if len(externalAttestations) > 0 {
+		hexDigest := strings.TrimPrefix(published.Digest, "sha256:")
+		decoded, err := hex.DecodeString(hexDigest)
+		if !strings.HasPrefix(published.Digest, "sha256:") || len(decoded) != 32 || err != nil {
+			return nil, errors.New("external attestations require a valid sha256 published subject digest")
+		}
+	}
 	var store signing.KeyStore
 	var keyID string
 	if sign {
@@ -160,7 +197,75 @@ func BuildArtifacts(layoutName string, published registry.Result, includeSBOM bo
 			PayloadType: attestation.EnvelopeMediaType, Payload: payload,
 		})
 	}
+	for _, path := range externalAttestations {
+		input, err := loadExternalAttestation(path)
+		if err != nil {
+			return nil, fmt.Errorf("external attestation %s: %w", path, err)
+		}
+		var predicate any
+		if err := json.Unmarshal(input.Predicate, &predicate); err != nil {
+			return nil, fmt.Errorf("external attestation %s predicate: %w", input.Name, err)
+		}
+		digest := strings.TrimPrefix(published.Digest, "sha256:")
+		statement := map[string]any{
+			"_type":         "https://in-toto.io/Statement/v1",
+			"subject":       []any{map[string]any{"name": published.Reference, "digest": map[string]string{"sha256": digest}}},
+			"predicateType": input.PredicateType,
+			"predicate":     predicate,
+		}
+		envelope, err := attestation.Sign(store, keyName, keyID, "application/vnd.in-toto+json", statement)
+		if err != nil {
+			return nil, err
+		}
+		payload, err := json.Marshal(envelope)
+		if err != nil {
+			return nil, err
+		}
+		artifacts = append(artifacts, Artifact{
+			Name: "attestation " + input.Name, ArtifactType: "application/vnd.platform-factory.attestation.v1+json",
+			PayloadType: attestation.EnvelopeMediaType, Payload: payload,
+		})
+	}
 	return artifacts, nil
+}
+
+type externalAttestation struct {
+	APIVersion    string          `json:"api_version"`
+	Name          string          `json:"name"`
+	PredicateType string          `json:"predicate_type"`
+	Predicate     json.RawMessage `json:"predicate"`
+}
+
+func loadExternalAttestation(path string) (externalAttestation, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return externalAttestation{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 1<<20 {
+		return externalAttestation{}, errors.New("file must be regular, non-symlink, non-empty, and at most 1 MiB")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return externalAttestation{}, err
+	}
+	var input externalAttestation
+	if err := strictjson.Decode(raw, &input); err != nil {
+		return externalAttestation{}, err
+	}
+	if input.APIVersion != "platform-factory.dev/external-attestation/v1" {
+		return externalAttestation{}, errors.New("unsupported api_version")
+	}
+	if input.Name == "" || len(input.Name) > 128 || strings.ContainsAny(input.Name, "\x00\r\n") {
+		return externalAttestation{}, errors.New("name must be non-empty, NUL/newline-free, and at most 128 bytes")
+	}
+	if !strings.HasPrefix(input.PredicateType, "https://") || len(input.PredicateType) > 512 {
+		return externalAttestation{}, errors.New("predicate_type must be a bounded https URI")
+	}
+	var predicate map[string]any
+	if len(input.Predicate) == 0 || json.Unmarshal(input.Predicate, &predicate) != nil || predicate == nil {
+		return externalAttestation{}, errors.New("predicate must be a JSON object")
+	}
+	return input, nil
 }
 
 // TransitionWorkload records publish progress without changing the

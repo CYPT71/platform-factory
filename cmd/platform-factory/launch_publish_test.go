@@ -61,7 +61,7 @@ func TestLaunchPublishCompletesNativeProductionLifecycle(t *testing.T) {
 		t.Fatalf("stdout is not one JSON result: %v\n%s", err, stdout.String())
 	}
 	if result["published"] != true || result["reproducible"] != true ||
-		result["published_reference"] != "registry.example/team/app@"+digest {
+		result["published_reference"] != "registry.example/team/app@"+result["digest"].(string) {
 		t.Fatalf("result=%+v", result)
 	}
 	for _, name := range []string{"policy.json", "evidence.json", "provenance.json"} {

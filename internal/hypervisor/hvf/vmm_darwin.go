@@ -67,6 +67,22 @@ type HVFLinuxRunResult struct {
 // cmd/microvm-init's DHCP-address report line) has no other hook to do
 // that from. May be nil.
 func RunLinuxHVF(ctx context.Context, kernelPath, initrdPath, commandLine, serialReady string, memoryBytes uint64, vcpus uint32, macAddress string, liveWriter io.Writer) (result HVFLinuxRunResult, err error) {
+	return runLinuxHVF(ctx, kernelPath, initrdPath, commandLine, serialReady, memoryBytes, vcpus, macAddress, false, liveWriter)
+}
+
+// RunLinuxHVFWithRosetta attaches Apple's read-only Rosetta-for-Linux
+// VirtioFS share as tag "rosetta". The guest still needs an ARM64 kernel with
+// VirtioFS and must mount/register or invoke the translator itself.
+func RunLinuxHVFWithRosetta(ctx context.Context, kernelPath, initrdPath, commandLine, serialReady string, memoryBytes uint64, vcpus uint32, macAddress string, liveWriter io.Writer) (result HVFLinuxRunResult, err error) {
+	return runLinuxHVF(ctx, kernelPath, initrdPath, commandLine, serialReady, memoryBytes, vcpus, macAddress, true, liveWriter)
+}
+
+// LinuxRosettaStatus reports host capability without installing anything.
+func LinuxRosettaStatus() (supported, installed bool) {
+	return C.vz_linux_rosetta_is_supported() != 0, C.vz_linux_rosetta_is_installed() != 0
+}
+
+func runLinuxHVF(ctx context.Context, kernelPath, initrdPath, commandLine, serialReady string, memoryBytes uint64, vcpus uint32, macAddress string, enableRosetta bool, liveWriter io.Writer) (result HVFLinuxRunResult, err error) {
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
@@ -116,6 +132,7 @@ func RunLinuxHVF(ctx context.Context, kernelPath, initrdPath, commandLine, seria
 		cKernel, cInitrd, cCommandLine, cLogPath,
 		C.ulonglong(memoryBytes), C.uint(vcpus),
 		cMAC,
+		C.int(boolToInt(enableRosetta)),
 		nil,
 		&errBuf[0], C.size_t(len(errBuf)),
 	)
@@ -174,6 +191,13 @@ func RunLinuxHVF(ctx context.Context, kernelPath, initrdPath, commandLine, seria
 	}
 }
 
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
 // ContentResolver resolves a boot bundle's content digest (as recorded in
 // api.BootBundle) to a local, already content-verified file path. The vmm
 // package deliberately does not import internal/cache to avoid coupling
@@ -184,6 +208,7 @@ type ContentResolver func(ctx context.Context, digest string) (string, error)
 // this host. It does not by itself prove the process holds the required
 // entitlement - that only surfaces as a Create() failure.
 func ProbeNative(ctx context.Context) (api.Capabilities, error) {
+	rosettaSupported, rosettaInstalled := LinuxRosettaStatus()
 	result := api.Capabilities{
 		Architecture: runtime.GOARCH,
 		Features: map[string]bool{
@@ -194,14 +219,16 @@ func ProbeNative(ctx context.Context) (api.Capabilities, error) {
 			"port-forwarding":   true,
 			"volumes":           false,
 			"guest-environment": false,
+			"linux-rosetta":     rosettaSupported && rosettaInstalled,
 		},
 		Details: map[string]string{
 			"backend":            "darwin-native-virtualization",
 			"rootfs-format":      darwinRootFSFormatInitramfs,
 			"guest-agent-device": "/dev/hvc1",
+			"linux-rosetta":      rosettaStatusDetail(rosettaSupported, rosettaInstalled),
 			"network-caveat": "NAT-attached virtio-net via RunLinuxHVF; guest DHCPs its own " +
-				"address (ip=dhcp), host relays each --publish port to it. Unverified on real " +
-				"hardware - see docs/legacy-vm-disk-boot.md.",
+				"address (ip=dhcp), host relays each TCP/UDP --publish port to it. Apple's NAT " +
+				"currently also permits guest outbound access; policy control remains separate.",
 		},
 	}
 	if err := ctx.Err(); err != nil {
@@ -219,6 +246,17 @@ func ProbeNative(ctx context.Context) (api.Capabilities, error) {
 	result.Features["guest-agent-channel"] = true
 	result.Features["entropy"] = true
 	return result, nil
+}
+
+func rosettaStatusDetail(supported, installed bool) string {
+	switch {
+	case installed:
+		return "installed; available to ARM64 Linux guests as read-only VirtioFS tag rosetta"
+	case supported:
+		return "supported but not installed; installation remains an explicit user action"
+	default:
+		return "not supported on this host"
+	}
 }
 
 // DarwinVMM implements the internal microVM VMM port over Virtualization.framework. It only
@@ -314,6 +352,7 @@ func (v *DarwinVMM) Create(ctx context.Context, spec api.MachineSpec) (api.Machi
 		cKernel, cInitrd, cCmdline, cLogPath,
 		C.ulonglong(spec.Resources.MemoryMiB*1024*1024), C.uint(spec.Resources.VCPUs),
 		nil,
+		C.int(0),
 		&agentFD,
 		&errBuf[0], C.size_t(len(errBuf)),
 	)

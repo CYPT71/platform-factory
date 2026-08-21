@@ -54,7 +54,8 @@ the self-describing names can choose `pf init --filename-style long`, which
 creates exactly `platform-factory.yaml` and `platform-factory.lock`. A project
 has one style and one source of truth: discovery refuses multiple configuration
 files or both lock spellings instead of choosing silently by priority. Both
-styles carry an integer `version`; version 1 is stable. Readers reject unknown fields, multiple documents, malformed
+styles carry an integer `version`; project manifests remain v1, while newly
+generated locks are v2. Lock v1 remains readable for migration. Readers reject unknown fields, multiple documents, malformed
 pins, and versions newer than the running CLI. A schema change that cannot be
 expressed with optional fields requires a version bump and an automated
 forward migration. Older CLI releases are never expected to guess the meaning
@@ -62,7 +63,10 @@ of a future schema.
 
 Published closed JSON Schema 2020-12 documents live at
 [`schemas/pf-v1.schema.json`](../schemas/pf-v1.schema.json) and
-[`schemas/pf-lock-v1.schema.json`](../schemas/pf-lock-v1.schema.json). YAML
+[`schemas/pf-lock-v1.schema.json`](../schemas/pf-lock-v1.schema.json). The
+current lock contract is published separately as
+[`schemas/pf-lock-v2.schema.json`](../schemas/pf-lock-v2.schema.json); v1 was
+not modified in place. YAML
 editors may apply the project schema after YAML parsing because the wire field
 model is identical. Tests compare every published property with the Go wire
 types and pin the schema-file SHA-256; changing v1 in place fails CI and
@@ -72,8 +76,13 @@ schema version plus migration.
 `pf init` writes the selected pair atomically as one reviewed plan. Normal
 project discovery validates the matching adjacent lock (`pf.lock` or
 `platform-factory.lock`) before build, run, launch, publish, or deploy can
-consume the project. The lock may be absent on legacy projects,
-but when present it is authoritative and invalid input fails closed.
+consume the project. The lock may be absent on legacy projects. A v2 lock
+binds the semantic manifest through `plan_digest`; reformatting and comments
+are neutral, while a value change blocks the build before any user command
+runs. `pf freeze` atomically refreshes SHA-256 pins for source and explicitly
+categorized toolchain files. Base-image and MicroVM boot pins use their
+dedicated v2 fields. When present, the lock is authoritative and invalid input
+fails closed.
 
 ## CLI machine output
 

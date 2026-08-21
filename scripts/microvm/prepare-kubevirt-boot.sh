@@ -30,29 +30,7 @@ script_dir="$repo_root/scripts/microvm"
 # shellcheck source=scripts/microvm/lib-arch.sh
 . "$script_dir/lib-arch.sh"
 
-python3 "$repo_root/scripts/ci/verify-oci-layout.py" "$image_dir"
-image_meta=$(python3 -c '
-import json, sys
-root = sys.argv[1]
-index = json.load(open(f"{root}/index.json"))
-manifest_digest = index["manifests"][0]["digest"].split(":", 1)[1]
-manifest = json.load(open(f"{root}/blobs/sha256/{manifest_digest}"))
-config_digest = manifest["config"]["digest"].split(":", 1)[1]
-config = json.load(open(f"{root}/blobs/sha256/{config_digest}"))
-print(config["architecture"])
-print(manifest["layers"][0]["digest"].split(":", 1)[1])
-for value in config["config"]["Entrypoint"]:
-    print(value)
-' "$image_dir")
-
-image_arch=$(sed -n '1p' <<<"$image_meta")
-layer_digest=$(sed -n '2p' <<<"$image_meta")
-entrypoint=()
-while IFS= read -r value; do entrypoint+=("$value"); done < <(sed -n '3,$p' <<<"$image_meta")
-if [ "$image_arch" != "$HOST_ARCH" ]; then
-  echo "error: image architecture is $image_arch but build host is $HOST_ARCH" >&2
-  exit 1
-fi
+image_arch=$HOST_ARCH
 
 parent=$(dirname "$output")
 mkdir -p "$parent"
@@ -66,9 +44,14 @@ trap cleanup EXIT
 
 CGO_ENABLED=0 GOOS=linux GOARCH="$HOST_ARCH" go build -trimpath -ldflags='-s -w' \
   -o "$work/init" "$repo_root/cmd/microvm-init"
-"$script_dir/assemble-initramfs.sh" \
-  "$image_dir/blobs/sha256/$layer_digest" "$work/init" "$work/initramfs.cpio.gz" \
-  "${entrypoint[@]}"
+if command -v microvm-initramfs >/dev/null 2>&1; then
+  initramfs_tool=$(command -v microvm-initramfs)
+else
+  initramfs_tool="$work/microvm-initramfs"
+  go build -trimpath -ldflags='-s -w' -o "$initramfs_tool" "$repo_root/cmd/microvm-initramfs"
+fi
+"$initramfs_tool" -layout "$image_dir" -platform "linux/$HOST_ARCH" \
+  -init "$work/init" -output "$work/initramfs.cpio.gz" > "$work/initramfs-result.json"
 
 kernel="$repo_root/.cache/microvm/$HOST_ARCH/kernel"
 "$script_dir/build-kernel.sh" "$HOST_ARCH" "$kernel"
@@ -94,9 +77,9 @@ json.dump({
     "kernel_sha256": sys.argv[2],
     "initrd_path": "/boot/initramfs.cpio.gz",
     "initrd_sha256": sys.argv[3],
-    "entrypoint": sys.argv[5:],
+    "process_contract": "embedded:/etc/platform-factory/process.json",
 }, open(sys.argv[4], "w"), indent=2)
-' "$image_arch" "$kernel_sha" "$initramfs_sha" "$context/boot-metadata.json" "${entrypoint[@]}"
+' "$image_arch" "$kernel_sha" "$initramfs_sha" "$context/boot-metadata.json"
 
 mv "$context" "$output"
 context=""

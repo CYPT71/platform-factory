@@ -1,11 +1,10 @@
-// Package forward is a minimal host-port -> guest-port TCP relay: it
-// accepts connections on a host listener and splices each one to a freshly
-// dialed connection on the guest side. It exists as the native-KVM
+// Package forward provides bounded host-port -> guest-port TCP and UDP
+// relays. It exists as the native-KVM
 // microVM path's stand-in for QEMU SLIRP's `hostfwd=` NAT rules, which
 // this project's TAP-based virtio-net device has no equivalent for (see
 // internal/hypervisor/kvm's NetworkDeviceOptions doc comment). It is not
-// NAT and not a general-purpose proxy: TCP only, one fixed guest address
-// per relay, no notion of the guest's own outbound connectivity.
+// NAT and not a general-purpose proxy: one fixed guest address per relay,
+// with no notion of the guest's own outbound connectivity.
 package forward
 
 import (
@@ -15,6 +14,14 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
+)
+
+const (
+	maxUDPSessions      = 1024
+	udpSessionIdle      = 2 * time.Minute
+	udpReadPollInterval = 250 * time.Millisecond
+	maxUDPDatagram      = 65535
 )
 
 // Relay listens on listenAddr and, for every accepted connection, dials
@@ -81,6 +88,141 @@ func Relay(ctx context.Context, listenAddr, dialAddr string) error {
 			defer untrack(conn)
 			relayOne(ctx, &dialer, conn, dialAddr, track, untrack)
 		}()
+	}
+}
+
+type udpSession struct {
+	conn     *net.UDPConn
+	client   *net.UDPAddr
+	lastSeen time.Time
+}
+
+// RelayUDP forwards datagrams while preserving a bounded per-client UDP
+// session. Responses from the fixed guest endpoint return to the exact host
+// source address. Idle sessions expire and the oldest entry is evicted at the
+// fixed limit, preventing source-address floods from growing descriptors
+// without bound. Cancellation closes every socket before returning.
+func RelayUDP(ctx context.Context, listenAddr, dialAddr string) error {
+	listenUDP, err := net.ResolveUDPAddr("udp", listenAddr)
+	if err != nil {
+		return fmt.Errorf("microvm: forward: resolve UDP listen %s: %w", listenAddr, err)
+	}
+	guestUDP, err := net.ResolveUDPAddr("udp", dialAddr)
+	if err != nil {
+		return fmt.Errorf("microvm: forward: resolve UDP guest %s: %w", dialAddr, err)
+	}
+	listener, err := net.ListenUDP("udp", listenUDP)
+	if err != nil {
+		return fmt.Errorf("microvm: forward: listen UDP %s: %w", listenAddr, err)
+	}
+	defer listener.Close()
+
+	var (
+		mu       sync.Mutex
+		sessions = make(map[string]*udpSession)
+		wg       sync.WaitGroup
+	)
+	remove := func(key string, expected *udpSession) {
+		mu.Lock()
+		if sessions[key] == expected {
+			delete(sessions, key)
+			_ = expected.conn.Close()
+		}
+		mu.Unlock()
+	}
+	closeAll := func() {
+		mu.Lock()
+		for key, session := range sessions {
+			_ = session.conn.Close()
+			delete(sessions, key)
+		}
+		mu.Unlock()
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-done:
+		}
+		_ = listener.Close()
+		closeAll()
+	}()
+	defer close(done)
+	defer func() {
+		closeAll()
+		wg.Wait()
+	}()
+
+	buffer := make([]byte, maxUDPDatagram)
+	for {
+		n, client, readErr := listener.ReadFromUDP(buffer)
+		if readErr != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("microvm: forward: receive UDP on %s: %w", listenAddr, readErr)
+		}
+		key := client.String()
+		now := time.Now()
+		mu.Lock()
+		session := sessions[key]
+		if session == nil {
+			if len(sessions) >= maxUDPSessions {
+				var oldestKey string
+				var oldest *udpSession
+				for candidateKey, candidate := range sessions {
+					if oldest == nil || candidate.lastSeen.Before(oldest.lastSeen) {
+						oldestKey, oldest = candidateKey, candidate
+					}
+				}
+				delete(sessions, oldestKey)
+				_ = oldest.conn.Close()
+			}
+			guestConn, dialErr := net.DialUDP("udp", nil, guestUDP)
+			if dialErr != nil {
+				mu.Unlock()
+				continue
+			}
+			session = &udpSession{conn: guestConn, client: client, lastSeen: now}
+			sessions[key] = session
+			wg.Add(1)
+			go func(key string, session *udpSession) {
+				defer wg.Done()
+				response := make([]byte, maxUDPDatagram)
+				for {
+					_ = session.conn.SetReadDeadline(time.Now().Add(udpReadPollInterval))
+					n, err := session.conn.Read(response)
+					if n > 0 {
+						if _, writeErr := listener.WriteToUDP(response[:n], session.client); writeErr != nil {
+							remove(key, session)
+							return
+						}
+						mu.Lock()
+						session.lastSeen = time.Now()
+						mu.Unlock()
+					}
+					if err == nil {
+						continue
+					}
+					if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+						mu.Lock()
+						idle := time.Since(session.lastSeen) >= udpSessionIdle
+						mu.Unlock()
+						if !idle && ctx.Err() == nil {
+							continue
+						}
+					}
+					remove(key, session)
+					return
+				}
+			}(key, session)
+		}
+		session.lastSeen = now
+		guestConn := session.conn
+		mu.Unlock()
+		if _, writeErr := guestConn.Write(buffer[:n]); writeErr != nil {
+			remove(key, session)
+		}
 	}
 }
 

@@ -31,6 +31,7 @@ import (
 	"github.com/CYPT71/platform-factory/internal/microvm"
 	"github.com/CYPT71/platform-factory/internal/networking"
 	"github.com/CYPT71/platform-factory/internal/plugin"
+	"github.com/CYPT71/platform-factory/internal/policy"
 	"github.com/CYPT71/platform-factory/internal/signing"
 	"github.com/CYPT71/platform-factory/internal/vmdisk"
 	"github.com/CYPT71/platform-factory/oci"
@@ -445,14 +446,16 @@ func TestNativeKVMEligible(t *testing.T) {
 		}
 	})
 
-	t.Run("UDP forward falls back", func(t *testing.T) {
+	t.Run("UDP forward follows native availability", func(t *testing.T) {
 		if !nativeKVMAvailableForTest(t) {
 			t.Skip("this host has no native KVM; the earlier probe check would already reject before the forward protocol is ever inspected")
 		}
 		spec := baseSpec()
 		spec.Forwards = []networking.Forward{{Protocol: "udp", HostPort: 53, GuestPort: 53}}
-		if ok, _ := nativeKVMEligible(context.Background(), spec); ok {
-			t.Fatal("expected ineligible with a UDP forward")
+		got, _ := nativeKVMEligible(context.Background(), spec)
+		want, _ := nativeKVMEligible(context.Background(), baseSpec())
+		if got != want {
+			t.Fatalf("UDP changed native eligibility: got=%t want=%t", got, want)
 		}
 	})
 }
@@ -502,7 +505,7 @@ func TestRunMicroVMMultipleNetworkForwards(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := runMicroVM([]string{
-		"run", "--layout=/verified/layout",
+		"run", "--layout=/verified/layout", "--vcpus=2",
 		"--publish=127.0.0.1:8080:80/tcp", "--publish=[::1]:5353:53/udp",
 	}, &stdout, &stderr, execute)
 	if code != 0 {
@@ -526,7 +529,7 @@ func TestRunMicroVMMultiplePortAliases(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := runMicroVM([]string{
-		"run", "--layout=/verified/layout",
+		"run", "--layout=/verified/layout", "--vcpus=2",
 		"-p", "8080:80", "--port=8443:443", "-p=5353:53/udp",
 	}, &stdout, &stderr, execute)
 	if code != 0 {
@@ -1071,6 +1074,46 @@ func TestRunImageBuildWithUnifiedOptions(t *testing.T) {
 	}
 }
 
+func TestRunBuildProducesSeveralImageAndTagReferencesWithoutRebuilding(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("test executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(root, "layout")
+	var stdout, stderr bytes.Buffer
+	if code := runBuild(context.Background(), []string{"--output", output, "--image", "example/api", "--tag", "v1",
+		"--reference", "example/api:stable", "--reference", "example/compat-api:2026.08", binary}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	report, err := layout.Verify(output)
+	if err != nil || len(report.Platforms) != 3 {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	digests := map[string]bool{}
+	references := map[string]bool{}
+	for _, platform := range report.Platforms {
+		digests[platform.Digest] = true
+		references[platform.Reference] = true
+	}
+	if len(digests) != 1 || len(references) != 3 || !references["example/api:v1"] || !references["example/api:stable"] || !references["example/compat-api:2026.08"] {
+		t.Fatalf("digests=%v references=%v", digests, references)
+	}
+	if !strings.Contains(stdout.String(), `"references"`) {
+		t.Fatalf("stdout=%s", stdout.String())
+	}
+
+	invalidOutput := filepath.Join(root, "invalid-layout")
+	stdout.Reset()
+	stderr.Reset()
+	if code := runBuild(context.Background(), []string{"--output", invalidOutput, "--reference", "missing-tag", binary}, &stdout, &stderr); code != 2 {
+		t.Fatalf("invalid reference code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(invalidOutput); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid reference wrote output: %v", err)
+	}
+}
+
 func layoutLayerCount(t *testing.T, layoutPath string) int {
 	t.Helper()
 	indexData, err := os.ReadFile(filepath.Join(layoutPath, "index.json"))
@@ -1587,6 +1630,77 @@ func TestRunBuildRebuildWritesReproducibilityReport(t *testing.T) {
 	}
 }
 
+func TestRunBuildEnforcesExplicitPolicyWithProducedEvidence(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keys := filepath.Join(root, "keys")
+	store, err := signing.NewFileKeyStore(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublicKey("release"); err != nil {
+		t.Fatal(err)
+	}
+	rules := policy.Rules{APIVersion: policy.APIVersion, RequireSBOM: true, RequireProvenance: true, RequireSignature: true}
+	policyPath := filepath.Join(root, "policy.json")
+	writeJSONFile(t, policyPath, rules)
+	dist, reports := filepath.Join(root, "dist"), filepath.Join(root, "reports")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"build", "--policy", policyPath, "--dist", dist, "--reports", reports, "--sign-key-dir", keys, binary}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(reports, "policy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"require_signature": true`) || !strings.Contains(string(data), `"allowed": true`) {
+		t.Fatalf("policy=%s", data)
+	}
+}
+
+func TestRunBuildPolicyRejectsMissingPrerequisitesBeforeOutput(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(root, "policy.json")
+	writeJSONFile(t, policyPath, policy.Rules{APIVersion: policy.APIVersion, RequireSignature: true})
+	output := filepath.Join(root, "layout")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"build", "--policy", policyPath, "--reports", filepath.Join(root, "reports"), "--output", output, binary}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "policy preflight failed") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(output); !os.IsNotExist(err) {
+		t.Fatalf("denied policy wrote output: %v", err)
+	}
+}
+
+func TestRunBuildPolicyAcceptsActualReproducibilityProof(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "service")
+	if err := os.WriteFile(binary, []byte("payload"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(root, "policy.json")
+	writeJSONFile(t, policyPath, policy.Rules{APIVersion: policy.APIVersion, RequireReproducible: true})
+	reports := filepath.Join(root, "reports")
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"build", "--policy", policyPath, "--reports", reports, "--rebuild=2", "--require-identical", "--output", filepath.Join(root, "layout"), binary}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(reports, "policy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"reproducible": true`) || !strings.Contains(string(data), `"allowed": true`) {
+		t.Fatalf("policy=%s", data)
+	}
+}
+
 func TestRunBuildRebuildRejectsInvalidCount(t *testing.T) {
 	root := t.TempDir()
 	binary := filepath.Join(root, "service")
@@ -1981,7 +2095,17 @@ func TestRunMicroVMInspectLegacyDiskRequiresDiskFlag(t *testing.T) {
 	}
 }
 
+func useInProcessDiskParserForUnitTest(t *testing.T) {
+	t.Helper()
+	original := parseLegacyDisksForCLI
+	parseLegacyDisksForCLI = func(_ context.Context, diskImages []string, bootDiskOverride string) (vmdisk.DiscoveryReport, error) {
+		return vmdisk.BuildDiscoveryReport(diskImages, bootDiskOverride)
+	}
+	t.Cleanup(func() { parseLegacyDisksForCLI = original })
+}
+
 func TestRunMicroVMInspectLegacyDiskWritesReportsAndNeverInvokesARunner(t *testing.T) {
+	useInProcessDiskParserForUnitTest(t)
 	osDisk := filepath.Join(t.TempDir(), "os.raw")
 	header := make([]byte, 4096)
 	header[446] = 0x80 // active/bootable
@@ -2043,6 +2167,7 @@ func TestRunMicroVMInspectLegacyDiskWritesReportsAndNeverInvokesARunner(t *testi
 }
 
 func TestRunMicroVMInspectLegacyDiskExplicitEncapsulationAndInvalidStrategy(t *testing.T) {
+	useInProcessDiskParserForUnitTest(t)
 	osDisk := filepath.Join(t.TempDir(), "os.raw")
 	header := make([]byte, 4096)
 	header[446], header[450], header[510], header[511] = 0x80, 0x83, 0x55, 0xaa
@@ -2078,6 +2203,7 @@ func TestRunMicroVMInspectLegacyDiskExplicitEncapsulationAndInvalidStrategy(t *t
 }
 
 func TestRunMicroVMInspectLegacyDiskAmbiguousBootDiskStillWritesAReport(t *testing.T) {
+	useInProcessDiskParserForUnitTest(t)
 	first := filepath.Join(t.TempDir(), "first.raw")
 	second := filepath.Join(t.TempDir(), "second.raw")
 	for _, path := range []string{first, second} {
@@ -2123,6 +2249,7 @@ func TestRunMicroVMInspectLegacyDiskAmbiguousBootDiskStillWritesAReport(t *testi
 }
 
 func TestRunMicroVMInspectLegacyDiskFailsClosedOnUnrecognizedFormat(t *testing.T) {
+	useInProcessDiskParserForUnitTest(t)
 	disk := filepath.Join(t.TempDir(), "not-a-disk.bin")
 	if err := os.WriteFile(disk, bytes.Repeat([]byte{0x42}, 512), 0o644); err != nil {
 		t.Fatalf("write disk: %v", err)

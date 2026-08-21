@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -111,11 +112,13 @@ type State struct {
 // VMMMetrics is terminal, durable telemetry embedded in the canonical runtime
 // state rather than maintained in a second sidecar store.
 type VMMMetrics struct {
-	APIVersion string `json:"api_version"`
-	RuntimeMS  int64  `json:"runtime_ms"`
-	MemoryMiB  int    `json:"memory_mib"`
-	VCPUs      int    `json:"vcpus"`
-	ExitStatus uint32 `json:"exit_status"`
+	APIVersion   string `json:"api_version"`
+	Backend      string `json:"backend"`
+	Architecture string `json:"architecture"`
+	RuntimeMS    int64  `json:"runtime_ms"`
+	MemoryMiB    int    `json:"memory_mib"`
+	VCPUs        int    `json:"vcpus"`
+	ExitStatus   uint32 `json:"exit_status"`
 }
 
 type startResult struct {
@@ -499,6 +502,7 @@ func (s *Store) getUnlocked(id string) (State, bool, error) {
 	if state.PID > 0 && !processAlive(state.PID, state.PIDStartTicks) {
 		_ = os.Remove(s.controlSocketPath(state))
 		state.PID = 0
+		state.PIDStartTicks = 0
 		state.Status = "stopped"
 		if state.ExitStatus == nil {
 			unknown := uint32(255)
@@ -610,6 +614,7 @@ func (s *Store) SetStatus(ctx context.Context, id, status string) error {
 		if status == "stopped" {
 			_ = os.Remove(s.controlSocketPath(*state))
 			state.PID = 0
+			state.PIDStartTicks = 0
 		}
 	})
 }
@@ -623,17 +628,24 @@ func (s *Store) SetExited(ctx context.Context, id string, status uint32, exitedA
 	return s.update(ctx, id, func(state *State) {
 		state.Status = "stopped"
 		state.PID = 0
+		state.PIDStartTicks = 0
 		state.ExitStatus = &status
 		state.ExitedAt = &exitedAt
-		memoryMiB, _ := strconv.Atoi(state.Annotations["platform-factory.dev/memory-mib"])
-		vcpus, _ := strconv.Atoi(state.Annotations["platform-factory.dev/vcpus"])
+		memoryMiB := 128
+		if raw := state.Annotations["platform-factory.dev/memory-mib"]; raw != "" {
+			memoryMiB, _ = strconv.Atoi(raw)
+		}
+		vcpus := 1
+		if raw := state.Annotations["platform-factory.dev/vcpus"]; raw != "" {
+			vcpus, _ = strconv.Atoi(raw)
+		}
 		runtimeMS := exitedAt.Sub(state.Created).Milliseconds()
 		if runtimeMS < 0 {
 			runtimeMS = 0
 		}
 		state.Metrics = &VMMMetrics{
-			APIVersion: "platform-factory.dev/vmm-metrics/v1", RuntimeMS: runtimeMS,
-			MemoryMiB: memoryMiB, VCPUs: vcpus, ExitStatus: status,
+			APIVersion: "platform-factory.dev/vmm-metrics/v1", Backend: "kvm-native", Architecture: runtime.GOARCH,
+			RuntimeMS: runtimeMS, MemoryMiB: memoryMiB, VCPUs: vcpus, ExitStatus: status,
 		}
 		_ = os.Remove(s.controlSocketPath(*state))
 	})

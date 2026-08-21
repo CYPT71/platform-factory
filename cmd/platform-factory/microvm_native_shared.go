@@ -14,12 +14,49 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/CYPT71/platform-factory/internal/networking"
+	"github.com/CYPT71/platform-factory/internal/rootfs"
 )
 
 func nativeLog(w io.Writer, format string, args ...any) {
 	fmt.Fprintf(w, "[%s] %s\n", time.Now().UTC().Format(time.RFC3339), fmt.Sprintf(format, args...))
+}
+
+func installNativeRuntimeContract(convertedRoot, initBinary string, metadata rootfs.RuntimeMetadata, forwards []networking.Forward) error {
+	if len(metadata.UnsupportedOptions) != 0 {
+		return fmt.Errorf("OCI options cannot be translated into the native guest: %s", strings.Join(metadata.UnsupportedOptions, ", "))
+	}
+	if len(metadata.Volumes) != 0 {
+		return fmt.Errorf("OCI volumes cannot be translated without explicit host sources: %s", strings.Join(metadata.Volumes, ", "))
+	}
+	for _, required := range metadata.Ports {
+		number, protocol, ok := strings.Cut(required, "/")
+		guestPort, err := strconv.Atoi(number)
+		if !ok || err != nil {
+			return fmt.Errorf("invalid OCI exposed port %q", required)
+		}
+		translated := false
+		for _, forward := range forwards {
+			if forward.GuestPort == guestPort && forward.Protocol == protocol {
+				translated = true
+				break
+			}
+		}
+		if !translated {
+			return fmt.Errorf("OCI exposed port %s has no matching --publish forwarding", required)
+		}
+	}
+	if err := rootfs.InstallInit(convertedRoot, initBinary, metadata.Process.Args); err != nil {
+		return fmt.Errorf("install init: %w", err)
+	}
+	if err := rootfs.InstallProcessConfig(convertedRoot, metadata.Process); err != nil {
+		return fmt.Errorf("install OCI process config: %w", err)
+	}
+	return nil
 }
 
 // findRepoRoot locates the module root the same way cmd/platform-factory-installer

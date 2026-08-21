@@ -7,7 +7,7 @@ artifact: "app.py"
 isolation: container
 runtime_engine: docker
 platform: linux/arm64
-image: secure-oci-demo
+image: platform-factory
 dependency_management:
   mode: none
 runtime: ".platform-factory/deps/python/runtime/python3"

@@ -23,13 +23,13 @@ import (
 // so the flag set behind --help (printInitUsage) can never drift from the
 // flag set actually parsed by runInit.
 type initFlags struct {
-	dryRun, assumeYes                                            *bool
-	bootDiskOverride, languageFlag, artifactFlag, dependencyMode *string
-	runtimeFlag, engineFlag                                      *string
-	buildCommand                                                 *string
-	extractTo, archiveFormat                                     *string
-	filenameStyle                                                *string
-	buildArgs                                                    *stringListFlag
+	dryRun, assumeYes                                                            *bool
+	bootDiskOverride, legacyStrategy, languageFlag, artifactFlag, dependencyMode *string
+	runtimeFlag, engineFlag                                                      *string
+	buildCommand                                                                 *string
+	extractTo, archiveFormat                                                     *string
+	filenameStyle                                                                *string
+	buildArgs                                                                    *stringListFlag
 }
 
 type stringListFlag []string
@@ -51,6 +51,7 @@ func newInitFlagSet(output io.Writer) (*flag.FlagSet, initFlags) {
 		dryRun:           flags.Bool("dry-run", false, "print the plan without writing anything"),
 		assumeYes:        flags.Bool("yes", false, "skip interactive prompts (ecosystem choice, boot-disk choice, final confirmation); non-interactive mode"),
 		bootDiskOverride: flags.String("boot-disk", "", "which detected legacy disk is the boot/OS disk, when it can't be (or shouldn't be) auto-detected or prompted for; must match one of the detected disks exactly"),
+		legacyStrategy:   flags.String("legacy-strategy", "unsupported", "retained legacy migration plan: container, microvm-oci, microvm-direct, vm-encapsulation, or unsupported (fail-closed default)"),
 		languageFlag:     flags.String("language", "", "project language, when it can't be (or shouldn't be) auto-detected or prompted for"),
 		artifactFlag:     flags.String("artifact", "", "path to the build artifact, relative to the project directory"),
 		dependencyMode:   flags.String("dependency-mode", "", "dependency state: none, manifest, unresolved, external, or unknown"),
@@ -106,7 +107,7 @@ func runInit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	flags, f := newInitFlagSet(stderr)
 	dryRun, assumeYes := f.dryRun, f.assumeYes
-	bootDiskOverride, languageFlag, artifactFlag := f.bootDiskOverride, f.languageFlag, f.artifactFlag
+	bootDiskOverride, legacyStrategy, languageFlag, artifactFlag := f.bootDiskOverride, f.legacyStrategy, f.languageFlag, f.artifactFlag
 	dependencyMode, runtimeFlag, engineFlag := f.dependencyMode, f.runtimeFlag, f.engineFlag
 	buildCommand, buildArgs := f.buildCommand, f.buildArgs
 	extractTo, archiveFormat := f.extractTo, f.archiveFormat
@@ -132,6 +133,12 @@ func runInit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if *filenameStyle != "short" && *filenameStyle != "long" {
 		fmt.Fprintln(stderr, "platform-factory init: --filename-style must be short or long")
+		return 2
+	}
+	switch *legacyStrategy {
+	case "container", "microvm-oci", "microvm-direct", "vm-encapsulation", "unsupported":
+	default:
+		fmt.Fprintln(stderr, "platform-factory init: --legacy-strategy must be container, microvm-oci, microvm-direct, vm-encapsulation, or unsupported")
 		return 2
 	}
 	positionals := flags.Args()
@@ -198,6 +205,9 @@ func runInit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory init: %v\n", err)
 		return 2
+	}
+	if legacyDisks != nil {
+		legacyDisks.Strategy = *legacyStrategy
 	}
 
 	var ecosystem projectinit.Ecosystem

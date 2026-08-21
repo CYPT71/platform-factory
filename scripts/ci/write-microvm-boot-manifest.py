@@ -13,7 +13,10 @@ def digest(path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--architecture", required=True)
-    parser.add_argument("--layer-digest", required=True)
+    parser.add_argument("--layer-digest")
+    parser.add_argument("--manifest-digest")
+    parser.add_argument("--rootfs-digest")
+    parser.add_argument("--initramfs")
     parser.add_argument("--init", required=True)
     parser.add_argument("--kernel", required=True)
     parser.add_argument("--kernel-provenance")
@@ -23,8 +26,11 @@ def main():
     entrypoint = arguments.entrypoint
     if entrypoint[:1] == ["--"]:
         entrypoint = entrypoint[1:]
-    if not entrypoint:
-        raise SystemExit("boot manifest requires a non-empty entrypoint")
+    modern = bool(arguments.manifest_digest or arguments.rootfs_digest or arguments.initramfs)
+    if modern and not (arguments.manifest_digest and arguments.rootfs_digest and arguments.initramfs):
+        raise SystemExit("manifest-digest, rootfs-digest and initramfs must be provided together")
+    if not modern and (not arguments.layer_digest or not entrypoint):
+        raise SystemExit("legacy boot manifest requires layer-digest and a non-empty entrypoint")
     provenance = None
     if arguments.kernel_provenance:
         provenance_path = pathlib.Path(arguments.kernel_provenance)
@@ -32,12 +38,16 @@ def main():
             provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     init_digest = digest(arguments.init)
     kernel_digest = digest(arguments.kernel)
-    identity = {
-        "entrypoint": entrypoint,
-        "kernel_image_sha256": kernel_digest,
-        "microvm_init_sha256": init_digest,
-        "oci_layer_digest": arguments.layer_digest,
-    }
+    identity = {"kernel_image_sha256": kernel_digest, "microvm_init_sha256": init_digest}
+    if modern:
+        identity.update({
+            "oci_manifest_digest": arguments.manifest_digest,
+            "rootfs_digest": arguments.rootfs_digest,
+            "initramfs_sha256": digest(arguments.initramfs),
+            "process_contract": "embedded:/etc/platform-factory/process.json",
+        })
+    else:
+        identity.update({"entrypoint": entrypoint, "oci_layer_digest": arguments.layer_digest})
     combined = hashlib.sha256(
         json.dumps(identity, separators=(",", ":"), sort_keys=True).encode()
     ).hexdigest()

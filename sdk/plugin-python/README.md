@@ -1,4 +1,4 @@
-# secure-oci-plugin
+# platform-factory
 
 The Python SDK for out-of-process secure-oci language plugins. It defines
 the versioned, length-prefixed JSON-RPC protocol plugins speak over
@@ -6,7 +6,7 @@ stdin/stdout (an LSP/DAP-style header-framed message on the wire) and the
 plugin-side `Server`. This mirrors Go's `sdk/plugin` package field for
 field; a plugin written against either SDK speaks the exact same wire
 protocol and passes the exact same conformance suite
-(`secure-oci-conformance plugin`).
+(`platform-factory plugin`).
 
 Standard library only - no third-party dependencies.
 
@@ -15,7 +15,7 @@ Standard library only - no third-party dependencies.
 Locally, during development (editable install from a source checkout):
 
 ```sh
-pip install -e path/to/secure-oci-base/sdk/plugin-python
+pip install -e path/to/platform-factory/sdk/plugin-python
 ```
 
 ## Usage

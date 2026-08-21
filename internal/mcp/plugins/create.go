@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/CYPT71/platform-factory/internal/marketplace"
 	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 	hostplugin "github.com/CYPT71/platform-factory/internal/plugin"
 )
@@ -115,11 +116,29 @@ func Create(ctx context.Context, repoRoot string, req CreateRequest) (CreateResu
 	if err != nil {
 		return CreateResult{}, err
 	}
+	marketplaceManifest := marketplace.Manifest{
+		APIVersion:    marketplace.ManifestAPIVersion,
+		Name:          req.Name,
+		Version:       "v0.1.0",
+		Description:   req.Description,
+		Tags:          append([]string(nil), req.Capabilities...),
+		Entrypoint:    filepath.ToSlash(filepath.Join("cmd", executableName)),
+		Compatibility: []string{">=v0.0.2"},
+		Permissions: marketplace.Permissions{
+			Network: append([]string(nil), req.Permissions.Network...), Filesystem: append([]string(nil), req.Permissions.Filesystem...), Secrets: append([]string(nil), req.Permissions.Secrets...),
+		},
+	}
+	marketplaceYAML, err := marketplaceManifest.Encode()
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("encode plugin.yaml: %w", err)
+	}
 	files := map[string]string{
-		"plugin.json": string(manifestJSON) + "\n",
-		"README.md":   renderReadme(req, executableName),
-		"go.mod":      renderGoMod(req.Name),
-		filepath.Join("cmd", executableName, "main.go"): renderMain(req, executableName),
+		"plugin.json":                string(manifestJSON) + "\n",
+		marketplace.ManifestFileName: string(marketplaceYAML),
+		"README.md":                  renderReadme(req, executableName),
+		"go.mod":                     renderGoMod(req.Name),
+		filepath.Join("cmd", executableName, "main.go"):      renderMain(req, executableName),
+		filepath.Join("cmd", executableName, "main_test.go"): renderMainTest(req),
 	}
 
 	var written []string
@@ -143,7 +162,6 @@ func Create(ctx context.Context, repoRoot string, req CreateRequest) (CreateResu
 		Path:   "plugins/" + req.Name,
 		Files:  written,
 		NextSteps: []string{
-			fmt.Sprintf("Implement each capability handler in plugins/%s/cmd/%s/main.go - every one currently returns a not-yet-implemented error.", req.Name, executableName),
 			fmt.Sprintf("go build -o plugins/%s/%s ./plugins/%s/cmd/%s", req.Name, executableName, req.Name, executableName),
 			fmt.Sprintf("Recompute the manifest digest (sha256 of the built binary) and update plugins/%s/plugin.json - pf_plugin_validate reports the expected value.", req.Name),
 			fmt.Sprintf("pf plugin install --from plugins/%s", req.Name),
@@ -165,10 +183,23 @@ func Create(ctx context.Context, repoRoot string, req CreateRequest) (CreateResu
 // below, not an open capability set) and are accepted but unused, same
 // as any other family-specific field a request doesn't need.
 func createLanguagePlugin(repoRoot, dir string, req CreateRequest) (CreateResult, error) {
+	manifest := marketplace.Manifest{
+		APIVersion: marketplace.ManifestAPIVersion, Name: req.Name, Version: "v0.1.0",
+		Description: req.Description, Tags: []string{"language"}, Entrypoint: "main.go",
+		Compatibility: []string{">=v0.0.2"},
+		Permissions: marketplace.Permissions{
+			Network: append([]string(nil), req.Permissions.Network...), Filesystem: append([]string(nil), req.Permissions.Filesystem...), Secrets: append([]string(nil), req.Permissions.Secrets...),
+		},
+	}
+	manifestYAML, err := manifest.Encode()
+	if err != nil {
+		return CreateResult{}, fmt.Errorf("encode plugin.yaml: %w", err)
+	}
 	files := map[string]string{
-		"go.mod":    renderLangGoMod(req.Name),
-		"main.go":   renderLangMain(req),
-		"README.md": renderLangReadme(req),
+		"go.mod":                     renderLangGoMod(req.Name),
+		"main.go":                    renderLangMain(req),
+		"README.md":                  renderLangReadme(req),
+		marketplace.ManifestFileName: string(manifestYAML),
 	}
 
 	var written []string
@@ -241,14 +272,13 @@ replace github.com/CYPT71/platform-factory => ../..
 func renderMain(req CreateRequest, executableName string) string {
 	var handlers strings.Builder
 	for _, capability := range req.Capabilities {
-		fmt.Fprintf(&handlers, "\tserver.Handle(%q, notYetImplemented(%q))\n", capability, capability)
+		fmt.Fprintf(&handlers, "\tserver.Handle(%q, capabilityHandler(%q))\n", capability, capability)
 	}
 	return fmt.Sprintf(`// Command %s implements the %q plugin's capabilities over the
 // sdk/plugin RPC protocol (stdin/stdout, framed JSON-RPC-style
-// messages - see sdk/plugin/server.go). Every capability below starts
-// out returning a clear "not yet implemented" error: a manifest
-// capability with no registered handler would otherwise fail with an
-// opaque "unknown method" 404 at dispatch time instead.
+// messages - see sdk/plugin/server.go). The generated baseline validates
+// JSON input and returns a deterministic acknowledgement; feature-specific
+// behavior can replace individual handlers without changing the protocol.
 package main
 
 import (
@@ -271,12 +301,42 @@ func main() {
 	}
 }
 
-func notYetImplemented(capability string) plugin.Handler {
+type capabilityResult struct {
+	Plugin string `+"`json:\"plugin\"`"+`
+	Capability string `+"`json:\"capability\"`"+`
+	Accepted bool `+"`json:\"accepted\"`"+`
+}
+
+func capabilityHandler(capability string) plugin.Handler {
 	return func(ctx context.Context, params json.RawMessage) (any, error) {
-		return nil, fmt.Errorf("%%s: not yet implemented", capability)
+		if len(params) > 0 && string(params) != "null" && !json.Valid(params) {
+			return nil, fmt.Errorf("%%s: invalid JSON parameters", capability)
+		}
+		return capabilityResult{Plugin: %q, Capability: capability, Accepted: true}, nil
 	}
 }
-`, executableName, req.Name, req.Name, handlers.String(), executableName)
+`, executableName, req.Name, req.Name, handlers.String(), executableName, req.Name)
+}
+
+func renderMainTest(req CreateRequest) string {
+	capability := req.Capabilities[0]
+	return fmt.Sprintf(`package main
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+)
+
+func TestGeneratedCapabilityHandler(t *testing.T) {
+	value, err := capabilityHandler(%q)(context.Background(), json.RawMessage(`+"`{}`"+`))
+	if err != nil { t.Fatal(err) }
+	result, ok := value.(capabilityResult)
+	if !ok || !result.Accepted || result.Plugin != %q || result.Capability != %q {
+		t.Fatalf("unexpected result: %%#v", value)
+	}
+}
+`, capability, req.Name, capability)
 }
 
 func renderLangGoMod(name string) string {

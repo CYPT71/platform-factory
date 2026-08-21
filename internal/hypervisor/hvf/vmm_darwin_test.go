@@ -160,8 +160,7 @@ func TestDarwinCapabilitiesAndUnsupportedMachineSpecFieldsAreExplicit(t *testing
 		}
 	}
 	// network/port-forwarding are advertised (RunLinuxHVF's NAT-attached
-	// virtio-net device) but flagged unverified-on-real-hardware in
-	// Details - see docs/legacy-vm-disk-boot.md.
+	// virtio-net device) with the remaining outbound-policy caveat.
 	if !capabilities.Features["network"] || !capabilities.Features["port-forwarding"] ||
 		capabilities.Details["network-caveat"] == "" {
 		t.Fatalf("network/port-forwarding not advertised with its caveat: %+v", capabilities)
@@ -210,6 +209,24 @@ func TestDarwinCapabilitiesAndUnsupportedMachineSpecFieldsAreExplicit(t *testing
 		!strings.Contains(err.Error(), "separate initrd") {
 		t.Fatalf("separate initrd err=%v", err)
 	}
+}
+
+func TestLinuxRosettaCapabilityIsCoherent(t *testing.T) {
+	supported, installed := LinuxRosettaStatus()
+	if installed && !supported {
+		t.Fatal("Rosetta for Linux reported installed on an unsupported host")
+	}
+	capabilities, err := ProbeNative(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := capabilities.Features["linux-rosetta"], supported && installed; got != want {
+		t.Fatalf("linux-rosetta capability=%t, want %t", got, want)
+	}
+	if capabilities.Details["linux-rosetta"] != rosettaStatusDetail(supported, installed) {
+		t.Fatalf("linux-rosetta detail=%q", capabilities.Details["linux-rosetta"])
+	}
+	t.Logf("Rosetta for Linux: %s", capabilities.Details["linux-rosetta"])
 }
 
 func TestDarwinVMMRejectsInvalidMachineID(t *testing.T) {

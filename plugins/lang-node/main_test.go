@@ -40,6 +40,9 @@ func TestInspectRecognizesTypeScriptEntrypoint(t *testing.T) {
 	if !inspection.Match || inspection.Language != "node" {
 		t.Fatalf("inspection=%+v", inspection)
 	}
+	if inspection.Artifact != "index.ts" || inspection.Entrypoint != "index.ts" {
+		t.Fatalf("TypeScript entrypoint was not resolved: %+v", inspection)
+	}
 }
 
 func TestParseRootFlagRequiresRoot(t *testing.T) {

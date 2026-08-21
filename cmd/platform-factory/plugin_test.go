@@ -96,6 +96,28 @@ func TestPluginInstallAndRemoveRPCBundle(t *testing.T) {
 	}
 }
 
+func TestPluginInstallAndRemoveMachineOutput(t *testing.T) {
+	withTestPluginDir(t)
+	source, registry := t.TempDir(), t.TempDir()
+	writeRPCPluginBundle(t, source, "acme-json")
+	var stdout, stderr bytes.Buffer
+	if code := runPlugin([]string{"install", "--from", source, "--plugin-dir", registry, "--allow-unsigned", "--format", "json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("install code=%d stderr=%s", code, stderr.String())
+	}
+	document := requireCLIOutputV1(t, stdout.Bytes(), "operation", "resource", "name", "status", "path")
+	if string(document["operation"]) != `"install"` || string(document["name"]) != `"acme-json"` || string(document["status"]) != `"installed"` {
+		t.Fatalf("unexpected install output: %s", stdout.String())
+	}
+	stdout.Reset()
+	if code := runPlugin([]string{"remove", "--plugin-dir", registry, "--format", "json", "acme-json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("remove code=%d stderr=%s", code, stderr.String())
+	}
+	document = requireCLIOutputV1(t, stdout.Bytes(), "operation", "resource", "name", "status")
+	if string(document["operation"]) != `"remove"` || string(document["status"]) != `"removed"` {
+		t.Fatalf("unexpected remove output: %s", stdout.String())
+	}
+}
+
 // writeMinimalPluginModule writes the smallest possible standalone Go
 // module (no dependencies, so `go build` works fully offline) into dir,
 // for tests that exercise prepareSource's directory-source build path.
@@ -537,6 +559,19 @@ func TestRunPluginCreateSucceeds(t *testing.T) {
 	want := "scaffold --name myplugin --output /out --dialect ts"
 	if got != want {
 		t.Fatalf("recorded args = %q, want %q", got, want)
+	}
+}
+
+func TestRunPluginCreateMachineOutput(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	loadFakeScaffoldPlugin(t, "python", argsFile, 0)
+	var stdout, stderr bytes.Buffer
+	if code := runPluginCreate([]string{"--language", "python", "--output", "/out", "--format", "json", "myplugin"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	document := requireCLIOutputV1(t, stdout.Bytes(), "operation", "resource", "name", "status", "path")
+	if string(document["operation"]) != `"create"` || string(document["status"]) != `"created"` {
+		t.Fatalf("unexpected output: %s", stdout.String())
 	}
 }
 

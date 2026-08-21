@@ -5,21 +5,36 @@ package kvm
 import (
 	"encoding/binary"
 	"errors"
+	"io"
 	"os"
 	"testing"
 )
 
 type recordingBlockBackend struct {
-	data      []byte
-	syncCalls int
-	syncErr   error
+	data       []byte
+	syncCalls  int
+	syncErr    error
+	readLimit  int
+	readErr    error
+	writeLimit int
+	writeErr   error
 }
 
 func (b *recordingBlockBackend) ReadAt(p []byte, off int64) (int, error) {
-	return copy(p, b.data[off:]), nil
+	limit := len(p)
+	if b.readLimit > 0 && b.readLimit < limit {
+		limit = b.readLimit
+	}
+	n := copy(p[:limit], b.data[off:])
+	return n, b.readErr
 }
 func (b *recordingBlockBackend) WriteAt(p []byte, off int64) (int, error) {
-	return copy(b.data[off:], p), nil
+	limit := len(p)
+	if b.writeLimit > 0 && b.writeLimit < limit {
+		limit = b.writeLimit
+	}
+	n := copy(b.data[off:], p[:limit])
+	return n, b.writeErr
 }
 func (b *recordingBlockBackend) Sync() error { b.syncCalls++; return b.syncErr }
 
@@ -348,6 +363,66 @@ func TestVirtioBlkFlushReportsBackendResultToGuest(t *testing.T) {
 			}
 			if id, length := g.usedEntry(0, slot); id != 0 || length != 1 {
 				t.Fatalf("used entry={id:%d len:%d}", id, length)
+			}
+		})
+	}
+}
+
+func TestVirtioBlkInterruptedIOFailsClosed(t *testing.T) {
+	tests := []struct {
+		name      string
+		request   uint32
+		backend   *recordingBlockBackend
+		dataWrite bool
+	}{
+		{
+			name:      "short read with EOF",
+			request:   virtioBlkTypeIn,
+			backend:   &recordingBlockBackend{data: make([]byte, 4096), readLimit: 128, readErr: io.EOF},
+			dataWrite: true,
+		},
+		{
+			name:    "short write without backend error",
+			request: virtioBlkTypeOut,
+			backend: &recordingBlockBackend{data: make([]byte, 4096), writeLimit: 128},
+		},
+		{
+			name:      "read backend interruption",
+			request:   virtioBlkTypeIn,
+			backend:   &recordingBlockBackend{data: make([]byte, 4096), readErr: errors.New("injected read interruption")},
+			dataWrite: true,
+		},
+		{
+			name:    "write backend interruption",
+			request: virtioBlkTypeOut,
+			backend: &recordingBlockBackend{data: make([]byte, 4096), writeErr: errors.New("injected write interruption")},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			device, err := newVirtioBlkMMIODevice(BlockDeviceOptions{Backend: tc.backend, Capacity: 4096}, virtioMMIODeviceBaseAddress(0), virtioFirstDeviceIRQ)
+			if err != nil {
+				t.Fatal(err)
+			}
+			g := newTestVirtioMem(len(device.queues))
+			device.guestMemory = g.mem
+			device.raiseIRQ = func() {}
+			driveToDriverOK(t, device, g)
+			headerAddr := g.alloc(16)
+			binary.LittleEndian.PutUint32(g.mem[headerAddr:], tc.request)
+			dataAddr := g.alloc(512)
+			statusAddr := g.alloc(1)
+			g.writeDesc(0, 0, headerAddr, 16, virtqDescFlagNext, 1)
+			dataFlags := uint16(virtqDescFlagNext)
+			if tc.dataWrite {
+				dataFlags |= virtqDescFlagWrite
+			}
+			g.writeDesc(0, 1, dataAddr, 512, dataFlags, 2)
+			g.writeDesc(0, 2, statusAddr, 1, virtqDescFlagWrite, 0)
+			g.publish(0, 0)
+			reg32(t, device, virtioRegQueueNotify, true, 0)
+			if got := g.mem[statusAddr]; got != virtioBlkStatusIOErr {
+				t.Fatalf("status=%d, want VIRTIO_BLK_S_IOERR", got)
 			}
 		})
 	}

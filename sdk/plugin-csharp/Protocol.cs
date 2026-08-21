@@ -4,7 +4,7 @@
 // the plugin-side Server. Mirrors Go's sdk/plugin package: the same wire
 // protocol, the same v1.hello handshake, the same capability dispatch
 // (method "v1."+capability). A plugin written against either SDK passes
-// the exact same conformance suite (secure-oci-conformance plugin).
+// the exact same conformance suite (platform-factory plugin).
 //
 // No third-party dependencies - System.Text.Json only.
 using System.Text;

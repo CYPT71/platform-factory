@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "secure-oci-plugin"
+name = "platform-factory"
 version = "1.0.0"
 description = "SDK for out-of-process secure-oci language plugins: the versioned, length-prefixed JSON-RPC protocol plugins speak over stdin/stdout, and the plugin-side Server."
 readme = "README.md"

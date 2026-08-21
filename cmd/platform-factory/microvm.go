@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 
@@ -21,12 +22,12 @@ import (
 
 func runMicroVM(args []string, stdout, stderr io.Writer, execute microVMExecutor) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: platform-factory microvm <probe|create|delete|inspect-legacy-disk|logs|package|rbac|restart|run|run-legacy-disk|start|status|stop> [OPTIONS]")
+		fmt.Fprintln(stderr, "usage: platform-factory microvm <build-legacy-oci|machine-spec|probe|create|delete|extract-legacy-app|inspect-legacy-disk|logs|package|rbac|restart|run|run-legacy-disk|start|status|stop> [OPTIONS]")
 		return 2
 	}
 	action := args[0]
 	if action == "-h" || action == "--help" || action == "help" {
-		fmt.Fprintln(stdout, "usage: platform-factory microvm <probe|create|delete|inspect-legacy-disk|logs|package|rbac|restart|run|run-legacy-disk|start|status|stop> [OPTIONS]")
+		fmt.Fprintln(stdout, "usage: platform-factory microvm <build-legacy-oci|machine-spec|probe|create|delete|extract-legacy-app|inspect-legacy-disk|logs|package|rbac|restart|run|run-legacy-disk|start|status|stop> [OPTIONS]")
 		return 0
 	}
 	if action == "__run-native" {
@@ -52,6 +53,10 @@ func runMicroVM(args []string, stdout, stderr io.Writer, execute microVMExecutor
 	flags.Var(&publishes, "publish", "forward [IP:]HOST:GUEST[/tcp|udp]; repeatable")
 	flags.Var(&publishes, "port", "alias for --publish; repeatable; a single PORT remains supported")
 	flags.Var(&publishes, "p", "short alias for --publish; repeatable")
+	requirements := flags.String("requirements", "", "machine-spec: JSON result emitted by microvm-initramfs")
+	var volumeSources, dnsServers repeatedFlag
+	flags.Var(&volumeSources, "volume-source", "machine-spec: TARGET=ABSOLUTE_SOURCE or ro@TARGET=ABSOLUTE_SOURCE; repeatable")
+	flags.Var(&dnsServers, "dns", "machine-spec: DNS server IP; repeatable")
 	runner := flags.String("native-runner", "scripts/microvm/run-microvm.sh", "native backend runner")
 	requireNative := flags.Bool("require-native", false, "fail closed instead of falling back to the QEMU-based runner when the native KVM/HVF backend is not eligible (see nativeKVMEligible)")
 	legacyDiskRunner := flags.String("legacy-disk-runner", "scripts/microvm/run-legacy-disk.sh", "legacy-disk BIOS-boot runner")
@@ -60,6 +65,14 @@ func runMicroVM(args []string, stdout, stderr io.Writer, execute microVMExecutor
 	bootDiskOverride := flags.String("boot-disk", "", "run-legacy-disk/inspect-legacy-disk: which --disk is the boot/OS disk, when it can't be (or shouldn't be) auto-detected; must match one of --disk exactly")
 	reportDir := flags.String("report-dir", "reports", "inspect-legacy-disk: directory to write discovery.json/discovery.txt into")
 	strategy := flags.String("strategy", "auto", "inspect-legacy-disk: auto, container, microvm-oci, microvm-direct, vm-encapsulation, or unsupported")
+	volumeIndex := flags.Int("volume-index", 0, "extract-legacy-app: inventoried ext volume index")
+	var selectedPaths repeatedFlag
+	flags.Var(&selectedPaths, "include", "extract-legacy-app: absolute file path inside the disk; repeatable")
+	allowIncomplete := flags.Bool("allow-incomplete", false, "extract-legacy-app: explicitly approve extraction when metadata cannot be preserved")
+	includeSecrets := flags.Bool("include-secrets", false, "extract-legacy-app: explicitly include probable secret filenames")
+	legacyEntrypoint := flags.String("entrypoint", "", "build-legacy-oci: selected executable path inside the disk and image")
+	legacyTag := flags.String("tag", "latest", "build-legacy-oci: image tag")
+	legacyUser := flags.String("user", "", "build-legacy-oci: reviewed positive UID or UID:GID override")
 	bootPreparer := flags.String("boot-preparer", "scripts/microvm/prepare-kubevirt-boot.sh", "KubeVirt boot-context preparer")
 	output := flags.String("output", "", "new output directory for microvm package")
 	apply := flags.Bool("apply", false, "apply create output using kubectl")
@@ -99,6 +112,85 @@ func runMicroVM(args []string, stdout, stderr io.Writer, execute microVMExecutor
 	}
 	if action == "inspect-legacy-disk" {
 		return runInspectLegacyDisk(diskImages, *bootDiskOverride, *reportDir, vmdisk.ExecutionMode(*strategy), stdout, stderr)
+	}
+	if action == "extract-legacy-app" {
+		if len(diskImages) != 1 || len(selectedPaths) == 0 || *output == "" {
+			fmt.Fprintln(stderr, "platform-factory microvm extract-legacy-app: exactly one --disk, at least one --include and --output are required")
+			return 2
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			fmt.Fprintf(stderr, "platform-factory microvm extract-legacy-app: resolve executable: %v\n", err)
+			return 1
+		}
+		report, err := extractLegacyFilesIsolated(context.Background(), executable, diskParserRequest{DiskImages: diskImages, VolumeIndex: *volumeIndex, SelectedPaths: selectedPaths, Output: *output, AllowIncomplete: *allowIncomplete, IncludeSecrets: *includeSecrets})
+		if err != nil {
+			fmt.Fprintf(stderr, "platform-factory microvm extract-legacy-app: %v\n", err)
+			return 1
+		}
+		encoded, _ := json.MarshalIndent(report, "", "  ")
+		fmt.Fprintln(stdout, string(encoded))
+		return 0
+	}
+	if action == "build-legacy-oci" {
+		if len(diskImages) != 1 || len(selectedPaths) == 0 || *output == "" || *legacyEntrypoint == "" {
+			fmt.Fprintln(stderr, "platform-factory microvm build-legacy-oci: exactly one --disk, --entrypoint, at least one --include and --output are required")
+			return 2
+		}
+		entrypointSelected := false
+		for _, selected := range selectedPaths {
+			entrypointSelected = entrypointSelected || selected == *legacyEntrypoint
+		}
+		if !entrypointSelected {
+			fmt.Fprintln(stderr, "platform-factory microvm build-legacy-oci: --entrypoint must also be selected with --include")
+			return 2
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			fmt.Fprintf(stderr, "platform-factory microvm build-legacy-oci: resolve executable: %v\n", err)
+			return 1
+		}
+		outputParent := filepath.Dir(*output)
+		if err := os.MkdirAll(outputParent, 0o755); err != nil {
+			fmt.Fprintf(stderr, "platform-factory microvm build-legacy-oci: create output parent: %v\n", err)
+			return 1
+		}
+		staging, err := os.MkdirTemp(outputParent, ".pf-legacy-oci-")
+		if err != nil {
+			fmt.Fprintf(stderr, "platform-factory microvm build-legacy-oci: create staging directory: %v\n", err)
+			return 1
+		}
+		defer os.RemoveAll(staging)
+		extractionRoot := filepath.Join(staging, "extracted")
+		report, err := extractLegacyFilesIsolated(context.Background(), executable, diskParserRequest{DiskImages: diskImages, VolumeIndex: *volumeIndex, SelectedPaths: selectedPaths, Output: extractionRoot, AllowIncomplete: *allowIncomplete, IncludeSecrets: *includeSecrets, Entrypoint: *legacyEntrypoint})
+		if err != nil {
+			fmt.Fprintf(stderr, "platform-factory microvm build-legacy-oci: %v\n", err)
+			return 1
+		}
+		imageName := *image
+		if imageName == "" {
+			imageName = "legacy-app"
+		}
+		result, err := microvmapp.BuildLegacyOCI(microvmapp.LegacyOCIOptions{ExtractionRoot: extractionRoot, Report: report, Entrypoint: *legacyEntrypoint, Output: *output, Architecture: *architecture, Image: imageName, Tag: *legacyTag, RuntimeUser: *legacyUser})
+		if err != nil {
+			fmt.Fprintf(stderr, "platform-factory microvm build-legacy-oci: %v\n", err)
+			return 1
+		}
+		encoded, _ := json.MarshalIndent(struct {
+			APIVersion string                     `json:"api_version"`
+			Build      microvmapp.LegacyOCIResult `json:"build"`
+			Extraction vmdisk.ExtractionReport    `json:"extraction"`
+		}{APIVersion: cliOutputAPIVersion, Build: result, Extraction: report}, "", "  ")
+		fmt.Fprintln(stdout, string(encoded))
+		return 0
+	}
+	if action == "machine-spec" {
+		return runMachineSpec(machineSpecCLIOptions{
+			Name: *name, Requirements: *requirements, KernelDigest: *kernelDigest,
+			InitramfsDigest: *initramfsDigest, CommandLine: *commandLine,
+			MemoryMiB: *memory, VCPUs: *vcpus, Publishes: publishes,
+			VolumeSources: volumeSources, DNS: dnsServers,
+		}, stdout, stderr)
 	}
 	if action == "probe" {
 		if *backend != "native" {
@@ -351,7 +443,12 @@ func runInspectLegacyDisk(diskImages []string, bootDiskOverride, reportDir strin
 		fmt.Fprintln(stderr, "platform-factory microvm inspect-legacy-disk: at least one --disk is required")
 		return 2
 	}
-	result, err := microvmapp.InspectLegacyDisk(diskImages, bootDiskOverride, reportDir, strategy)
+	report, err := parseLegacyDisksForCLI(context.Background(), diskImages, bootDiskOverride)
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: %v\n", err)
+		return 1
+	}
+	result, err := microvmapp.CompleteLegacyDiskInspection(report, reportDir, strategy)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory microvm inspect-legacy-disk: %v\n", err)
 		if errors.Is(err, microvmapp.ErrCompatibilityReport) {

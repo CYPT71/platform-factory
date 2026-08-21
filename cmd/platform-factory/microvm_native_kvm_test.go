@@ -67,9 +67,11 @@ func TestMicroVMRunNativeKVMRealBoot(t *testing.T) {
 	}
 
 	hostPort := freeTCPPort(t)
+	hostUDPPort := freeUDPPort(t)
 	cmd := exec.Command(cliBinary, "microvm", "run",
 		"--backend=native", "--layout="+layoutDir,
 		"--publish", fmt.Sprintf("127.0.0.1:%d:8080", hostPort),
+		"--publish", fmt.Sprintf("127.0.0.1:%d:8053/udp", hostUDPPort),
 	)
 	// A new process group so a single signal to -pgid reaches both this
 	// process and the `__run-native` child it re-execs into - runNative's
@@ -98,6 +100,7 @@ func TestMicroVMRunNativeKVMRealBoot(t *testing.T) {
 	body, readErr := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	status := resp.StatusCode
+	udpResponse, udpErr := waitForUDPResponse(hostUDPPort, []byte("native udp"), 30*time.Second)
 
 	stopGroup(syscall.SIGTERM)
 	select {
@@ -110,6 +113,9 @@ func TestMicroVMRunNativeKVMRealBoot(t *testing.T) {
 
 	if readErr != nil {
 		t.Fatalf("read response body: %v", readErr)
+	}
+	if udpErr != nil || string(udpResponse) != "NATIVE UDP" {
+		t.Fatalf("UDP request did not reach the guest: response=%q err=%v; stdout=%s stderr=%s", udpResponse, udpErr, stdout.String(), stderr.String())
 	}
 	if status != http.StatusOK || string(body) != "ok\n" {
 		t.Fatalf("unexpected response status=%d body=%q; stdout=%s stderr=%s", status, body, stdout.String(), stderr.String())
@@ -141,4 +147,36 @@ func freeTCPPort(t *testing.T) int {
 	}
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	return listener.LocalAddr().(*net.UDPAddr).Port
+}
+
+func waitForUDPResponse(port int, payload []byte, timeout time.Duration) ([]byte, error) {
+	deadline := time.Now().Add(timeout)
+	address := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: port}
+	for time.Now().Before(deadline) {
+		conn, err := net.DialUDP("udp", nil, address)
+		if err != nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		_ = conn.SetDeadline(time.Now().Add(250 * time.Millisecond))
+		_, writeErr := conn.Write(payload)
+		response := make([]byte, 65535)
+		n, readErr := conn.Read(response)
+		conn.Close()
+		if writeErr == nil && readErr == nil {
+			return response[:n], nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("timed out waiting for UDP response on 127.0.0.1:%d", port)
 }

@@ -46,8 +46,8 @@ func nativeKVMEligible(ctx context.Context, spec microvm.Spec) (bool, string) {
 		return false, fmt.Sprintf("native backend (%s) does not support port forwarding", capabilities.Details["backend"])
 	}
 	for _, f := range spec.Forwards {
-		if f.Protocol != "tcp" {
-			return false, fmt.Sprintf("native backend only relays TCP forwards, got %q for port %d", f.Protocol, f.HostPort)
+		if f.Protocol != "tcp" && f.Protocol != "udp" {
+			return false, fmt.Sprintf("native backend only relays TCP or UDP forwards, got %q for port %d", f.Protocol, f.HostPort)
 		}
 	}
 	return true, ""

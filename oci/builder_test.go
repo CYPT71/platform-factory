@@ -396,6 +396,60 @@ func TestBuildWithExtraFilesPackagesADynamicallyLinkedStyleBinary(t *testing.T) 
 	}
 }
 
+func TestBuildCanPreserveLegacyModesAndOwnershipExplicitly(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "service")
+	extra := filepath.Join(dir, "config")
+	if err := os.WriteFile(binary, []byte("legacy-service"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(extra, []byte("configuration"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "image")
+	digest, err := Build(Options{Binary: binary, Output: output, Entrypoint: "/opt/app/service", BinaryMode: 0o750, BinaryUID: 1000, BinaryGID: 1001, PreserveBinaryOwnership: true, ExtraFiles: []ExtraFile{{Dest: "/opt/app/config", Source: extra, Mode: 0o640, UID: 2000, GID: 2001, PreserveOwnership: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestData, err := os.ReadFile(blobPath(output, digest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed manifest
+	if err := json.Unmarshal(manifestData, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	layer, err := os.Open(blobPath(output, parsed.Layers[0].Digest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer layer.Close()
+	gz, err := gzip.NewReader(layer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	type metadata struct {
+		mode     int64
+		uid, gid int
+	}
+	got := map[string]metadata{}
+	reader := tar.NewReader(gz)
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[header.Name] = metadata{header.Mode, header.Uid, header.Gid}
+	}
+	if got["opt/app/service"] != (metadata{0o750, 1000, 1001}) || got["opt/app/config"] != (metadata{0o640, 2000, 2001}) {
+		t.Fatalf("legacy metadata=%+v", got)
+	}
+}
+
 func TestBuildIsDeterministicWithExtraFiles(t *testing.T) {
 	t.Parallel()
 	build := func(dir string) string {

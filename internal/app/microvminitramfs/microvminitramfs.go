@@ -22,11 +22,13 @@ import (
 // Result is the outcome of a successful Assemble: the converted
 // rootfs's identity and the final initramfs's size.
 type Result struct {
-	ManifestDigest string `json:"manifest_digest"`
-	RootFSDigest   string `json:"rootfs_digest"`
-	Files          int    `json:"files"`
-	Bytes          int64  `json:"bytes"`
-	InitramfsBytes int64  `json:"initramfs_bytes"`
+	ManifestDigest  string   `json:"manifest_digest"`
+	RootFSDigest    string   `json:"rootfs_digest"`
+	Files           int      `json:"files"`
+	Bytes           int64    `json:"bytes"`
+	InitramfsBytes  int64    `json:"initramfs_bytes"`
+	RequiredPorts   []string `json:"required_ports,omitempty"`
+	RequiredVolumes []string `json:"required_volumes,omitempty"`
 }
 
 // Assemble converts layout's rootfs, installs initBinary as PID 1 (plus
@@ -62,8 +64,18 @@ func Assemble(layout, platform, reference, initBinary string, entrypoint []strin
 	if err != nil {
 		return Result{}, fmt.Errorf("convert rootfs: %w", err)
 	}
-	if err := rootfs.InstallInit(converted, initBinary, entrypoint); err != nil {
+	if len(convertResult.Runtime.UnsupportedOptions) != 0 {
+		return Result{}, fmt.Errorf("OCI options cannot be translated into the guest: %v", convertResult.Runtime.UnsupportedOptions)
+	}
+	process := convertResult.Runtime.Process
+	if len(entrypoint) != 0 {
+		process.Args = append([]string(nil), entrypoint...)
+	}
+	if err := rootfs.InstallInit(converted, initBinary, process.Args); err != nil {
 		return Result{}, fmt.Errorf("install init: %w", err)
+	}
+	if err := rootfs.InstallProcessConfig(converted, process); err != nil {
+		return Result{}, fmt.Errorf("install OCI process config: %w", err)
 	}
 
 	temporary, err := os.CreateTemp(parent, ".platform-factory-initramfs-*")
@@ -97,5 +109,6 @@ func Assemble(layout, platform, reference, initBinary string, entrypoint []strin
 		Files:          convertResult.Files,
 		Bytes:          convertResult.Bytes,
 		InitramfsBytes: info.Size(),
+		RequiredPorts:  append([]string(nil), convertResult.Runtime.Ports...), RequiredVolumes: append([]string(nil), convertResult.Runtime.Volumes...),
 	}, nil
 }

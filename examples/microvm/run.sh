@@ -2,7 +2,7 @@
 set -euo pipefail
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH= cd -- "$here/../.." && pwd)
-work=$(mktemp -d "${TMPDIR:-/tmp}/secure-oci-example-microvm.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-microvm.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 cd "$repo"
 go build -trimpath -o "$work/platform-factory" ./cmd/platform-factory

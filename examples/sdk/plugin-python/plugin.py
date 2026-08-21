@@ -6,12 +6,12 @@ example implements sdk/plugin.LanguageExtension and lets
 sdk/plugin.Runtime handle framing, handshake and dispatch, this example
 imports sdk/plugin-python's Server and does the same. Both speak the
 exact same wire protocol and pass the exact same conformance suite
-(secure-oci-conformance plugin).
+(platform-factory plugin).
 """
 import os
 import sys
 
-# In a real deployment, install the SDK (`pip install secure-oci-plugin`)
+# In a real deployment, install the SDK (`pip install platform-factory)
 # instead of this path shim; it exists only so this example runs directly
 # from a source checkout with no build step.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "sdk", "plugin-python"))

@@ -9,6 +9,10 @@ pf --version
 # 2. Quatre projets réellement vides avant l'ajout de leur unique source.
 DEMO_ROOT="${TMPDIR:-/tmp}/pf-demo-junior"
 mkdir -p "$DEMO_ROOT"/{go,python,javascript,typescript}
+export PLATFORM_FACTORY_LANG_PLUGIN_DIR="$DEMO_ROOT/.lang-plugins"
+export PLATFORM_FACTORY_PLUGIN_DIR="$DEMO_ROOT/.rpc-plugins"
+export PLATFORM_FACTORY_MARKETPLACE_DIR="$DEMO_ROOT/.marketplace"
+mkdir -p "$PLATFORM_FACTORY_LANG_PLUGIN_DIR" "$PLATFORM_FACTORY_PLUGIN_DIR" "$PLATFORM_FACTORY_MARKETPLACE_DIR"
 
 printf 'package main\nimport "fmt"\nfunc main(){fmt.Println("Bonjour Go")}\n' \
   > "$DEMO_ROOT/go/main.go"
@@ -33,4 +37,3 @@ done
 
 # Résultat attendu : Go/Python sont nommés tels quels ; JS/TS utilisent le
 # plugin Node, qui conserve index.js ou index.ts comme point d'entrée.
-

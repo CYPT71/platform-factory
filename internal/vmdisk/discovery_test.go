@@ -3,6 +3,7 @@ package vmdisk
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -123,5 +124,69 @@ func TestDiscoveryReportRenderTextIncludesKeyFields(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("RenderText output missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestDiscoveryDecisionJournalIsStructuredAndSecretFree(t *testing.T) {
+	disk := writeRawOSDisk(t, "token-super-secret.raw")
+	report, err := BuildDiscoveryReport([]string{disk}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(report.Decisions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := string(encoded)
+	for _, forbidden := range []string{disk, "token-super-secret", "credential", "password"} {
+		if strings.Contains(journal, forbidden) {
+			t.Fatalf("decision journal leaked %q: %s", forbidden, journal)
+		}
+	}
+	for _, code := range []string{"boot_disk_selection", "disk_format_detection", "volume_map", "boot_partition_scan"} {
+		if !strings.Contains(journal, code) {
+			t.Fatalf("decision journal missing %q: %s", code, journal)
+		}
+	}
+}
+
+func TestBuildDiscoveryReportInventoriesExtFilesystem(t *testing.T) {
+	disk, _ := buildExtFixture(t, "ext4", false)
+	report, err := BuildDiscoveryReport([]string{disk}, disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Disks) != 1 || len(report.Disks[0].Filesystems) != 1 {
+		t.Fatalf("missing filesystem inventory: %#v", report)
+	}
+	filesystem := report.Disks[0].Filesystems[0]
+	if filesystem.Filesystem != "ext4" || len(filesystem.Files) != 1 || report.Disks[0].VolumeMap.Volumes[0].Content != "ext4" {
+		t.Fatalf("unexpected filesystem inventory: %#v", report.Disks[0])
+	}
+	encoded, err := json.Marshal(report.Decisions)
+	if err != nil || !strings.Contains(string(encoded), "filesystem_inventory") {
+		t.Fatalf("missing filesystem decision: %s err=%v", encoded, err)
+	}
+}
+
+func TestBuildDiscoveryReportInventoriesFATFilesystem(t *testing.T) {
+	disk, _ := buildFATFixture(t, 16, false)
+	report, err := BuildDiscoveryReport([]string{disk}, disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Disks) != 1 || len(report.Disks[0].Filesystems) != 1 || report.Disks[0].Filesystems[0].Filesystem != "fat16" || report.Disks[0].VolumeMap.Volumes[0].Content != "fat16" {
+		t.Fatalf("missing FAT inventory: %#v", report.Disks)
+	}
+}
+
+func TestBuildDiscoveryReportInventoriesNTFSFilesystem(t *testing.T) {
+	disk, _ := buildNTFSFixture(t, false)
+	report, err := BuildDiscoveryReport([]string{disk}, disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Disks) != 1 || len(report.Disks[0].Filesystems) != 1 || report.Disks[0].Filesystems[0].Filesystem != "ntfs" || report.Disks[0].VolumeMap.Volumes[0].Content != "ntfs" {
+		t.Fatalf("missing NTFS inventory: %#v", report.Disks)
 	}
 }

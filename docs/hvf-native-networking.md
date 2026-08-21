@@ -3,9 +3,9 @@
 Tracks generalizing `pf microvm run/start`'s native-backend dispatch
 beyond Linux/KVM to also cover macOS's native Virtualization.framework
 backend (`internal/hypervisor/hvf`), including giving that backend its
-first network device. Written 2026-08-06 in a sandboxed environment with
-**no test kernel image and no code-signing entitlement available** - see
-"What is genuinely unverified" below before relying on any of this.
+first network device. The complete path is now tested on Apple-silicon
+hardware with an entitled binary, an arm64 Linux guest and real TCP and UDP
+traffic.
 
 ## What changed
 
@@ -48,69 +48,32 @@ first network device. Written 2026-08-06 in a sandboxed environment with
   was written; the KVM path's static `CONFIG_IP_PNP` behavior is
   unaffected by this addition.
 
-## What is genuinely unverified
+## Runtime evidence and remaining limits
 
-Be precise about this distinction when deciding how much to trust it:
-
-- **Compiles and passes real, non-skipped tests**: the Objective-C
-  bridge change (`vz_create_machine` correctly rejects a malformed MAC
-  address, in a real `go test` run, in this sandbox, no entitlement
-  needed - `TestRunLinuxHVFRejectsMalformedMACAddress`), the capability
-  report shape, the eligibility dispatch logic (all 4 originally-failing
-  tests now pass for real, exercising the actual `nativeKVMEligible`/
-  `runNative` dispatch code with a mocked executor), the DHCP-cmdline
-  gating logic (`cmdlineRequestsDHCP`), and the guest-IP-marker parsing
-  (`ipWatchingWriter`, including a split-across-writes case).
-- **Never executed at all, in any form, by anyone, as of this commit**:
-  whether `VZNATNetworkDeviceAttachment` + the kernel's `ip=dhcp` client
-  actually negotiate a working address; whether the host can actually
-  reach that address (NAT semantics on the current macOS version);
-  whether the serial console reliably delivers `cmd/microvm-init`'s
-  report line before the host's poll loop needs it; whether the overall
-  boot even completes at all under HVF with a network device attached
-  (previously, no HVF boot in this repo's test suite has ever had one).
-  None of this can be exercised without a real kernel image and a
-  code-signed, entitled binary - both absent from the environment that
-  wrote this feature.
+- `TestNativeHVFRealTCPAndUDP` builds the Linux/arm64 example OCI image,
+  boots it through `runNativeKVM`'s Darwin/HVF implementation, observes the
+  kernel DHCP lease and guest IP marker, then requires successful HTTP and
+  UDP echo responses through host loopback forwards.
+- `tests/microvm/test-hvf-network-local.sh` compiles and entitlement-signs
+  the exact CLI-package test binary. `ci-microvm.yml` runs the same gate.
+- The test exposed a real missing prerequisite: `/proc` was not mounted, so
+  PID 1 could not read `/proc/cmdline` and never reported its DHCP address.
+  `microvm-init` now mounts proc with `nosuid,nodev,noexec` before reporting.
+- Remaining limitation: `VZNATNetworkDeviceAttachment` gives the guest
+  outbound connectivity. There is not yet an outbound network-policy engine,
+  so this path must not be described as host-network isolated by default.
 
 ## How to verify on a real Mac
 
-1. **Build a real kernel + initramfs test fixture.**
-   `scripts/microvm/build-kernel.sh arm64 /tmp/kernel` (or `amd64` on
-   Intel) builds a kernel with the new `CONFIG_IP_PNP_DHCP`. Any Linux
-   initramfs works for `PLATFORM_FACTORY_TEST_INITRD`; the repo's own
-   `examples/sdk/microvm` or `assemble-initramfs.sh` output does.
-2. **Sign the test binary with the virtualization entitlement.**
-   `internal/hypervisor/hvf`'s own real-hardware tests
-   (`TestRunLinuxWithRealHVF`, `TestDarwinVMMWithRealHVF`) already
-   assume this - see `scripts/microvm/hvf.entitlements` and codesign the
-   compiled test binary (`go test -c`) with it, or build+sign
-   `platform-factory` itself before invoking `pf microvm run` directly.
-3. **Run the existing gated tests first** (isolate the new networking
-   code from the CLI dispatch layer):
+1. Build or restore `.cache/microvm/arm64/kernel` with
+   `scripts/microvm/build-kernel.sh arm64 .cache/microvm/arm64/kernel`.
+2. Run the native boot, Rosetta and network gates:
    ```sh
-   PLATFORM_FACTORY_TEST_KERNEL_IMAGE=/tmp/kernel \
-   PLATFORM_FACTORY_TEST_INITRD=/tmp/initramfs.cpio.gz \
-     go test ./internal/hypervisor/hvf/... -run RealHVF -v
+   tests/microvm/test-hvf-local.sh
+   tests/microvm/test-hvf-network-local.sh
    ```
-   These don't attach a network device yet (they call `RunLinuxHVF`
-   with an empty MAC) - passing confirms the *existing*, previously-real
-   boot path still works after this change's edits to the same function.
-4. **Then exercise networking specifically**: build an OCI layout with
+3. To exercise another workload, build an OCI layout with
    `platform-factory build`, then
-   `platform-factory microvm run --backend=native --layout <layout> --publish 8080:8080`
-   on the signed binary. Watch stderr for `phase=network guest reported
-   address=... starting N relay(s)`; if that line never appears, the
-   guest either never got a DHCP lease or the marker never reached the
-   serial console - check the kernel actually has `CONFIG_IP_PNP_DHCP`
-   compiled in (`zcat /proc/config.gz | grep IP_PNP` inside a running
-   guest, or `strings` the kernel image for the string) before assuming
-   the Go/ObjC code is at fault.
-5. **Report back what broke.** The most likely failure points, in
-   rough order of suspicion: (a) the kernel not actually getting a DHCP
-   lease at all (Virtualization.framework's DHCP server behavior is the
-   least-controlled part of this), (b) the host being unable to reach
-   the guest's NAT-assigned address even once it has one, (c) something
-   in the ObjC bridge's device configuration being subtly wrong in a way
-   that only surfaces at `validateWithError:`/`startWithCompletionHandler:`
-   time, which this session could never reach.
+   `platform-factory microvm run --backend=native --layout <layout>
+   --publish 8080:8080 --publish 5353:53/udp` on an entitlement-signed
+   binary.

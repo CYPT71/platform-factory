@@ -164,7 +164,10 @@ func (blk *virtioBlkDevice) handleRequest(chain []virtqDescriptor) (uint32, erro
 			n, err := blk.backend.ReadAt(d.buf, offset)
 			written += uint32(n)
 			offset += int64(n)
-			if err != nil && !errors.Is(err, io.EOF) {
+			// ReaderAt must fill the requested descriptor. A short read is an
+			// I/O failure even when the backend reports the conventional EOF;
+			// otherwise stale guest memory would be presented as valid disk data.
+			if n != len(d.buf) || (err != nil && !errors.Is(err, io.EOF)) {
 				result = virtioBlkStatusIOErr
 				break
 			}
@@ -177,7 +180,7 @@ func (blk *virtioBlkDevice) handleRequest(chain []virtqDescriptor) (uint32, erro
 		for _, d := range data {
 			n, err := blk.backend.WriteAt(d.buf, offset)
 			offset += int64(n)
-			if err != nil {
+			if n != len(d.buf) || err != nil {
 				result = virtioBlkStatusIOErr
 				break
 			}

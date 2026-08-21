@@ -5,6 +5,9 @@ DÉMO SENIOR — audit multi-stack et pipeline observable
 # propres créés par demo-intermediaire.txt ; seul Go possède aujourd'hui une
 # preuve OCI complète, les trois autres gardent leurs preuves d'initialisation.
 DEMO_ROOT="${TMPDIR:-/tmp}/pf-demo-intermediaire"
+export PLATFORM_FACTORY_LANG_PLUGIN_DIR="$DEMO_ROOT/.lang-plugins"
+export PLATFORM_FACTORY_PLUGIN_DIR="$DEMO_ROOT/.rpc-plugins"
+export PLATFORM_FACTORY_MARKETPLACE_DIR="$DEMO_ROOT/.marketplace"
 
 # 1. Audit homogène Go, Python, JavaScript et TypeScript.
 for stack in go python javascript typescript; do

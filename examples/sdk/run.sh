@@ -2,7 +2,7 @@
 set -euo pipefail
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH= cd -- "$here/../.." && pwd)
-work=$(mktemp -d "${TMPDIR:-/tmp}/secure-oci-example-sdk.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-sdk.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 cd "$repo"
 go run ./examples/sdk/pipeline ./examples/pipeline.json

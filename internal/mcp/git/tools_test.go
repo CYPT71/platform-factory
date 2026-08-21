@@ -29,6 +29,17 @@ func TestStatusToolHandlerReportsBranchAndDirtyState(t *testing.T) {
 	}
 }
 
+func TestStatusResourceHandlerReportsJSON(t *testing.T) {
+	dir := newTestRepo(t)
+	body, mimeType, err := StatusResourceHandler(dir)(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mimeType != "application/json" || !strings.Contains(body, `"branch"`) {
+		t.Fatalf("mimeType=%q body=%s", mimeType, body)
+	}
+}
+
 func TestStatusToolHandlerPropagatesAnErrorForANonRepoDir(t *testing.T) {
 	dir := t.TempDir() // deliberately never `git init`-ed
 	handler := StatusToolHandler(dir)

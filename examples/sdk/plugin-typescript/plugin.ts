@@ -6,7 +6,7 @@
 // handle framing, handshake and dispatch, this example imports
 // sdk/plugin-js's Server (and its index.d.ts types) and does the same.
 // Both speak the exact same wire protocol and pass the exact same
-// conformance suite (secure-oci-conformance plugin).
+// conformance suite (platform-factory plugin).
 //
 // In a real deployment, install the SDK (`npm install @secure-oci/plugin-sdk`)
 // instead of this relative path; it exists only so this example compiles

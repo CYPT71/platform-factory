@@ -68,8 +68,8 @@ func main() { fmt.Println("hello world") }
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(lock)) != "{\n  \"version\": 1\n}" {
-		t.Fatalf("non-minimal pf.lock:\n%s", lock)
+	if !strings.Contains(string(lock), `"version": 2`) || !strings.Contains(string(lock), `"plan_digest": "sha256:`) {
+		t.Fatalf("pf.lock does not pin the canonical plan:\n%s", lock)
 	}
 	plan := run("build", "--dry-run")
 	if !strings.Contains(plan, `"valid": true`) || !strings.Contains(plan, "main.go") {
@@ -207,7 +207,9 @@ func TestPFInitPythonNodeAndDotnetExperience(t *testing.T) {
 			command.Dir = root
 			command.Env = append(os.Environ(), "PLATFORM_FACTORY_LANG_PLUGIN_DIR="+pluginDir)
 			plan, buildErr := command.CombinedOutput()
-			if buildErr == nil || !strings.Contains(string(plan), `"valid": false`) || !strings.Contains(string(plan), "pf.yaml has no runtime field set") {
+			if buildErr == nil || !strings.Contains(string(plan), `"valid": false`) ||
+				!strings.Contains(string(plan), `"name": "language-runtime"`) ||
+				!strings.Contains(string(plan), "pf plugin provision-runtime") {
 				t.Fatalf("interpreted build preflight must fail safely: err=%v\n%s", buildErr, plan)
 			}
 			if test.language == "python" {
@@ -215,7 +217,7 @@ func TestPFInitPythonNodeAndDotnetExperience(t *testing.T) {
 				buildAttempt.Dir = root
 				buildAttempt.Env = append(os.Environ(), "PLATFORM_FACTORY_LANG_PLUGIN_DIR="+pluginDir)
 				buildOutput, err := buildAttempt.CombinedOutput()
-				if err == nil || !strings.Contains(string(buildOutput), "capability preflight failed") || !strings.Contains(string(buildOutput), "pf doctor") {
+				if err == nil || !strings.Contains(string(buildOutput), "capability preflight failed") || !strings.Contains(string(buildOutput), "pf plugin provision-runtime") {
 					t.Fatalf("real build must stop at the same actionable preflight: err=%v\n%s", err, buildOutput)
 				}
 				publish := exec.Command(pfBinary, "publish", "--dry-run", "--allow-incomplete-evidence", "registry.example/hello:v1")

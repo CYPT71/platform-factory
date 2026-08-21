@@ -23,6 +23,7 @@
 /.config
 /.artifacts
 /bin
+.pf-mcp-scratch/
 
 # TypeScript plugin example: compiled locally by its run.sh, never committed.
 /examples/sdk/plugin-typescript/node_modules/

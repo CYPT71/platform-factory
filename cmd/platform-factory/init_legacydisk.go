@@ -99,7 +99,7 @@ func isVMDiskAmbiguity(err error) bool {
 }
 
 func legacyDiskConfigFor(dir string, disks []vmdisk.DiskInfo, bootIndex int) *project.LegacyDiskConfig {
-	config := &project.LegacyDiskConfig{Boot: relativeTo(dir, disks[bootIndex].Path)}
+	config := &project.LegacyDiskConfig{Boot: relativeTo(dir, disks[bootIndex].Path), Strategy: "unsupported"}
 	for i, disk := range disks {
 		if i == bootIndex {
 			continue

@@ -82,9 +82,9 @@ func (r *Repo) runGH(ctx context.Context, args ...string) (string, error) {
 // Status is a repository snapshot: current branch, dirty/clean, and the
 // short status lines a caller can present without shelling out itself.
 type Status struct {
-	Branch    string
-	Dirty     bool
-	Porcelain string
+	Branch    string `json:"branch"`
+	Dirty     bool   `json:"dirty"`
+	Porcelain string `json:"porcelain"`
 }
 
 // Status reports the working tree's current branch and dirty state.

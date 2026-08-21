@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/CYPT71/platform-factory/cmd/tui/runtimetui"
 	projectapp "github.com/CYPT71/platform-factory/internal/app/project"
 	"github.com/CYPT71/platform-factory/internal/app/provisionruntime"
+	"github.com/CYPT71/platform-factory/internal/atomicfile"
 	"github.com/CYPT71/platform-factory/internal/project"
 	"github.com/CYPT71/platform-factory/sdk/langplugin"
 )
@@ -45,13 +47,14 @@ func runPluginProvisionRuntime(ctx context.Context, args []string, stdout, stder
 	image := flags.String("image", "", "digest-pinned base image to pull the runtime from, e.g. python@sha256:...")
 	dir := flags.String("dir", ".", "project directory")
 	architecture := flags.String("arch", "amd64", "target architecture")
+	format := flags.String("format", "text", "output format: text or json")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 2
 	}
-	if *language == "" || *image == "" {
+	if *language == "" || *image == "" || !validOutputFormat(*format) {
 		fmt.Fprintln(stderr, "platform-factory plugin provision-runtime: --language and --image are required")
 		return 2
 	}
@@ -91,6 +94,27 @@ func runPluginProvisionRuntime(ctx context.Context, args []string, stdout, stder
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory plugin provision-runtime: %v\n", err)
 		return 1
+	}
+	if err := refreshProvisionedProjectLock(loaded, &project.LockedInput{Name: *image, Digest: digest}); err != nil {
+		fmt.Fprintf(stderr, "platform-factory plugin provision-runtime: update project lock: %v\n", err)
+		return 1
+	}
+	if *format == "json" {
+		result := struct {
+			APIVersion  string `json:"api_version"`
+			Operation   string `json:"operation"`
+			Resource    string `json:"resource"`
+			Language    string `json:"language"`
+			Runtime     string `json:"runtime"`
+			Image       string `json:"image"`
+			ImageDigest string `json:"image_digest"`
+			Status      string `json:"status"`
+		}{cliOutputAPIVersion, "provision_runtime", "plugin_runtime", *language, manifest.Runtime, *image, digest, "provisioned"}
+		if err := json.NewEncoder(stdout).Encode(result); err != nil {
+			fmt.Fprintf(stderr, "platform-factory plugin provision-runtime: encode output: %v\n", err)
+			return 1
+		}
+		return 0
 	}
 	fmt.Fprintf(stdout, "provisioned runtime %s from %s@%s\n", manifest.Runtime, *image, digest)
 	fmt.Fprintln(stdout, "next: pf freeze, then pf build")
@@ -151,6 +175,10 @@ func autoProvisionRuntime(ctx context.Context, dir, language string, stdout, std
 			fmt.Fprintf(stderr, "platform-factory init: provision runtime from host: %v\n", err)
 			return
 		}
+		if err := refreshProvisionedProjectLock(loaded, nil); err != nil {
+			fmt.Fprintf(stderr, "platform-factory init: update project lock: %v\n", err)
+			return
+		}
 		fmt.Fprintln(stdout, "provisioned runtime from the host interpreter at "+hostCandidate)
 	case runtimetui.SourceImage:
 		scratchDir, err := os.MkdirTemp("", "platform-factory-provision-runtime-*")
@@ -170,6 +198,42 @@ func autoProvisionRuntime(ctx context.Context, dir, language string, stdout, std
 			fmt.Fprintf(stderr, "platform-factory init: provision runtime: %v\n", err)
 			return
 		}
+		if err := refreshProvisionedProjectLock(loaded, &project.LockedInput{Name: choice.Image, Digest: digest}); err != nil {
+			fmt.Fprintf(stderr, "platform-factory init: update project lock: %v\n", err)
+			return
+		}
 		fmt.Fprintf(stdout, "provisioned runtime from %s@%s\n", choice.Image, digest)
 	}
+}
+
+func refreshProvisionedProjectLock(loaded project.Loaded, base *project.LockedInput) error {
+	lockPath := loaded.AdjacentLockPath()
+	lock, err := project.LoadLock(lockPath)
+	if errors.Is(err, os.ErrNotExist) || lock.Version == 1 {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(loaded.File)
+	if err != nil {
+		return err
+	}
+	lock.PlanDigest, err = project.CanonicalManifestDigest(raw)
+	if err != nil {
+		return err
+	}
+	if base != nil {
+		filtered := lock.Bases[:0]
+		for _, existing := range lock.Bases {
+			if existing.Name != base.Name {
+				filtered = append(filtered, existing)
+			}
+		}
+		lock.Bases = append(filtered, *base)
+	}
+	if err := lock.Validate(); err != nil {
+		return err
+	}
+	return atomicfile.WriteJSONSensitive(lockPath, lock)
 }

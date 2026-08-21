@@ -23,6 +23,22 @@ func StatusToolHandler(repoDir string) func(context.Context, json.RawMessage) (s
 	}
 }
 
+// StatusResourceHandler returns the live pf://git/status resource using
+// the same structured status calculation as pf_git_status.
+func StatusResourceHandler(repoDir string) func(context.Context) (string, string, error) {
+	return func(ctx context.Context) (string, string, error) {
+		status, err := New(repoDir).Status(ctx)
+		if err != nil {
+			return "", "", err
+		}
+		encoded, err := json.MarshalIndent(status, "", "  ")
+		if err != nil {
+			return "", "", err
+		}
+		return string(encoded), "application/json", nil
+	}
+}
+
 type prepareBranchArguments struct {
 	Name string `json:"name"`
 }

@@ -61,8 +61,9 @@ type Config struct {
 
 // LegacyDiskConfig records relative legacy VM disk paths discovered by init.
 type LegacyDiskConfig struct {
-	Boot string   `yaml:"boot" json:"boot"`
-	Data []string `yaml:"data,omitempty" json:"data,omitempty"`
+	Boot     string   `yaml:"boot" json:"boot"`
+	Data     []string `yaml:"data,omitempty" json:"data,omitempty"`
+	Strategy string   `yaml:"strategy" json:"strategy"`
 }
 
 type Dependency struct {
@@ -213,6 +214,11 @@ func (loaded *Loaded) defaults() {
 	if config.Network == "" {
 		config.Network = "none"
 	}
+	// Configurations written before the retained legacy plan field existed
+	// remain readable, but fail closed instead of inferring a migration mode.
+	if config.LegacyDisks != nil && config.LegacyDisks.Strategy == "" {
+		config.LegacyDisks.Strategy = "unsupported"
+	}
 }
 
 func (loaded Loaded) Validate() error {
@@ -254,6 +260,13 @@ func (loaded Loaded) Validate() error {
 		if config.Artifact == "" && config.Runtime == "" {
 			return errors.New(`platform-factory.yaml is missing "artifact" - add a line like artifact: path/to/your/built/executable, ` +
 				`relative to this file`)
+		}
+	}
+	if config.LegacyDisks != nil {
+		switch config.LegacyDisks.Strategy {
+		case "container", "microvm-oci", "microvm-direct", "vm-encapsulation", "unsupported":
+		default:
+			return errors.New("legacy_disks.strategy must be container, microvm-oci, microvm-direct, vm-encapsulation, or unsupported")
 		}
 	}
 	if config.Isolation != "container" && config.Isolation != "microvm" {

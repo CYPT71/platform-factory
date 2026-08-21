@@ -70,12 +70,8 @@ func runNativeKVM(ctx context.Context, layoutDir string, memoryMiB int, forwards
 	if err != nil {
 		return fmt.Errorf("convert rootfs: %w", err)
 	}
-	entrypoint, err := readEntrypoint(layoutDir, convertResult.ManifestDigest)
-	if err != nil {
+	if err := installNativeRuntimeContract(convertedRoot, initBinary, convertResult.Runtime, forwards); err != nil {
 		return err
-	}
-	if err := rootfs.InstallInit(convertedRoot, initBinary, entrypoint); err != nil {
-		return fmt.Errorf("install init: %w", err)
 	}
 
 	nativeLog(stderr, "phase=initramfs")
@@ -146,12 +142,16 @@ func runNativeKVM(ctx context.Context, layoutDir string, memoryMiB int, forwards
 		hostAddr := net.JoinHostPort(hostIP, strconv.Itoa(f.HostPort))
 		guestAddr := net.JoinHostPort(nativeGuestIP, strconv.Itoa(f.GuestPort))
 		relayGroup.Add(1)
-		go func(hostAddr, guestAddr string) {
+		go func(protocol, hostAddr, guestAddr string) {
 			defer relayGroup.Done()
-			if err := forward.Relay(relayCtx, hostAddr, guestAddr); err != nil {
-				nativeLog(stderr, "phase=forward error host=%s guest=%s err=%v", hostAddr, guestAddr, err)
+			relay := forward.Relay
+			if protocol == "udp" {
+				relay = forward.RelayUDP
 			}
-		}(hostAddr, guestAddr)
+			if err := relay(relayCtx, hostAddr, guestAddr); err != nil {
+				nativeLog(stderr, "phase=forward error protocol=%s host=%s guest=%s err=%v", protocol, hostAddr, guestAddr, err)
+			}
+		}(f.Protocol, hostAddr, guestAddr)
 	}
 	defer relayGroup.Wait()
 

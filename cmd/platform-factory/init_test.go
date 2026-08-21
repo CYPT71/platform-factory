@@ -526,11 +526,37 @@ func TestRunInitDetectsSingleBootableLegacyDiskAutomatically(t *testing.T) {
 	if loaded.Config.LegacyDisks == nil || loaded.Config.LegacyDisks.Boot != "disk.raw" {
 		t.Fatalf("LegacyDisks=%+v", loaded.Config.LegacyDisks)
 	}
+	if loaded.Config.LegacyDisks.Strategy != "unsupported" {
+		t.Fatalf("Strategy=%q, want fail-closed unsupported", loaded.Config.LegacyDisks.Strategy)
+	}
 	// No application source exists here, only the disk - the config
 	// must not carry a made-up language/artifact just to satisfy the
 	// schema (see the LegacyDisks exemption in project.Validate).
 	if loaded.Config.Language != "" || loaded.Config.Artifact != "" {
 		t.Fatalf("Language=%q Artifact=%q, want both empty for a pure legacy-disk project", loaded.Config.Language, loaded.Config.Artifact)
+	}
+}
+
+func TestRunInitRetainsExplicitLegacyStrategy(t *testing.T) {
+	dir := t.TempDir()
+	writeRawOSDiskFixture(t, filepath.Join(dir, "disk.raw"))
+
+	var stdout, stderr bytes.Buffer
+	if code := runInit([]string{"--legacy-strategy=vm-encapsulation", dir}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	loaded, err := project.Load(filepath.Join(dir, "pf.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Config.LegacyDisks == nil || loaded.Config.LegacyDisks.Strategy != "vm-encapsulation" {
+		t.Fatalf("LegacyDisks=%+v", loaded.Config.LegacyDisks)
+	}
+
+	other := t.TempDir()
+	var invalidErr bytes.Buffer
+	if code := runInit([]string{"--legacy-strategy=guess", other}, nil, io.Discard, &invalidErr); code != 2 || !strings.Contains(invalidErr.String(), "--legacy-strategy") {
+		t.Fatalf("invalid strategy code=%d stderr=%s", code, invalidErr.String())
 	}
 }
 

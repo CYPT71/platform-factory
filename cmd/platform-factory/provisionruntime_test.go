@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -55,6 +57,38 @@ func TestRunPluginProvisionRuntimeRequiresLanguageAndImage(t *testing.T) {
 		if code := runPluginProvisionRuntime(context.Background(), args, &stdout, &stderr); code != 2 {
 			t.Fatalf("args=%v code=%d stderr=%s", args, code, stderr.String())
 		}
+	}
+}
+
+func TestRefreshProvisionedProjectLockPinsChangedPlanAndBase(t *testing.T) {
+	loaded := loadRuntimeTestProject(t)
+	raw, err := os.ReadFile(loaded.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := project.CanonicalManifestDigest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(project.Lock{Version: 2, PlanDigest: digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProjectTestFile(t, loaded.AdjacentLockPath(), string(encoded), 0o600)
+	updated := append(raw, []byte("runtime: runtime/python\n")...)
+	if err := os.WriteFile(loaded.File, updated, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base := project.LockedInput{Name: "python@sha256:source", Digest: "sha256:" + strings.Repeat("a", 64)}
+	if err := refreshProvisionedProjectLock(loaded, &base); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := project.LoadLock(loaded.AdjacentLockPath())
+	if err != nil || len(lock.Bases) != 1 || lock.Bases[0] != base {
+		t.Fatalf("lock=%+v err=%v", lock, err)
+	}
+	if err := loaded.VerifyAdjacentLock(); err != nil {
+		t.Fatalf("updated plan did not verify: %v", err)
 	}
 }
 

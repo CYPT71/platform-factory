@@ -24,20 +24,26 @@ type releaseVerification = verify.VerificationResult
 // at all.
 //
 // Trust is never inferred from an envelope's own claimed key ID: the
-// caller must pin at least one expected public key via --trusted-key or
-// --key-dir/--key-name, matching this project's threat model (T10 in
-// Threat-Model-and-Residual-Risks.md) that verification must be against
-// a specific pinned key, not an open trust root.
+// caller must pin an expected public key via --trusted-key/--key-dir or an
+// explicit X.509 root plus leaf chain. This matches the project's T10 threat
+// model: verification uses caller-selected trust, never a key or root claimed
+// by the envelope itself.
 func runVerifyRelease(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("verify-release", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	signatureFile := flags.String("signature", "", "DSSE envelope JSON for the published subject signature")
 	provenanceFile := flags.String("provenance", "", "provenance predicate JSON, signed (DSSE envelope) or raw")
+	journalFile := flags.String("journal", "", "pipeline journal that --provenance must match exactly")
+	builderID := flags.String("builder-id", "https://platform-factory.dev/builder/v1", "expected builder identity when validating --journal")
 	sbomFile := flags.String("sbom", "", "SBOM document JSON")
 	policyFile := flags.String("policy", "", "native publication policy JSON")
 	evidenceFile := flags.String("evidence", "", "verified build evidence JSON evaluated by --policy")
 	var trustedKeyFlags stringList
+	var intermediateCertificates, rootCertificates stringList
 	flags.Var(&trustedKeyFlags, "trusted-key", "pinned signer, ed25519:BASE64URL; repeatable")
+	certificateFile := flags.String("certificate", "", "PEM leaf certificate whose validated Ed25519 key may verify DSSE evidence")
+	flags.Var(&intermediateCertificates, "intermediate-certificate", "PEM intermediate certificate; repeatable")
+	flags.Var(&rootCertificates, "root-certificate", "explicit trusted PEM root certificate; repeatable")
 	keyDir := flags.String("key-dir", "", "load one more trusted key from a local signing.FileKeyStore directory")
 	keyName := flags.String("key-name", "release", "key name to load from --key-dir")
 	sourceReference := flags.String("source-ref", "", "reference to select from a multi-image layout")
@@ -63,19 +69,28 @@ func runVerifyRelease(args []string, stdout, stderr io.Writer) int {
 			"--provenance, --policy and --evidence (or explicitly use --allow-incomplete-evidence for development)")
 		return 2
 	}
+	if *journalFile != "" && *provenanceFile == "" {
+		fmt.Fprintln(stderr, "platform-factory verify-release: --journal requires --provenance")
+		return 2
+	}
 
 	svc := verify.New()
 	result, err := svc.Verify(verify.VerifyOptions{
-		LayoutPath:      flags.Arg(0),
-		SourceReference: *sourceReference,
-		SignatureFile:   *signatureFile,
-		ProvenanceFile:  *provenanceFile,
-		SBOMFile:        *sbomFile,
-		PolicyFile:      *policyFile,
-		EvidenceFile:    *evidenceFile,
-		TrustedKeyFlags: trustedKeyFlags,
-		KeyDir:          *keyDir,
-		KeyName:         *keyName,
+		LayoutPath:        flags.Arg(0),
+		SourceReference:   *sourceReference,
+		SignatureFile:     *signatureFile,
+		ProvenanceFile:    *provenanceFile,
+		JournalFile:       *journalFile,
+		BuilderID:         *builderID,
+		SBOMFile:          *sbomFile,
+		PolicyFile:        *policyFile,
+		EvidenceFile:      *evidenceFile,
+		TrustedKeyFlags:   trustedKeyFlags,
+		KeyDir:            *keyDir,
+		KeyName:           *keyName,
+		CertificateFile:   *certificateFile,
+		IntermediateFiles: intermediateCertificates,
+		RootFiles:         rootCertificates,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory verify-release: %v\n", err)

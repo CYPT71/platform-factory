@@ -7,6 +7,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -113,6 +116,74 @@ func TestRelayHTTPRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRelayUDPPreservesClientSessionsAndCancelsCleanly(t *testing.T) {
+	guest, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guest.Close()
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, peer, err := guest.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_, _ = guest.WriteToUDP(bytes.ToUpper(buf[:n]), peer)
+		}
+	}()
+
+	reserved, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostAddr := reserved.LocalAddr().String()
+	reserved.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RelayUDP(ctx, hostAddr, guest.LocalAddr().String()) }()
+
+	for clientIndex := 0; clientIndex < 2; clientIndex++ {
+		client, err := net.Dial("udp", hostAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		message := []byte{byte('a' + clientIndex)}
+		got := make([]byte, 1)
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if err := client.SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = client.Write(message)
+			if _, err := io.ReadFull(client, got); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("UDP relay did not become ready")
+			}
+		}
+		client.Close()
+		if got[0] != message[0]-'a'+'A' {
+			t.Fatalf("client %d response=%q", clientIndex, got)
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("UDP relay did not release sessions after cancellation")
+	}
+	listener, err := net.ListenPacket("udp", hostAddr)
+	if err != nil {
+		t.Fatalf("UDP host port remained allocated after cancellation: %v", err)
+	}
+	listener.Close()
+}
+
 func TestRelayDialFailureClosesConnectionWithoutCrashing(t *testing.T) {
 	unreachable := freeListener(t)
 	guestAddr := unreachable.Addr().String()
@@ -143,6 +214,49 @@ func TestRelayReturnsErrorOnListenFailure(t *testing.T) {
 	defer busy.Close()
 	if err := Relay(context.Background(), busy.Addr().String(), "127.0.0.1:0"); err == nil {
 		t.Fatal("expected an error binding an already-bound address")
+	}
+}
+
+// TestRelayCrashLeavesNoRedirectOrPort proves cleanup does not depend on a
+// defer in the relay process. SIGKILL bypasses Go cleanup entirely; because
+// forwarding is represented only by process-owned sockets (never persistent
+// iptables/pf state), the exact host port must be bindable again afterwards.
+func TestRelayCrashLeavesNoRedirectOrPort(t *testing.T) {
+	reserved := freeListener(t)
+	address := reserved.Addr().String()
+	reserved.Close()
+	child := exec.Command(os.Args[0], "-test.run=^TestRelayCrashHelper$", "-test.count=1")
+	child.Env = append(os.Environ(), "PLATFORM_FACTORY_RELAY_CRASH_HELPER=1", "PLATFORM_FACTORY_RELAY_CRASH_ADDR="+address)
+	var output bytes.Buffer
+	child.Stdout = &output
+	child.Stderr = &output
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	}()
+	waitListening(t, address)
+	if err := child.Process.Signal(syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Wait(); err == nil {
+		t.Fatal("SIGKILLed relay helper exited successfully")
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("crashed relay left host port or redirect state behind: %v; output=%s", err, output.String())
+	}
+	listener.Close()
+}
+
+func TestRelayCrashHelper(t *testing.T) {
+	if os.Getenv("PLATFORM_FACTORY_RELAY_CRASH_HELPER") != "1" {
+		t.Skip("subprocess helper")
+	}
+	if err := Relay(context.Background(), os.Getenv("PLATFORM_FACTORY_RELAY_CRASH_ADDR"), "127.0.0.1:1"); err != nil {
+		t.Fatal(err)
 	}
 }
 

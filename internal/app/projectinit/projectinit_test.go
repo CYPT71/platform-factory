@@ -480,9 +480,9 @@ func TestBuildPlanCoversExistingAndLegacyInputs(t *testing.T) {
 
 func TestRenderConfigIncludesLegacyDisks(t *testing.T) {
 	rendered := string(renderConfig(Ecosystem{}, false, &project.LegacyDiskConfig{
-		Boot: `disk"boot.qcow2`, Data: []string{"data-a.raw", "data-b.raw"},
+		Boot: `disk"boot.qcow2`, Data: []string{"data-a.raw", "data-b.raw"}, Strategy: "vm-encapsulation",
 	}, testObservations().GeneratedAt))
-	for _, want := range []string{"legacy_disks:", "boot:", "data-a.raw", "data-b.raw"} {
+	for _, want := range []string{"legacy_disks:", "boot:", "strategy: \"vm-encapsulation\"", "data-a.raw", "data-b.raw"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("rendered config missing %q: %s", want, rendered)
 		}

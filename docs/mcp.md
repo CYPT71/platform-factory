@@ -74,7 +74,7 @@ image works:
       "args": [
         "run", "--rm", "-i",
         "-v", "/path/to/platform-factory:/workspace",
-        "ghcr.io/cypt71/secure-oci-base-mcp:latest",
+        "ghcr.io/cypt71/platform-factory-mcp:latest",
         "mcp", "serve", "--repo", "/workspace"
       ]
     }
@@ -105,7 +105,7 @@ also contain the target project:
         "run", "--rm", "-i",
         "-v", "/path/to/platform-factory:/workspace",
         "-v", "/path/to/my-app:/app",
-        "ghcr.io/cypt71/secure-oci-base-mcp:latest",
+        "ghcr.io/cypt71/platform-factory-mcp:latest",
         "mcp", "serve", "--repo", "/workspace"
       ]
     }
@@ -200,8 +200,8 @@ itself the canonical upstream. `pf_core_create_pr` also accepts a per-call
 | `pf_project_inspect` | read | Module, version, git branch/dirty state, validation commands, and (at `depth: detailed`) top-level components. |
 | `pf_plugin_list` | read | Every `plugins/<name>` directory, classified `rpc` (has `plugin.json`) or `language-command`. |
 | `pf_plugin_inspect` | read | One plugin's manifest, module kind, and test files. |
-| `pf_plugin_create` | primitive | Scaffold a new RPC plugin: `plugin.json`, README, go.mod, and a `cmd/platform-factory-<name>/main.go` with a real `sdk/plugin.Server` and one handler stub per requested capability. |
-| `pf_plugin_validate` | read | Manifest schema, executable digest, a real `go build` of the plugin's own module, language-family permission rules, and test-file presence. |
+| `pf_plugin_create` | primitive | Create a buildable plugin with runtime `plugin.json`, marketplace `plugin.yaml`, README, isolated go.mod, a real `sdk/plugin.Server`, deterministic capability handlers, and executable tests. Language-family requests use the existing `sdk/langplugin` command contract. |
+| `pf_plugin_validate` | read | Validate both manifests, entrypoint confinement, executable digest, compatibility and permissions, then run a real `go build ./...` and `go test ./...` in the plugin module. |
 | `pf_plugin_modify` | agent | Modify an existing plugin from a free-text request, confined to that plugin's own directory. |
 | `pf_core_inspect` | read | One architectural area's `internal/` packages (doc comments, source/test files), or all of them. Areas: `marketplace`, `runtime`, `builder`, `registry`, `supply-chain`, `microvm`, `cli`, `all`. |
 | `pf_core_validate` | read | Run profile `fast` (gofmt+vet), `full` (+ build/test/archtest), `security` (local mirrors of `ci-security.yml`'s static checks + govulncheck), or `affected` (tests scoped to the real reverse-dependency closure of the currently changed files). |
@@ -235,6 +235,7 @@ itself the canonical upstream. `pf_core_create_pr` also accepts a per-call
 | `pf://plugins/schema` | The `plugin.json` manifest schema, as enforced by `internal/plugin.Manifest.Validate()`. |
 | `pf://marketplace` | This machine's locally tracked marketplace sources and synced index (offline, no network call). |
 | `pf://core` | Every `pf_core_inspect` area and the packages it maps to, plus the compatibility rules those packages must respect. |
+| `pf://git/status` | Current branch and live working-tree status, as structured JSON. |
 | `pf://core/packages` | Every `internal/` package with its doc comment and file listing. |
 
 ## Plugin workflow

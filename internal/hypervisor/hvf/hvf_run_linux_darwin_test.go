@@ -55,6 +55,36 @@ func TestRunLinuxWithRealHVF(t *testing.T) {
 	}
 }
 
+// TestRunLinuxAMD64WithRosetta proves the complete cross-architecture path:
+// an ARM64 Linux kernel under HVF mounts Apple's Rosetta VirtioFS share and
+// executes a static Linux/amd64 probe. It never installs Rosetta.
+func TestRunLinuxAMD64WithRosetta(t *testing.T) {
+	kernelPath := os.Getenv("PLATFORM_FACTORY_TEST_KERNEL_IMAGE")
+	initrdPath := os.Getenv("PLATFORM_FACTORY_TEST_ROSETTA_INITRD")
+	if kernelPath == "" || initrdPath == "" {
+		t.Skip("PLATFORM_FACTORY_TEST_KERNEL_IMAGE and PLATFORM_FACTORY_TEST_ROSETTA_INITRD are not set")
+	}
+	supported, installed := LinuxRosettaStatus()
+	if !supported {
+		t.Fatal("Rosetta for Linux is not supported on this macOS host")
+	}
+	if !installed {
+		t.Fatal("Rosetta for Linux is supported but not installed; installation is an explicit runner-owner action")
+	}
+	const ready = "PLATFORM_FACTORY_ROSETTA_LINUX_AMD64_OK"
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	result, err := RunLinuxHVFWithRosetta(ctx, kernelPath, initrdPath,
+		"console=hvc0 earlycon=hvc0 rdinit=/init ignore_loglevel panic=0",
+		ready, 512<<20, 1, "", nil)
+	if err != nil {
+		t.Fatalf("run Linux/amd64 through Rosetta and ARM64 HVF guest: %v; serial=%q", err, result.Serial)
+	}
+	if !result.SerialMatched || !bytes.Contains(result.Serial, []byte(ready)) {
+		t.Fatalf("Linux/amd64 Rosetta proof absent from guest serial output: %q", result.Serial)
+	}
+}
+
 // TestDarwinVMMWithRealHVF exercises the public VMM lifecycle with the
 // project-owned OCI initramfs as the bundle's verified rootfs.
 func TestDarwinVMMWithRealHVF(t *testing.T) {

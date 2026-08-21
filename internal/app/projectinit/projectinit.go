@@ -253,7 +253,11 @@ func BuildPlanWithFilenameStyle(dir string, ecosystem Ecosystem, legacyDisks *pr
 			placeholder: ecosystem.Confident && ecosystem.Artifact == ""})
 	}
 
-	plan = append(plan, Action{kind: ActionWriteFile, path: filepath.Join(dir, lockName), content: renderLockFile(observed.GitCommit)})
+	planDigest, err := project.CanonicalManifestDigest(plan[0].content)
+	if err != nil {
+		return Plan{}, err
+	}
+	plan = append(plan, Action{kind: ActionWriteFile, path: filepath.Join(dir, lockName), content: renderLockFile(observed.GitCommit, planDigest)})
 	if !exists(filepath.Join(dir, ".gitignore")) {
 		plan = append(plan, Action{kind: ActionWriteFile, path: filepath.Join(dir, ".gitignore"), content: []byte(".pf/\n.platform-factory/\ndist/\nreports/\n")})
 	}
@@ -440,8 +444,8 @@ func renderConfig(eco Ecosystem, writeLanguage bool, legacyDisks *project.Legacy
 		b.WriteString("version: 1\n")
 	}
 	if legacyDisks != nil {
-		b.WriteString("# Legacy VM disk(s) found in this directory by `pf init` - see\n# docs/legacy-vm-disk-boot.md. Nothing yet consumes this automatically;\n# `platform-factory microvm run-legacy-disk` still takes its own --disk flags.\n")
-		fmt.Fprintf(&b, "legacy_disks:\n  boot: %s\n", yamlQuote(legacyDisks.Boot))
+		b.WriteString("# Legacy VM disk(s) and the fail-closed migration plan retained by `pf init`.\n# Change strategy only after reviewing reports/compatibility.json.\n")
+		fmt.Fprintf(&b, "legacy_disks:\n  boot: %s\n  strategy: %s\n", yamlQuote(legacyDisks.Boot), yamlQuote(legacyDisks.Strategy))
 		if len(legacyDisks.Data) > 0 {
 			b.WriteString("  data:\n")
 			for _, path := range legacyDisks.Data {
@@ -458,8 +462,8 @@ func yamlQuote(s string) string {
 	return `"` + s + `"`
 }
 
-func renderLockFile(gitCommit string) []byte {
-	lock := project.Lock{Version: project.CurrentLockVersion, GitCommit: gitCommit}
+func renderLockFile(gitCommit, planDigest string) []byte {
+	lock := project.Lock{Version: project.CurrentLockVersion, GitCommit: gitCommit, PlanDigest: planDigest, Sources: []project.LockedInput{}, Toolchains: []project.LockedInput{}, Bases: []project.LockedInput{}}
 	encoded, _ := json.MarshalIndent(lock, "", "  ")
 	return append(encoded, '\n')
 }

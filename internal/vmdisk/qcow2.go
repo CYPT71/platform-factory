@@ -16,6 +16,7 @@ type qcow2LogicalDisk struct {
 	clusterBits   uint32
 	clusterSize   int64
 	l2Entries     int64 // clusterSize / 8
+	fileSize      int64
 }
 
 const (
@@ -39,9 +40,17 @@ func newQCOW2LogicalDisk(file *os.File) (*qcow2LogicalDisk, error) {
 		return nil, fmt.Errorf("%w: implausible qcow2 l1_size=%d", ErrCannotMapLogicalDisk, l1Size)
 	}
 	clusterSize := int64(1) << clusterBits
+	stat, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("vmdisk: stat qcow2: %w", err)
+	}
+	l1Bytes := int64(l1Size) * 8
+	if l1TableOffset < 72 || l1TableOffset%clusterSize != 0 || l1Bytes < 0 || l1TableOffset > stat.Size()-l1Bytes {
+		return nil, fmt.Errorf("%w: qcow2 L1 table is unaligned, truncated, or outside the image", ErrCannotMapLogicalDisk)
+	}
 	return &qcow2LogicalDisk{
 		file: file, l1TableOffset: l1TableOffset, l1Size: l1Size,
-		clusterBits: clusterBits, clusterSize: clusterSize, l2Entries: clusterSize / 8,
+		clusterBits: clusterBits, clusterSize: clusterSize, l2Entries: clusterSize / 8, fileSize: stat.Size(),
 	}, nil
 }
 
@@ -69,6 +78,10 @@ func (q *qcow2LogicalDisk) ReadLogical(offset, length int64) ([]byte, error) {
 		if l2TableOffset == 0 {
 			data = make([]byte, chunk) // whole L2 table unallocated: zero
 		} else {
+			if l2TableOffset%q.clusterSize != 0 || l2TableOffset < 72 || l2TableOffset > q.fileSize-q.clusterSize ||
+				regionsOverlap(l2TableOffset, q.clusterSize, q.l1TableOffset, int64(q.l1Size)*8) {
+				return nil, fmt.Errorf("%w: qcow2 L2 table at offset %d is unaligned, truncated, or overlaps metadata", ErrCannotMapLogicalDisk, l2TableOffset)
+			}
 			l2Index := clusterIndex % q.l2Entries
 			l2EntryBytes, err := readAtBounded(q.file, l2TableOffset+l2Index*8, 8)
 			if err != nil {
@@ -82,6 +95,11 @@ func (q *qcow2LogicalDisk) ReadLogical(offset, length int64) ([]byte, error) {
 				data = make([]byte, chunk) // unallocated cluster: zero
 			default:
 				hostOffset := int64(l2Entry & qcow2OffsetMask)
+				if hostOffset%q.clusterSize != 0 || hostOffset < 72 || hostOffset > q.fileSize-q.clusterSize ||
+					regionsOverlap(hostOffset, q.clusterSize, q.l1TableOffset, int64(q.l1Size)*8) ||
+					regionsOverlap(hostOffset, q.clusterSize, l2TableOffset, q.clusterSize) {
+					return nil, fmt.Errorf("%w: qcow2 data cluster at offset %d is unaligned, truncated, or overlaps metadata", ErrCannotMapLogicalDisk, hostOffset)
+				}
 				data, err = readAtBounded(q.file, hostOffset+offsetInCluster, chunk)
 				if err != nil {
 					return nil, err
@@ -93,4 +111,8 @@ func (q *qcow2LogicalDisk) ReadLogical(offset, length int64) ([]byte, error) {
 		remaining -= chunk
 	}
 	return out, nil
+}
+
+func regionsOverlap(aStart, aLength, bStart, bLength int64) bool {
+	return aLength > 0 && bLength > 0 && aStart < bStart+bLength && bStart < aStart+aLength
 }

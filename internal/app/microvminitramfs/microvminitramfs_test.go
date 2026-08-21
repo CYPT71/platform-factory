@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -62,6 +63,12 @@ func minimalOCILayout(t *testing.T) string {
 	configData, _ := json.Marshal(map[string]any{
 		"os": "linux", "architecture": "amd64",
 		"rootfs": map[string]any{"type": "layers", "diff_ids": []string{diffID}},
+		"config": map[string]any{
+			"User": "1000:1001", "Entrypoint": []string{"/app"}, "Cmd": []string{"--serve"},
+			"WorkingDir": "/work", "Env": []string{"MODE=production"},
+			"ExposedPorts": map[string]any{"8080/tcp": map[string]any{}},
+			"Volumes":      map[string]any{"/data": map[string]any{}},
+		},
 	})
 	configDesc := writeBlob("application/vnd.oci.image.config.v1+json", configData)
 
@@ -96,16 +103,35 @@ func TestAssembleEndToEnd(t *testing.T) {
 	initBinary := writeStubInit(t)
 	output := filepath.Join(t.TempDir(), "initramfs.cpio.gz")
 
-	result, err := Assemble(layout, "linux/amd64", "", initBinary, []string{"/app/service"}, output)
+	result, err := Assemble(layout, "linux/amd64", "", initBinary, nil, output)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Files != 1 || result.RootFSDigest == "" || result.ManifestDigest == "" || result.InitramfsBytes == 0 {
 		t.Fatalf("result=%+v", result)
 	}
+	if len(result.RequiredPorts) != 1 || result.RequiredPorts[0] != "8080/tcp" || len(result.RequiredVolumes) != 1 || result.RequiredVolumes[0] != "/data" {
+		t.Fatalf("runtime requirements=%+v", result)
+	}
 	info, err := os.Stat(output)
 	if err != nil || info.Size() == 0 {
 		t.Fatalf("output missing or empty: err=%v info=%v", err, info)
+	}
+	archive, err := os.Open(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	compressed, err := gzip.NewReader(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := io.ReadAll(compressed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(decoded, []byte("etc/platform-factory/process.json")) || !bytes.Contains(decoded, []byte(`"args":["/app","--serve"]`)) || !bytes.Contains(decoded, []byte(`"env":["MODE=production"]`)) || !bytes.Contains(decoded, []byte(`"cwd":"/work"`)) || !bytes.Contains(decoded, []byte(`"uid":1000`)) || !bytes.Contains(decoded, []byte(`"gid":1001`)) {
+		t.Fatal("initramfs does not contain the translated OCI process contract")
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -43,10 +44,18 @@ type Options struct {
 }
 
 type Result struct {
-	ManifestDigest string `json:"manifest_digest"`
-	RootFSDigest   string `json:"rootfs_digest"`
-	Files          int    `json:"files"`
-	Bytes          int64  `json:"bytes"`
+	ManifestDigest string          `json:"manifest_digest"`
+	RootFSDigest   string          `json:"rootfs_digest"`
+	Files          int             `json:"files"`
+	Bytes          int64           `json:"bytes"`
+	Runtime        RuntimeMetadata `json:"-"`
+}
+
+type RuntimeMetadata struct {
+	Process            ProcessConfig
+	Ports              []string
+	Volumes            []string
+	UnsupportedOptions []string
 }
 
 type descriptor struct {
@@ -76,6 +85,19 @@ type imageConfig struct {
 		Type    string   `json:"type"`
 		DiffIDs []string `json:"diff_ids"`
 	} `json:"rootfs"`
+	Config struct {
+		User         string              `json:"User"`
+		Entrypoint   []string            `json:"Entrypoint"`
+		Cmd          []string            `json:"Cmd"`
+		WorkingDir   string              `json:"WorkingDir"`
+		Env          []string            `json:"Env"`
+		ExposedPorts map[string]struct{} `json:"ExposedPorts"`
+		Volumes      map[string]struct{} `json:"Volumes"`
+		Healthcheck  json.RawMessage     `json:"Healthcheck"`
+		StopSignal   string              `json:"StopSignal"`
+		Shell        []string            `json:"Shell"`
+		OnBuild      []string            `json:"OnBuild"`
+	} `json:"config"`
 }
 
 // Convert verifies the selected manifest, config, compressed layer digests and
@@ -138,6 +160,10 @@ func Convert(opts Options) (result Result, err error) {
 		(config.OS != selected.Platform.OS || config.Architecture != selected.Platform.Architecture) {
 		return Result{}, errors.New("rootfs: config platform does not match manifest descriptor")
 	}
+	runtimeMetadata, err := parseRuntimeMetadata(config)
+	if err != nil {
+		return Result{}, err
+	}
 
 	parent := filepath.Dir(filepath.Clean(opts.Output))
 	if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -172,7 +198,59 @@ func Convert(opts Options) (result Result, err error) {
 	if err := os.Rename(temporary, opts.Output); err != nil {
 		return Result{}, fmt.Errorf("rootfs: install output: %w", err)
 	}
-	return Result{ManifestDigest: selected.Digest, RootFSDigest: digest, Files: files, Bytes: bytes}, nil
+	return Result{ManifestDigest: selected.Digest, RootFSDigest: digest, Files: files, Bytes: bytes, Runtime: runtimeMetadata}, nil
+}
+
+func parseRuntimeMetadata(config imageConfig) (RuntimeMetadata, error) {
+	metadata := RuntimeMetadata{Process: ProcessConfig{Args: append(append([]string(nil), config.Config.Entrypoint...), config.Config.Cmd...), Env: append([]string(nil), config.Config.Env...), Cwd: config.Config.WorkingDir}, Ports: sortedStringSet(config.Config.ExposedPorts), Volumes: sortedStringSet(config.Config.Volumes), UnsupportedOptions: []string{}}
+	if len(metadata.Process.Args) > 0 && (metadata.Process.Args[0] == "" || !strings.HasPrefix(metadata.Process.Args[0], "/") || path.Clean(metadata.Process.Args[0]) != metadata.Process.Args[0]) {
+		return RuntimeMetadata{}, errors.New("rootfs: OCI config requires an absolute clean Entrypoint")
+	}
+	if metadata.Process.Cwd != "" && (!strings.HasPrefix(metadata.Process.Cwd, "/") || path.Clean(metadata.Process.Cwd) != metadata.Process.Cwd) {
+		return RuntimeMetadata{}, errors.New("rootfs: OCI WorkingDir must be an absolute clean path")
+	}
+	for _, assignment := range metadata.Process.Env {
+		name, _, ok := strings.Cut(assignment, "=")
+		if !ok || name == "" || strings.ContainsAny(name, "=\x00") || strings.ContainsRune(assignment, 0) {
+			return RuntimeMetadata{}, errors.New("rootfs: OCI environment contains an invalid assignment")
+		}
+	}
+	user := config.Config.User
+	if user == "" {
+		user = "65532:65532"
+	}
+	uidText, gidText, found := strings.Cut(user, ":")
+	if !found {
+		gidText = uidText
+	}
+	uid, uidErr := strconv.ParseUint(uidText, 10, 32)
+	gid, gidErr := strconv.ParseUint(gidText, 10, 32)
+	if uidErr != nil || gidErr != nil {
+		return RuntimeMetadata{}, errors.New("rootfs: OCI User must be a numeric UID or UID:GID")
+	}
+	metadata.Process.UID, metadata.Process.GID = uint32(uid), uint32(gid)
+	if len(config.Config.Healthcheck) != 0 && string(config.Config.Healthcheck) != "null" {
+		metadata.UnsupportedOptions = append(metadata.UnsupportedOptions, "Healthcheck")
+	}
+	if config.Config.StopSignal != "" {
+		metadata.UnsupportedOptions = append(metadata.UnsupportedOptions, "StopSignal")
+	}
+	if len(config.Config.Shell) != 0 {
+		metadata.UnsupportedOptions = append(metadata.UnsupportedOptions, "Shell")
+	}
+	if len(config.Config.OnBuild) != 0 {
+		metadata.UnsupportedOptions = append(metadata.UnsupportedOptions, "OnBuild")
+	}
+	return metadata, nil
+}
+
+func sortedStringSet(values map[string]struct{}) []string {
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func selectManifest(manifests []descriptor, wantedPlatform, wantedReference string) (descriptor, error) {

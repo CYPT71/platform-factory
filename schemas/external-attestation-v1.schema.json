@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform-factory.dev/schemas/external-attestation-v1.schema.json",
+  "title": "Platform Factory external attestation predicate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["api_version", "name", "predicate_type", "predicate"],
+  "properties": {
+    "api_version": {
+      "const": "platform-factory.dev/external-attestation/v1"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000\\r\\n]+$"
+    },
+    "predicate_type": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^https://"
+    },
+    "predicate": {
+      "type": "object"
+    }
+  }
+}

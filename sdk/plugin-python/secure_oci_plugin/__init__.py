@@ -6,7 +6,7 @@ and the plugin-side Server. Mirrors Go's sdk/plugin package: the same
 wire protocol, the same v1.hello handshake, the same capability
 dispatch (method "v1."+capability). A plugin written against either
 SDK passes the exact same conformance suite
-(secure-oci-conformance plugin).
+(platform-factory plugin).
 
 Standard library only.
 """

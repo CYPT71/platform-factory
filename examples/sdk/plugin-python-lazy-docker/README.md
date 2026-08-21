@@ -22,5 +22,5 @@ python3 -m unittest discover -s examples/sdk/plugin-python-lazy-docker -v
 In a separately packaged plugin, replace the source-tree path shim with:
 
 ```bash
-python3 -m pip install /path/to/secure-oci-base/sdk/plugin-python
+python3 -m pip install /path/to/platform-factory/sdk/plugin-python
 ```

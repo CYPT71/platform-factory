@@ -175,6 +175,38 @@ func TestRunMarketplaceSources(t *testing.T) {
 	}
 }
 
+func TestMarketplaceSourcesMachineOutput(t *testing.T) {
+	withMarketplaceDir(t)
+	repository := "https://example.com/plugin.git"
+	var stdout, stderr bytes.Buffer
+	if code := runMarketplaceSources([]string{"add", "--format", "json", repository}, &stdout, &stderr); code != 0 {
+		t.Fatalf("add code=%d stderr=%s", code, stderr.String())
+	}
+	requireCLIOutputV1(t, stdout.Bytes(), "operation", "resource", "name", "status")
+	stdout.Reset()
+	if code := runMarketplaceSources([]string{"list", "--format", "json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("list code=%d stderr=%s", code, stderr.String())
+	}
+	document := requireCLIOutputV1(t, stdout.Bytes(), "sources")
+	if !strings.Contains(string(document["sources"]), repository) {
+		t.Fatalf("sources output=%s", stdout.String())
+	}
+	stdout.Reset()
+	if code := runMarketplaceSources([]string{"remove", "--format", "json", repository}, &stdout, &stderr); code != 0 {
+		t.Fatalf("remove code=%d stderr=%s", code, stderr.String())
+	}
+	requireCLIOutputV1(t, stdout.Bytes(), "operation", "resource", "name", "status")
+}
+
+func TestMarketplaceSyncEmptyMachineOutput(t *testing.T) {
+	withMarketplaceDir(t)
+	var stdout, stderr bytes.Buffer
+	if code := runMarketplaceSync([]string{"--catalog-url", "", "--format", "json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	requireCLIOutputV1(t, stdout.Bytes(), "operation", "resource", "synced", "configured_sources", "catalog_discovered", "catalog_rejected", "new_releases", "failures")
+}
+
 func TestSplitMarketplaceSearchArgs(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -445,6 +477,18 @@ func TestRunMarketplaceRemove(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "removed never-installed") {
 		t.Fatalf("remove stdout = %q", stdout.String())
+	}
+}
+
+func TestMarketplaceRemoveMachineOutput(t *testing.T) {
+	withMarketplaceDir(t)
+	var stdout, stderr bytes.Buffer
+	if code := runMarketplaceRemove([]string{"--format", "json", "never-installed"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	document := requireCLIOutputV1(t, stdout.Bytes(), "operation", "resource", "name", "status")
+	if string(document["operation"]) != `"remove"` || string(document["resource"]) != `"marketplace_plugin"` || string(document["status"]) != `"removed"` {
+		t.Fatalf("unexpected output: %s", stdout.String())
 	}
 }
 

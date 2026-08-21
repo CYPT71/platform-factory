@@ -12,6 +12,7 @@ import (
 
 	"github.com/CYPT71/platform-factory/internal/microvm"
 	"github.com/CYPT71/platform-factory/internal/networking"
+	"github.com/CYPT71/platform-factory/internal/rootfs"
 )
 
 func writeNativeBlob(t *testing.T, layout string, data []byte) string {
@@ -79,6 +80,32 @@ func TestReadVerifiedBlobRejectsInvalidOrMissingDigest(t *testing.T) {
 	for _, digest := range []string{"", "sha512:abc", "sha256:", "sha256:missing"} {
 		if _, err := readVerifiedBlob(t.TempDir(), digest); err == nil {
 			t.Fatalf("digest %q accepted", digest)
+		}
+	}
+}
+
+func TestInstallNativeRuntimeContractTranslatesOrRefusesEveryOCIRequirement(t *testing.T) {
+	root := t.TempDir()
+	initBinary := filepath.Join(t.TempDir(), "init")
+	if err := os.WriteFile(initBinary, []byte("init"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	metadata := rootfs.RuntimeMetadata{Process: rootfs.ProcessConfig{Args: []string{"/app/service", "--serve"}, Env: []string{"MODE=production"}, Cwd: "/app", UID: 1000, GID: 1001}, Ports: []string{"8080/tcp"}}
+	forwards := []networking.Forward{{Protocol: "tcp", HostPort: 18080, GuestPort: 8080}}
+	if err := installNativeRuntimeContract(root, initBinary, metadata, forwards); err != nil {
+		t.Fatal(err)
+	}
+	process, err := os.ReadFile(filepath.Join(root, "etc", "platform-factory", "process.json"))
+	if err != nil || !strings.Contains(string(process), `"MODE=production"`) || !strings.Contains(string(process), `"uid":1000`) {
+		t.Fatalf("process=%s err=%v", process, err)
+	}
+	for _, invalid := range []rootfs.RuntimeMetadata{
+		{Process: metadata.Process, Ports: []string{"8443/tcp"}},
+		{Process: metadata.Process, Volumes: []string{"/data"}},
+		{Process: metadata.Process, UnsupportedOptions: []string{"Healthcheck"}},
+	} {
+		if err := installNativeRuntimeContract(t.TempDir(), initBinary, invalid, forwards); err == nil {
+			t.Fatalf("untranslated OCI requirement accepted: %+v", invalid)
 		}
 	}
 }

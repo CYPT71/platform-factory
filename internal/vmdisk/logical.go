@@ -43,9 +43,21 @@ type logicalDisk interface {
 // package knows how to map format's container structure; the caller
 // owns the returned closer.
 func openLogicalDisk(path string, format Format) (logicalDisk, io.Closer, error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("vmdisk: lstat %s: %w", path, err)
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("vmdisk: %s must be a regular non-symlink disk image", path)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("vmdisk: open %s: %w", path, err)
+	}
+	openedInfo, err := file.Stat()
+	if err != nil || !os.SameFile(pathInfo, openedInfo) {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("vmdisk: %s changed while it was being opened", path)
 	}
 	var ld logicalDisk
 	switch format {

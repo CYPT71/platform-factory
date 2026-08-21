@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://platform-factory.dev/schemas/pf-lock-v2.schema.json",
+  "title": "Platform Factory project lock v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "plan_digest"],
+  "$defs": {
+    "pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "digest"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    }
+  },
+  "properties": {
+    "version": {"const": 2},
+    "git_commit": {"type": "string", "maxLength": 128, "pattern": "^[^\\s\\u0000]*$"},
+    "plan_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "sources": {"type": "array", "items": {"$ref": "#/$defs/pin"}},
+    "toolchains": {"type": "array", "items": {"$ref": "#/$defs/pin"}},
+    "bases": {"type": "array", "items": {"$ref": "#/$defs/pin"}},
+    "kernel": {"$ref": "#/$defs/pin"},
+    "initramfs": {"$ref": "#/$defs/pin"}
+  }
+}

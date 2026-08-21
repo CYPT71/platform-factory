@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -187,6 +188,23 @@ func TestDetectRejectsDirectory(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := Detect(dir); err == nil {
 		t.Fatal("expected an error for a directory")
+	}
+}
+
+func TestDetectAndLogicalOpenRejectSymlinkImages(t *testing.T) {
+	target := writeRawDiskWithMBR(t, true)
+	link := filepath.Join(t.TempDir(), "outside.raw")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := Detect(link); err == nil || !strings.Contains(err.Error(), "non-symlink") {
+		t.Fatalf("Detect symlink err=%v", err)
+	}
+	if _, closer, err := openLogicalDisk(link, FormatRAW); err == nil {
+		if closer != nil {
+			_ = closer.Close()
+		}
+		t.Fatal("openLogicalDisk followed a symlink")
 	}
 }
 

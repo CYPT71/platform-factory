@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -53,16 +55,16 @@ func printMarketplaceUsage(output io.Writer) {
 	fmt.Fprintln(output, `platform-factory marketplace — discover, install, and update plugins hosted in Git repositories
 
 Usage:
-  platform-factory marketplace sources add REPO_URL
-  platform-factory marketplace sources remove REPO_URL
-  platform-factory marketplace sources list
-  platform-factory marketplace sync [--key PUBLIC.pem] [--catalog-url URL]
-  platform-factory marketplace publish [--catalog-url URL] [--dir DIR]
-  platform-factory marketplace search [QUERY] [--tag TAG] [--verified] [--sort relevance|popularity|verified|name|date] [--page N]
-  platform-factory marketplace install [--allow-unsigned] [--key PUBLIC.pem] NAME[@VERSION]
-  platform-factory marketplace update [--allow-unsigned] [--key PUBLIC.pem] NAME[@VERSION]
-  platform-factory marketplace remove NAME
-  platform-factory marketplace list
+  platform-factory marketplace sources add [--format text|json] REPO_URL
+  platform-factory marketplace sources remove [--format text|json] REPO_URL
+  platform-factory marketplace sources list [--format text|json]
+  platform-factory marketplace sync [--key PUBLIC.pem] [--catalog-url URL] [--format text|json]
+  platform-factory marketplace publish [--catalog-url URL] [--dir DIR] [--format text|json]
+  platform-factory marketplace search [QUERY] [--tag TAG] [--verified] [--sort relevance|popularity|verified|name|date] [--page N] [--format text|json]
+  platform-factory marketplace install [--allow-unsigned] [--key PUBLIC.pem] [--format text|json] NAME[@VERSION]
+  platform-factory marketplace update [--allow-unsigned] [--key PUBLIC.pem] [--format text|json] NAME[@VERSION]
+  platform-factory marketplace remove [--format text|json] NAME
+  platform-factory marketplace list [--format text|json]
   platform-factory marketplace tui [--key PUBLIC.pem] [--allow-unsigned]
 
 Plugins are never hosted by platform-factory itself: each lives in its own
@@ -109,7 +111,12 @@ func runMarketplaceSync(args []string, stdout, stderr io.Writer) int {
 	flags.Var(&keyFiles, "key", "trusted Ed25519 publisher public key; repeatable")
 	catalogURL := flags.String("catalog-url", marketplace.DefaultCatalogURL(),
 		"public catalog URL for repository discovery (untrusted - see PLATFORM_FACTORY_MARKETPLACE_CATALOG_URL)")
+	format := flags.String("format", "text", "output format: text or json")
 	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 || !validOutputFormat(*format) {
+		fmt.Fprintln(stderr, "usage: platform-factory marketplace sync [--key PUBLIC.pem] [--catalog-url URL] [--format text|json]")
 		return 2
 	}
 	indexPath, sourcesPath, _, err := marketplaceapp.Paths()
@@ -149,6 +156,9 @@ func runMarketplaceSync(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if len(merged.Repositories) == 0 {
+		if *format == "json" {
+			return writeMarketplaceSyncJSON(stdout, stderr, 0, len(sources.Repositories), catalogDiscovered, catalogRejected, 0, nil)
+		}
 		fmt.Fprintln(stdout, "no sources tracked and no catalog configured; add one with: "+
 			"platform-factory marketplace sources add REPO_URL, or --catalog-url")
 		return 0
@@ -172,8 +182,10 @@ func runMarketplaceSync(args []string, stdout, stderr io.Writer) int {
 	for _, result := range results {
 		newTags += len(result.NewTags)
 	}
-	fmt.Fprintf(stdout, "synced %d repositories (%d from marketplace-sources.json, %d discovered via catalog), %d new release(s)\n",
-		len(results), len(sources.Repositories), catalogDiscovered, newTags)
+	if *format == "json" {
+		return writeMarketplaceSyncJSON(stdout, stderr, len(results), len(sources.Repositories), catalogDiscovered, catalogRejected, newTags, failures)
+	}
+	fmt.Fprintf(stdout, "synced %d repositories (%d from marketplace-sources.json, %d discovered via catalog), %d new release(s)\n", len(results), len(sources.Repositories), catalogDiscovered, newTags)
 	if catalogRejected > 0 {
 		fmt.Fprintf(stdout, "catalog listed %d additional repositories rejected as unsafe or invalid\n", catalogRejected)
 	}
@@ -203,36 +215,61 @@ func runMarketplaceSources(args []string, stdout, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "add":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: platform-factory marketplace sources add REPO_URL")
+		format, values, ok := parseMarketplaceSourceArgs("add", args[1:], stderr)
+		if !ok || len(values) != 1 {
+			fmt.Fprintln(stderr, "usage: platform-factory marketplace sources add [--format text|json] REPO_URL")
 			return 2
 		}
-		if !sources.Add(args[1]) {
-			fmt.Fprintf(stdout, "%s is already tracked\n", args[1])
+		repository := values[0]
+		if !sources.Add(repository) {
+			if format == "json" {
+				return writeMarketplaceMutationJSON(stdout, stderr, "source_add", repository, "", "already_tracked")
+			}
+			fmt.Fprintf(stdout, "%s is already tracked\n", repository)
 			return 0
 		}
 		if err := sources.Save(sourcesPath); err != nil {
 			fmt.Fprintf(stderr, "platform-factory marketplace sources add: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "tracking %s\n", args[1])
+		if format == "json" {
+			return writeMarketplaceMutationJSON(stdout, stderr, "source_add", repository, "", "tracking")
+		}
+		fmt.Fprintf(stdout, "tracking %s\n", repository)
 		return 0
 	case "remove":
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "usage: platform-factory marketplace sources remove REPO_URL")
+		format, values, ok := parseMarketplaceSourceArgs("remove", args[1:], stderr)
+		if !ok || len(values) != 1 {
+			fmt.Fprintln(stderr, "usage: platform-factory marketplace sources remove [--format text|json] REPO_URL")
 			return 2
 		}
-		if !sources.Remove(args[1]) {
-			fmt.Fprintf(stderr, "%s is not tracked\n", args[1])
+		repository := values[0]
+		if !sources.Remove(repository) {
+			fmt.Fprintf(stderr, "%s is not tracked\n", repository)
 			return 1
 		}
 		if err := sources.Save(sourcesPath); err != nil {
 			fmt.Fprintf(stderr, "platform-factory marketplace sources remove: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "untracked %s\n", args[1])
+		if format == "json" {
+			return writeMarketplaceMutationJSON(stdout, stderr, "source_remove", repository, "", "untracked")
+		}
+		fmt.Fprintf(stdout, "untracked %s\n", repository)
 		return 0
 	case "list":
+		format, values, ok := parseMarketplaceSourceArgs("list", args[1:], stderr)
+		if !ok || len(values) != 0 {
+			fmt.Fprintln(stderr, "usage: platform-factory marketplace sources list [--format text|json]")
+			return 2
+		}
+		if format == "json" {
+			if err := json.NewEncoder(stdout).Encode(map[string]any{"api_version": cliOutputAPIVersion, "sources": sources.Repositories}); err != nil {
+				fmt.Fprintf(stderr, "platform-factory marketplace sources list: encode output: %v\n", err)
+				return 1
+			}
+			return 0
+		}
 		for _, repository := range sources.Repositories {
 			fmt.Fprintln(stdout, repository)
 		}
@@ -243,6 +280,41 @@ func runMarketplaceSources(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+func writeMarketplaceSyncJSON(stdout, stderr io.Writer, synced, configured, discovered, rejected, releases int, failures map[string]error) int {
+	type failureOutput struct {
+		Repository string `json:"repository"`
+		Error      string `json:"error"`
+	}
+	failureList := make([]failureOutput, 0, len(failures))
+	for repository, err := range failures {
+		failureList = append(failureList, failureOutput{repository, err.Error()})
+	}
+	sort.Slice(failureList, func(i, j int) bool { return failureList[i].Repository < failureList[j].Repository })
+	result := map[string]any{
+		"api_version": cliOutputAPIVersion, "operation": "sync", "resource": "marketplace",
+		"synced": synced, "configured_sources": configured, "catalog_discovered": discovered,
+		"catalog_rejected": rejected, "new_releases": releases, "failures": failureList,
+	}
+	if err := json.NewEncoder(stdout).Encode(result); err != nil {
+		fmt.Fprintf(stderr, "platform-factory marketplace sync: encode output: %v\n", err)
+		return 1
+	}
+	if len(failures) > 0 {
+		return 1
+	}
+	return 0
+}
+
+func parseMarketplaceSourceArgs(operation string, args []string, stderr io.Writer) (string, []string, bool) {
+	flags := flag.NewFlagSet("marketplace sources "+operation, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	format := flags.String("format", "text", "output format: text or json")
+	if err := flags.Parse(args); err != nil || !validOutputFormat(*format) {
+		return "", nil, false
+	}
+	return *format, flags.Args(), true
+}
+
 func runMarketplaceSearch(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("marketplace search", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -251,12 +323,17 @@ func runMarketplaceSearch(args []string, stdout, stderr io.Writer) int {
 	sortBy := flags.String("sort", "relevance", "relevance|popularity|verified|name|date")
 	page := flags.Int("page", 1, "1-based page number")
 	pageSize := flags.Int("page-size", 20, "results per page")
+	format := flags.String("format", "text", "output format: text or json")
 	flagArgs, queryArgs, err := splitMarketplaceSearchArgs(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace search: %v\n", err)
 		return 2
 	}
 	if err := flags.Parse(flagArgs); err != nil {
+		return 2
+	}
+	if *format != "text" && *format != "json" {
+		fmt.Fprintln(stderr, "platform-factory marketplace search: --format must be text or json")
 		return 2
 	}
 	query := strings.Join(queryArgs, " ")
@@ -278,6 +355,16 @@ func runMarketplaceSearch(args []string, stdout, stderr io.Writer) int {
 		Page:     *page,
 		PageSize: *pageSize,
 	})
+	if *format == "json" {
+		if err := json.NewEncoder(stdout).Encode(map[string]any{
+			"api_version": cliOutputAPIVersion, "query": query, "hits": result.Hits,
+			"page": result.Page, "total_pages": result.TotalPages, "total": result.Total,
+		}); err != nil {
+			fmt.Fprintf(stderr, "platform-factory marketplace search: encode output: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 	if len(result.Hits) == 0 {
 		fmt.Fprintln(stdout, "no matching plugins")
 		return 0
@@ -329,13 +416,14 @@ func runMarketplaceInstall(args []string, stdout, stderr io.Writer, isUpdate boo
 	flags := flag.NewFlagSet("marketplace "+verb, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	allowUnsigned := flags.Bool("allow-unsigned", false, "accept an unsigned manifest; checksum verification remains required")
+	format := flags.String("format", "text", "output format: text or json")
 	var keyFiles repeatedFlag
 	flags.Var(&keyFiles, "key", "trusted Ed25519 publisher public key; repeatable")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	if flags.NArg() != 1 {
-		fmt.Fprintf(stderr, "usage: platform-factory marketplace %s [--allow-unsigned] [--key PUBLIC.pem] NAME[@VERSION]\n", verb)
+	if flags.NArg() != 1 || !validOutputFormat(*format) {
+		fmt.Fprintf(stderr, "usage: platform-factory marketplace %s [--allow-unsigned] [--key PUBLIC.pem] [--format text|json] NAME[@VERSION]\n", verb)
 		return 2
 	}
 	name, version := marketplaceapp.SplitNameVersion(flags.Arg(0))
@@ -374,6 +462,9 @@ func runMarketplaceInstall(args []string, stdout, stderr io.Writer, isUpdate boo
 	if isUpdate {
 		pastTense = "updated"
 	}
+	if *format == "json" {
+		return writeMarketplaceMutationJSON(stdout, stderr, verb, installed.Name, installed.Version, pastTense)
+	}
 	fmt.Fprintf(stdout, "%s %s@%s\n", pastTense, installed.Name, installed.Version)
 	return 0
 }
@@ -387,25 +478,61 @@ func hostVersionForCompatibility() string {
 }
 
 func runMarketplaceRemove(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: platform-factory marketplace remove NAME")
+	flags := flag.NewFlagSet("marketplace remove", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	format := flags.String("format", "text", "output format: text or json")
+	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	if flags.NArg() != 1 || !validOutputFormat(*format) {
+		fmt.Fprintln(stderr, "usage: platform-factory marketplace remove [--format text|json] NAME")
+		return 2
+	}
+	name := flags.Arg(0)
 	_, _, pluginsDir, err := marketplaceapp.Paths()
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace remove: %v\n", err)
 		return 1
 	}
 	manager := &marketplace.Manager{Dir: pluginsDir}
-	if err := manager.Remove(args[0]); err != nil {
+	if err := manager.Remove(name); err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace remove: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "removed %s\n", args[0])
+	if *format == "json" {
+		return writeMarketplaceMutationJSON(stdout, stderr, "remove", name, "", "removed")
+	}
+	fmt.Fprintf(stdout, "removed %s\n", name)
+	return 0
+}
+
+func writeMarketplaceMutationJSON(stdout, stderr io.Writer, operation, name, version, status string) int {
+	result := struct {
+		APIVersion string `json:"api_version"`
+		Operation  string `json:"operation"`
+		Resource   string `json:"resource"`
+		Name       string `json:"name"`
+		Version    string `json:"version,omitempty"`
+		Status     string `json:"status"`
+	}{cliOutputAPIVersion, operation, "marketplace_plugin", name, version, status}
+	if err := json.NewEncoder(stdout).Encode(result); err != nil {
+		fmt.Fprintf(stderr, "platform-factory marketplace %s: encode output: %v\n", operation, err)
+		return 1
+	}
 	return 0
 }
 
 func runMarketplaceList(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("marketplace list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	format := flags.String("format", "text", "output format: text or json")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 || (*format != "text" && *format != "json") {
+		fmt.Fprintln(stderr, "usage: platform-factory marketplace list [--format text|json]")
+		return 2
+	}
 	indexPath, _, pluginsDir, err := marketplaceapp.Paths()
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace list: %v\n", err)
@@ -417,7 +544,7 @@ func runMarketplaceList(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "platform-factory marketplace list: %v\n", err)
 		return 1
 	}
-	if len(installedList) == 0 {
+	if len(installedList) == 0 && *format == "text" {
 		fmt.Fprintln(stdout, "no plugins installed")
 		return 0
 	}
@@ -426,18 +553,39 @@ func runMarketplaceList(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "platform-factory marketplace list: %v\n", err)
 		return 1
 	}
-	tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tINSTALLED\tLATEST\tUPDATE AVAILABLE")
+	type installedOutput struct {
+		Name            string `json:"name"`
+		Installed       string `json:"installed"`
+		Latest          string `json:"latest"`
+		UpdateAvailable bool   `json:"update_available"`
+	}
+	output := make([]installedOutput, 0, len(installedList))
 	for _, plugin := range installedList {
 		latest := plugin.Version
-		updateAvailable := ""
+		updateAvailable := false
 		if entry, ok := index.Plugin(plugin.Name); ok {
 			latest = entry.LatestVersion
 			if entry.LatestVersion != plugin.Version {
-				updateAvailable = "yes"
+				updateAvailable = true
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", plugin.Name, plugin.Version, latest, updateAvailable)
+		output = append(output, installedOutput{Name: plugin.Name, Installed: plugin.Version, Latest: latest, UpdateAvailable: updateAvailable})
+	}
+	if *format == "json" {
+		if err := json.NewEncoder(stdout).Encode(map[string]any{"api_version": cliOutputAPIVersion, "plugins": output}); err != nil {
+			fmt.Fprintf(stderr, "platform-factory marketplace list: encode output: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tINSTALLED\tLATEST\tUPDATE AVAILABLE")
+	for _, plugin := range output {
+		update := ""
+		if plugin.UpdateAvailable {
+			update = "yes"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", plugin.Name, plugin.Installed, plugin.Latest, update)
 	}
 	tw.Flush()
 	return 0
@@ -506,11 +654,12 @@ func runMarketplacePublish(args []string, stdout, stderr io.Writer) int {
 			"not the read-only raw.githubusercontent.com default sync falls back to "+
 			"(env PLATFORM_FACTORY_MARKETPLACE_CATALOG_URL)")
 	dir := flags.String("dir", ".", "plugin repository directory")
+	format := flags.String("format", "text", "output format: text or json")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	if flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: platform-factory marketplace publish [--catalog-url URL] [--dir DIR]")
+	if flags.NArg() != 0 || !validOutputFormat(*format) {
+		fmt.Fprintln(stderr, "usage: platform-factory marketplace publish [--catalog-url URL] [--dir DIR] [--format text|json]")
 		return 2
 	}
 	if *catalogURL == "" {
@@ -526,14 +675,18 @@ func runMarketplacePublish(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "platform-factory marketplace publish: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "repository: %s\n", repository)
+	if *format == "text" {
+		fmt.Fprintf(stdout, "repository: %s\n", repository)
+	}
 
 	manifest, err := marketplace.ValidatePluginForPublish(ctx, *dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory marketplace publish: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "plugin: %s@%s (plugin.yaml verified, tag matches)\n", manifest.Name, manifest.Version)
+	if *format == "text" {
+		fmt.Fprintf(stdout, "plugin: %s@%s (plugin.yaml verified, tag matches)\n", manifest.Name, manifest.Version)
+	}
 
 	added, err := marketplace.PublishRepository(ctx, *catalogURL, nil, repository)
 	if err != nil {
@@ -541,9 +694,33 @@ func runMarketplacePublish(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if !added {
+		if *format == "json" {
+			return writeMarketplacePublishJSON(stdout, stderr, repository, manifest.Name, manifest.Version, *catalogURL, "already_listed")
+		}
 		fmt.Fprintf(stdout, "%s is already listed in the catalog\n", repository)
 		return 0
 	}
+	if *format == "json" {
+		return writeMarketplacePublishJSON(stdout, stderr, repository, manifest.Name, manifest.Version, *catalogURL, "published")
+	}
 	fmt.Fprintf(stdout, "published %s to %s\n", repository, *catalogURL)
+	return 0
+}
+
+func writeMarketplacePublishJSON(stdout, stderr io.Writer, repository, name, version, catalogURL, status string) int {
+	result := struct {
+		APIVersion string `json:"api_version"`
+		Operation  string `json:"operation"`
+		Resource   string `json:"resource"`
+		Repository string `json:"repository"`
+		Name       string `json:"name"`
+		Version    string `json:"version"`
+		CatalogURL string `json:"catalog_url"`
+		Status     string `json:"status"`
+	}{cliOutputAPIVersion, "publish", "marketplace", repository, name, version, catalogURL, status}
+	if err := json.NewEncoder(stdout).Encode(result); err != nil {
+		fmt.Fprintf(stderr, "platform-factory marketplace publish: encode output: %v\n", err)
+		return 1
+	}
 	return 0
 }

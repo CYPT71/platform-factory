@@ -4,10 +4,12 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"sync/atomic"
@@ -134,8 +136,33 @@ func newMux() *http.ServeMux {
 	return mux
 }
 
+func serveUDPEcho(conn *net.UDPConn) error {
+	buffer := make([]byte, 65535)
+	for {
+		n, peer, err := conn.ReadFromUDP(buffer)
+		if err != nil {
+			return err
+		}
+		if _, err := conn.WriteToUDP(bytes.ToUpper(buffer[:n]), peer); err != nil {
+			return err
+		}
+	}
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	udp, err := net.ListenUDP("udp", &net.UDPAddr{Port: 8053})
+	if err != nil {
+		slog.Error("UDP server failed to listen", "error", err)
+		os.Exit(1)
+	}
+	defer udp.Close()
+	go func() {
+		if err := serveUDPEcho(udp); err != nil {
+			slog.Error("UDP server exited", "error", err)
+		}
+	}()
+	slog.Info("starting UDP echo", "component", "example-service", "operation", "serve", "addr", ":8053")
 	slog.Info("starting server", "component", "example-service", "operation", "serve", "addr", ":8080")
 	if err := http.ListenAndServe(":8080", newMux()); err != nil {
 		slog.Error("server exited", "error", err)

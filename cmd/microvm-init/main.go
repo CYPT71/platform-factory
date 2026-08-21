@@ -226,6 +226,10 @@ func main() {
 	if err := prepareConsole(); err != nil {
 		fmt.Fprintf(os.Stderr, "level=WARN component=microvm-init operation=supervise phase=preflight message=%q\n", err)
 	}
+	if err := prepareProc(); err != nil {
+		fmt.Fprintf(os.Stderr, "level=ERROR component=microvm-init operation=supervise phase=mount-proc error=%q\n", err)
+		os.Exit(1)
+	}
 	if err := prepareMessageQueue(); err != nil {
 		fmt.Fprintf(os.Stderr, "level=ERROR component=microvm-init operation=supervise phase=mount-mqueue error=%q\n", err)
 		os.Exit(1)

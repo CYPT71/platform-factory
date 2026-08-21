@@ -4,7 +4,7 @@
 // sdk/plugin.Runtime handle framing, handshake and dispatch, this example
 // references SecureOci.Plugin's Server and does the same. Both speak the
 // exact same wire protocol and pass the exact same conformance suite
-// (secure-oci-conformance plugin).
+// (platform-factory plugin).
 using SecureOci.Plugin;
 
 var server = new Server("csharp-example", "1.0.0");

@@ -57,6 +57,13 @@ type Info struct {
 // interpreting a partition table or filesystem. It opens the file
 // read-only and never writes to it.
 func Detect(path string) (Info, error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return Info{}, fmt.Errorf("vmdisk: lstat %s: %w", path, err)
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
+		return Info{}, fmt.Errorf("vmdisk: %s must be a regular non-symlink disk image", path)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return Info{}, fmt.Errorf("vmdisk: open %s: %w", path, err)
@@ -67,8 +74,8 @@ func Detect(path string) (Info, error) {
 	if err != nil {
 		return Info{}, fmt.Errorf("vmdisk: stat %s: %w", path, err)
 	}
-	if stat.IsDir() {
-		return Info{}, fmt.Errorf("vmdisk: %s is a directory, not a disk image", path)
+	if !stat.Mode().IsRegular() || !os.SameFile(pathInfo, stat) {
+		return Info{}, fmt.Errorf("vmdisk: %s changed while it was being opened", path)
 	}
 	size := stat.Size()
 	if size < minDiskSize {

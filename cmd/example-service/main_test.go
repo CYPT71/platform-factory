@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -139,6 +140,34 @@ func TestStatusRecorderDefaultsToOKWithoutExplicitWriteHeader(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestUDPEcho(t *testing.T) {
+	server, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	go func() { _ = serveUDPEcho(server) }()
+	client, err := net.DialUDP("udp", nil, server.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write([]byte("hello udp")); err != nil {
+		t.Fatal(err)
+	}
+	response := make([]byte, 32)
+	n, err := client.Read(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(response[:n]); got != "HELLO UDP" {
+		t.Fatalf("response=%q", got)
 	}
 }
 

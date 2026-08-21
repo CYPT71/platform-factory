@@ -36,7 +36,7 @@ else
 fi
 
 repo_root=$(cd "$(dirname "$script_path")/../.." && pwd)
-context=$(mktemp -d "${TMPDIR:-/tmp}/secure-oci-base-local.XXXXXX")
+context=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-local.XXXXXX")
 trap 'rm -rf "$context"' EXIT
 
 echo "building static linux/$arch service binary..." >&2

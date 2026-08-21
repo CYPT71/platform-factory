@@ -61,7 +61,9 @@ every cross-build target.
 | --- | --- | --- | --- | --- |
 | KVM | Linux | amd64 | ✅ tested against real hardware | `ci-microvm.yml` `boot-under-kvm`: confirms `/dev/kvm`, boots a real kernel, exercised through Podman, Docker, and containerd (`test-podman-kvm.sh`, `test-docker-kvm.sh`, `test-containerd-kvm.sh`) |
 | KVM | Linux | arm64 | ❌ not CI-tested | `internal/hypervisor/kvm` has amd64-specific boot files (`kvm_linux_boot_amd64.go`); no arm64 KVM job exists |
-| HVF (Hypervisor.framework) | macOS (macos-15) | arm64 | ✅ tested against real hardware | `ci-microvm.yml` `boot-under-hvf`: cross-built arm64 kernel, `test-hvf-local.sh` |
+| HVF (Virtualization.framework / Hypervisor.framework) | macOS (macos-15) | arm64 | ✅ tested against real hardware | `ci-microvm.yml` `boot-under-hvf`: cross-built arm64 kernel, `test-hvf-local.sh` |
+| Rosetta 2 for Linux inside HVF | macOS (macos-15, Apple silicon) | Linux amd64 userspace in an arm64 guest | ✅ dedicated native proof | CI attaches Apple's read-only `VZLinuxRosettaDirectoryShare`, mounts its `rosetta` VirtioFS tag in the guest, and requires a real Linux/amd64 probe to print `PLATFORM_FACTORY_ROSETTA_LINUX_AMD64_OK`. Platform Factory probes availability but never installs Rosetta. |
+| Native guest port forwarding | Linux/KVM and macOS/HVF | TCP and UDP | ✅ tested | Bounded host relays; `TestNativeHVFRealTCPAndUDP` proves both protocols through a real arm64 Linux guest, and `ci-microvm.yml` requires the equivalent real KVM path. |
 | WHPX (Windows Hypervisor Platform) | Windows | amd64 | ❌ not CI-tested | `internal/hypervisor/whpx` exists as code (non-blocking per the implementation roadmap) but no CI job boots a guest under it |
 
 ## Guest kernel
@@ -69,6 +71,12 @@ every cross-build target.
 | Component | Version | Evidence |
 | --- | --- | --- |
 | Linux guest kernel (KVM and HVF) | 6.12.98, built from `scripts/microvm/build-kernel.sh` | `scripts/microvm/build-kernel.sh:12` (`KERNEL_VERSION`), cached per-architecture in `ci-microvm.yml` |
+
+Rosetta is a cross-architecture userspace test path, not a replacement for a
+Linux host. Pure Linux executables and application behavior can run as amd64
+inside the arm64 HVF guest. Tests of `/dev/kvm`, Linux host namespaces,
+cgroups, seccomp, pidfd, TAP devices, AppArmor, Podman/Docker/containerd host
+integration, or Linux-specific syscalls acting on the host remain on Linux CI.
 
 ## Signing / registry interoperability
 
@@ -81,6 +89,7 @@ product's own trust path.
 | --- | --- | --- |
 | Cosign / Fulcio / Rekor (keyless GHCR signing) | ✅ tested, CI-owned, not the product path | `ci-release.yml`, `ci-microvm.yml`, `ci-benchmark.yml`, `ci-supply-chain-e2e.yml` per ADR-006/ADR-007 |
 | GHCR (as a concrete OCI Distribution registry) | ✅ tested | `ci-supply-chain-e2e.yml` |
+| OCI Distribution 2.8.3 through native `pf publish` + Podman pull | ✅ tested locally; CI path configured | `ci-compatibility.yml`; provider status and acceptance contract in `docs/registry-providers.md` |
 
 ## Review trigger
 

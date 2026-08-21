@@ -91,6 +91,13 @@ type Options struct {
 	// accounting), this budget correctly reflects the actual build work.
 	// Checked once per streamed file; the zero value disables enforcement.
 	Budget budget.Budget
+	// BinaryMode and PreserveBinaryOwnership are opt-in metadata used by
+	// legacy filesystem migration. Ordinary builds retain the established
+	// normalized 0555/root ownership defaults.
+	BinaryMode              int64
+	BinaryUID               uint32
+	BinaryGID               uint32
+	PreserveBinaryOwnership bool
 }
 
 // Event is a structured, non-secret observation of an OCI build phase.
@@ -125,6 +132,11 @@ type ExtraFile struct {
 	// Options.SemanticLayers is set; ignored otherwise. Empty defaults to
 	// CategoryApplication.
 	Category string
+	// PreserveOwnership opts this file into source UID/GID preservation. The
+	// zero value deliberately remains normalized root ownership.
+	UID               uint32
+	GID               uint32
+	PreserveOwnership bool
 }
 
 // Semantic layer categories for Options.SemanticLayers, applied in this
@@ -228,10 +240,17 @@ func Build(opts Options) (string, error) {
 		"binary_bytes": info.Size(), "extra_files": len(opts.ExtraFiles),
 		"architecture": opts.Architecture, "os": opts.OS,
 	}, time.Since(started))
+	binaryMode := opts.BinaryMode
+	if binaryMode == 0 {
+		binaryMode = 0555
+	}
 	files := []streamFile{{
-		dest: strings.TrimPrefix(opts.Entrypoint, "/"), source: opts.Binary, size: info.Size(), mode: 0555,
+		dest: strings.TrimPrefix(opts.Entrypoint, "/"), source: opts.Binary, size: info.Size(), mode: binaryMode,
 		category: CategoryApplication,
 	}}
+	if opts.PreserveBinaryOwnership {
+		files[0].uid, files[0].gid = int(opts.BinaryUID), int(opts.BinaryGID)
+	}
 	uid, gid, _ := parseRuntimeUser(opts.User)
 	if opts.Home == "" {
 		opts.Home = "/home/nonroot"
@@ -262,6 +281,7 @@ func Build(opts Options) (string, error) {
 		files = append(files, streamFile{
 			dest: strings.TrimPrefix(extra.Dest, "/"), source: extra.Source,
 			size: info.Size(), mode: mode, category: category,
+			uid: ownershipValue(extra.PreserveOwnership, extra.UID), gid: ownershipValue(extra.PreserveOwnership, extra.GID),
 		})
 	}
 
@@ -387,6 +407,18 @@ func normalize(o *Options) error {
 			return fmt.Errorf("extra file %q has unknown category %q (want one of: %s, or empty)",
 				extra.Dest, extra.Category, strings.Join(semanticLayerOrder, ", "))
 		}
+		if extra.Mode < 0 || extra.Mode > 0o7777 {
+			return fmt.Errorf("extra file %q has invalid mode %#o", extra.Dest, extra.Mode)
+		}
+		if extra.PreserveOwnership && (extra.UID > uint32(^uint32(0)>>1) || extra.GID > uint32(^uint32(0)>>1)) {
+			return fmt.Errorf("extra file %q ownership exceeds portable tar limits", extra.Dest)
+		}
+	}
+	if o.BinaryMode < 0 || o.BinaryMode > 0o7777 {
+		return fmt.Errorf("binary mode %#o is invalid", o.BinaryMode)
+	}
+	if o.PreserveBinaryOwnership && (o.BinaryUID > uint32(^uint32(0)>>1) || o.BinaryGID > uint32(^uint32(0)>>1)) {
+		return fmt.Errorf("binary ownership exceeds portable tar limits")
 	}
 	if o.Created.IsZero() {
 		o.Created = time.Unix(0, 0).UTC()
@@ -432,6 +464,15 @@ type streamFile struct {
 	size     int64
 	mode     int64
 	category string
+	uid      int
+	gid      int
+}
+
+func ownershipValue(preserve bool, value uint32) int {
+	if !preserve {
+		return 0
+	}
+	return int(value)
 }
 
 func newInlineStreamFile(dest string, data []byte, mode int64) streamFile {
@@ -601,7 +642,7 @@ func writeLayerStream(dst io.Writer, files []streamFile, writablePaths []string,
 			}
 		}
 		if err := tw.WriteHeader(&tar.Header{
-			Name: file.dest, Mode: file.mode, Size: file.size,
+			Name: file.dest, Mode: file.mode, Size: file.size, Uid: file.uid, Gid: file.gid,
 			ModTime: time.Unix(0, 0), Format: tar.FormatPAX,
 		}); err != nil {
 			return descriptor{}, "", err

@@ -77,7 +77,7 @@ func runInspect(args []string) error {
 	if err != nil {
 		return err
 	}
-	result, err := langplugin.Inspect(root, langplugin.Definition{Language: "node", Profile: "node", Markers: []string{"package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock"}, SourceExtensions: []string{".js", ".mjs", ".cjs", ".ts"}, Entrypoints: []string{"index.js", "app.js", "server.js"}, Manifests: []string{"package.json"}, Imports: nodeImports})
+	result, err := langplugin.Inspect(root, langplugin.Definition{Language: "node", Profile: "node", Markers: []string{"package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "tsconfig.json"}, SourceExtensions: []string{".js", ".mjs", ".cjs", ".ts"}, Entrypoints: []string{"index.js", "app.js", "server.js", "index.ts", "app.ts", "server.ts"}, Manifests: []string{"package.json"}, Imports: nodeImports})
 	if err != nil {
 		return err
 	}

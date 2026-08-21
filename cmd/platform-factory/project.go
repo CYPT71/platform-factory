@@ -27,6 +27,7 @@ import (
 	"github.com/CYPT71/platform-factory/internal/layout"
 	"github.com/CYPT71/platform-factory/internal/observability"
 	"github.com/CYPT71/platform-factory/internal/project"
+	runtimeapp "github.com/CYPT71/platform-factory/internal/runtime"
 	"github.com/CYPT71/platform-factory/internal/shellquote"
 	"github.com/CYPT71/platform-factory/oci"
 )
@@ -57,6 +58,7 @@ func runProjectContext(ctx context.Context, args []string, stdout, stderr io.Wri
 	flags := flag.NewFlagSet("project "+action, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configName := flags.String("config", "", "project image YAML/JSON config; otherwise auto-discovered")
+	freezeKernel, freezeInitramfs := new(string), new(string)
 	var write *bool
 	if action == "migrate" {
 		write = flags.Bool("write", false, "rewrite the config file in place instead of printing the migration")
@@ -67,6 +69,10 @@ func runProjectContext(ctx context.Context, args []string, stdout, stderr io.Wri
 	maxMemory := new(string)
 	if action == "freeze" || action == "build" {
 		dryRun = flags.Bool("dry-run", false, "explain the action without executing commands or writing files")
+	}
+	if action == "freeze" {
+		freezeKernel = flags.String("kernel", "", "project-relative kernel to pin for microvm isolation")
+		freezeInitramfs = flags.String("initramfs", "", "project-relative initramfs to pin for microvm isolation")
 	}
 	if action == "build" {
 		maxWallClock = flags.Duration("max-wall-clock", 0, "maximum build wall-clock duration (0 disables)")
@@ -148,7 +154,7 @@ func runProjectContext(ctx context.Context, args []string, stdout, stderr io.Wri
 		if *dryRun {
 			return explainProjectAction(loaded, plugins, "freeze", budget.Budget{}, stdout, stderr)
 		}
-		return freezeProject(loaded, plugins, stdout, stderr, execute)
+		return freezeProjectWithBootPins(loaded, plugins, *freezeKernel, *freezeInitramfs, stdout, stderr, execute)
 	case "build":
 		if *dryRun {
 			return explainProjectAction(loaded, plugins, "build", resourceBudget, stdout, stderr)
@@ -252,13 +258,16 @@ func explainProjectAction(loaded project.Loaded, plugins *pluginHost, action str
 		result["commands"] = commands
 		result["writes"] = []string{filepath.Join(".platform-factory", "freeze.lock.json")}
 	case "build":
-		if err := projectapp.ValidateBuildCapability(loaded); err != nil {
+		capabilities, err := projectapp.AssessBuildCapabilities(context.Background(), loaded)
+		if err != nil {
 			result["valid"] = false
 			result["blockers"] = []string{err.Error()}
+			result["capabilities"] = capabilities
 			data, _ := json.MarshalIndent(result, "", "  ")
 			fmt.Fprintln(stdout, string(data))
 			return 2
 		}
+		result["capabilities"] = capabilities
 		result["command"] = append([]string(nil), loaded.Config.BuildCommand...)
 		result["output"] = loaded.Output()
 		result["resource_budget"] = buildapp.ResourceBudgetPlan(resourceBudget)
@@ -576,6 +585,12 @@ func planProject(loaded project.Loaded, plugins *pluginHost, stdout, stderr io.W
 		"ports":       loaded.Config.Ports,
 		"valid":       true,
 	}
+	capabilities, capabilityErr := projectapp.AssessBuildCapabilities(context.Background(), loaded)
+	result["capabilities"] = capabilities
+	if capabilityErr != nil {
+		result["valid"] = false
+		result["blockers"] = []string{capabilityErr.Error()}
+	}
 	if detected, detectErr := detect.Path(loaded.Root); detectErr == nil && detected.Kind != "unknown" {
 		result["detected"] = map[string]any{
 			"kind": detected.Kind, "ambiguous": detected.Ambiguous,
@@ -594,6 +609,9 @@ func planProject(loaded project.Loaded, plugins *pluginHost, stdout, stderr io.W
 		return 1
 	}
 	fmt.Fprintln(stdout, string(data))
+	if capabilityErr != nil {
+		return 2
+	}
 	return 0
 }
 
@@ -620,6 +638,14 @@ type freezeStep struct {
 }
 
 func freezeProject(loaded project.Loaded, plugins *pluginHost, stdout, stderr io.Writer, execute projectExecutor) int {
+	return freezeProjectWithBootPins(loaded, plugins, "", "", stdout, stderr, execute)
+}
+
+func freezeProjectWithBootPins(loaded project.Loaded, plugins *pluginHost, kernelPath, initramfsPath string, stdout, stderr io.Writer, execute projectExecutor) int {
+	if (kernelPath == "") != (initramfsPath == "") {
+		fmt.Fprintln(stderr, "platform-factory project freeze: --kernel and --initramfs must be provided together")
+		return 2
+	}
 	steps, err := resolveFreezeSteps(loaded, plugins)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory project freeze: %v\n", err)
@@ -656,6 +682,38 @@ func freezeProject(loaded project.Loaded, plugins *pluginHost, stdout, stderr io
 	inventory, err := loaded.WriteFreezeInventory()
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory project freeze: inventory: %v\n", err)
+		return 1
+	}
+	lockPath := loaded.AdjacentLockPath()
+	if lock, lockErr := project.LoadLock(lockPath); lockErr == nil && lock.Version == project.CurrentLockVersion {
+		sources, toolchains, pinErr := loaded.FrozenInputPins()
+		if pinErr != nil {
+			fmt.Fprintf(stderr, "platform-factory project freeze: lock pins: %v\n", pinErr)
+			return 1
+		}
+		lock.Sources, lock.Toolchains = sources, toolchains
+		if kernelPath != "" {
+			lock.Kernel, pinErr = func() (*project.LockedInput, error) {
+				pin, err := loaded.PinLocalFile(filepath.ToSlash(kernelPath))
+				return &pin, err
+			}()
+			if pinErr == nil {
+				lock.Initramfs, pinErr = func() (*project.LockedInput, error) {
+					pin, err := loaded.PinLocalFile(filepath.ToSlash(initramfsPath))
+					return &pin, err
+				}()
+			}
+			if pinErr != nil {
+				fmt.Fprintf(stderr, "platform-factory project freeze: boot pins: %v\n", pinErr)
+				return 1
+			}
+		}
+		if pinErr := atomicfile.WriteJSONSensitive(lockPath, lock); pinErr != nil {
+			fmt.Fprintf(stderr, "platform-factory project freeze: update lock: %v\n", pinErr)
+			return 1
+		}
+	} else if lockErr != nil && !errors.Is(lockErr, os.ErrNotExist) {
+		fmt.Fprintf(stderr, "platform-factory project freeze: load lock: %v\n", lockErr)
 		return 1
 	}
 	result, _ := json.MarshalIndent(map[string]any{
@@ -763,7 +821,18 @@ func buildProjectContext(ctx context.Context, loaded project.Loaded, stdout, std
 
 func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, stdout, stderr io.Writer, execute projectExecutor, resourceBudget budget.Budget) (string, int) {
 	startedAt := time.Now()
-	if err := projectapp.ValidateBuildCapability(loaded); err != nil {
+	if err := loaded.VerifyAdjacentLock(); err != nil {
+		fmt.Fprintf(stderr, "platform-factory project build: project lock preflight failed: %v\n", err)
+		fmt.Fprintln(stderr, "  next: restore the manifest that matches the lock, or regenerate and review the v2 lock")
+		return "", 2
+	}
+	buildPolicy, err := preflightProjectBuildPolicy(loaded)
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory project build: policy preflight failed: %v\n", err)
+		return "", 2
+	}
+	capabilities, err := projectapp.AssessBuildCapabilities(ctx, loaded)
+	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory project build: capability preflight failed: %v\n", err)
 		return "", 2
 	}
@@ -880,11 +949,23 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 		fmt.Fprintf(stderr, "platform-factory project build: %v\n", err)
 		return "", 1
 	}
+	bootBundlePath := ""
+	if loaded.Config.Isolation == "microvm" {
+		bootBundlePath, err = writeProjectBootBundle(loaded, digest)
+		if err != nil {
+			fmt.Fprintf(stderr, "platform-factory project build: write boot bundle: %v\n", err)
+			return "", 1
+		}
+	}
 	resultMap := map[string]any{
 		"api_version": cliOutputAPIVersion,
 		"config":      loaded.File, "digest": digest, "isolation": loaded.Config.Isolation,
 		"layout": loaded.Output(), "reference": loaded.Config.Image + ":" + loaded.Config.Tag,
-		"valid": true,
+		"valid":        true,
+		"capabilities": capabilities,
+	}
+	if bootBundlePath != "" {
+		resultMap["boot_bundle"] = bootBundlePath
 	}
 	releaseDir := filepath.Join(loaded.Root, ".platform-factory", "release")
 	reportsDir := filepath.Join(releaseDir, "reports")
@@ -901,8 +982,12 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 		fmt.Fprintf(stderr, "platform-factory project build: write build report: %v\n", err)
 		return "", 1
 	}
-	if err := buildapp.WriteBuildEvidence(releaseDir, reportsDir, "", "release", version, resultMap, target, settings); err != nil {
+	if err := buildapp.WriteBuildEvidence(releaseDir, reportsDir, buildPolicy.keyDir, "release", version, resultMap, target, settings); err != nil {
 		fmt.Fprintf(stderr, "platform-factory project build: write release evidence: %v\n", err)
+		return "", 1
+	}
+	if err := persistProjectBuildPolicy(buildPolicy, releaseDir, reportsDir, digest); err != nil {
+		fmt.Fprintf(stderr, "platform-factory project build: enforce configured build policy: %v\n", err)
 		return "", 1
 	}
 	verified, verifyErr := layout.Verify(loaded.Output())
@@ -921,4 +1006,50 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 	result, _ := json.MarshalIndent(resultMap, "", "  ")
 	fmt.Fprintln(stdout, string(result))
 	return digest, 0
+}
+
+func writeProjectBootBundle(loaded project.Loaded, rootfsDigest string) (string, error) {
+	lock, err := project.LoadLock(loaded.AdjacentLockPath())
+	if errors.Is(err, os.ErrNotExist) {
+		// Compatibility for hand-written projects predating lock v2. They may
+		// still build, but cannot claim a content-addressed boot bundle.
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if lock.Version == 1 {
+		return "", nil
+	}
+	if lock.Kernel == nil || lock.Initramfs == nil {
+		return "", errors.New("microvm boot bundle requires a v2 lock with kernel and initramfs pins")
+	}
+	bundle, err := runtimeapp.NewBootBundle(lock.Kernel.Digest, lock.Initramfs.Digest, rootfsDigest, nil, map[string]string{
+		"platform":  loaded.Config.Platform,
+		"reference": loaded.Config.Image + ":" + loaded.Config.Tag,
+	})
+	if err != nil {
+		return "", err
+	}
+	distDir := filepath.Join(loaded.Root, "dist")
+	bundleDir := filepath.Join(distDir, "boot-bundle")
+	for _, directory := range []string{distDir, bundleDir} {
+		info, statErr := os.Lstat(directory)
+		if errors.Is(statErr, os.ErrNotExist) {
+			if err := os.Mkdir(directory, 0o755); err != nil {
+				return "", err
+			}
+			continue
+		}
+		if statErr != nil {
+			return "", statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("refusing unsafe boot bundle directory %s", directory)
+		}
+	}
+	if err := atomicfile.WriteJSON(bundleDir, "bundle.json", bundle); err != nil {
+		return "", err
+	}
+	return bundleDir, nil
 }

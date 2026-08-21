@@ -11,6 +11,10 @@ func prepareConsole() error {
 	return errors.New("prepareConsole is only supported on linux")
 }
 
+func prepareProc() error {
+	return errors.New("prepareProc is only supported on linux")
+}
+
 func prepareMessageQueue() error {
 	return errors.New("prepareMessageQueue is only supported on linux")
 }

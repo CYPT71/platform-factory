@@ -1,12 +1,17 @@
 package publish
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/CYPT71/platform-factory/internal/attestation"
 	"github.com/CYPT71/platform-factory/internal/registry"
+	"github.com/CYPT71/platform-factory/internal/signing"
 )
 
 func TestNativePublicationArtifactsRejectInvalidEvidenceInputs(t *testing.T) {
@@ -39,6 +44,64 @@ func TestNativePublicationArtifactsRejectInvalidEvidenceInputs(t *testing.T) {
 	if _, err := BuildArtifacts(filepath.Join(root, "missing-layout"), published, true,
 		"", "", "builder", false, "", ""); err == nil {
 		t.Fatal("missing SBOM layout accepted")
+	}
+}
+
+func TestExternalAttestationsAreStrictSubjectBoundAndSigned(t *testing.T) {
+	root := t.TempDir()
+	predicate := filepath.Join(root, "quality.json")
+	if err := os.WriteFile(predicate, []byte(`{"api_version":"platform-factory.dev/external-attestation/v1","name":"quality-gate","predicate_type":"https://example.test/quality/v1","predicate":{"passed":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	published := registry.Result{Digest: digest, Reference: "registry.example/service@" + digest}
+	keyDir := filepath.Join(root, "keys")
+	artifacts, err := BuildArtifactsWithAttestations("", published, false, "", "", "builder", true, keyDir, "release", []string{predicate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifacts) != 2 || artifacts[1].ArtifactType != "application/vnd.platform-factory.attestation.v1+json" {
+		t.Fatalf("artifacts=%+v", artifacts)
+	}
+	var envelope attestation.Envelope
+	if err := json.Unmarshal(artifacts[1].Payload, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	store, err := signing.NewFileKeyStore(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, err := store.PublicKey("release")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyID := "ed25519:" + base64.RawURLEncoding.EncodeToString(publicKey)
+	payload, err := attestation.Verify(envelope, map[string]ed25519.PublicKey{keyID: publicKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statement struct {
+		Subject []struct {
+			Digest map[string]string `json:"digest"`
+		} `json:"subject"`
+		PredicateType string `json:"predicateType"`
+	}
+	if err := json.Unmarshal(payload, &statement); err != nil {
+		t.Fatal(err)
+	}
+	if len(statement.Subject) != 1 || statement.Subject[0].Digest["sha256"] != strings.TrimPrefix(digest, "sha256:") || statement.PredicateType != "https://example.test/quality/v1" {
+		t.Fatalf("statement=%s", payload)
+	}
+
+	if _, err := BuildArtifactsWithAttestations("", published, false, "", "", "builder", false, "", "", []string{predicate}); err == nil {
+		t.Fatal("unsigned external attestation accepted")
+	}
+	unknown := filepath.Join(root, "unknown.json")
+	if err := os.WriteFile(unknown, []byte(`{"api_version":"platform-factory.dev/external-attestation/v1","name":"x","predicate_type":"https://example.test/x","predicate":{},"surprise":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateExternalAttestations([]string{unknown}); err == nil {
+		t.Fatal("unknown field accepted")
 	}
 }
 

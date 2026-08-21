@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/CYPT71/platform-factory/internal/marketplace"
 	"github.com/CYPT71/platform-factory/internal/registry"
 	"github.com/CYPT71/platform-factory/oci"
 )
@@ -29,7 +30,7 @@ func TestHistoricalMachineOutputV1FixturesRemainDecodable(t *testing.T) {
 		names = append(names, entry.Name())
 	}
 	sort.Strings(names)
-	want := []string{"build.json", "detect.json", "diff.json", "doctor.json", "pipeline-plan.json", "publish.json", "registry.json", "status.json", "verify.json"}
+	want := []string{"build.json", "deploy.json", "detect.json", "diff.json", "doctor.json", "marketplace-list.json", "marketplace-mutation.json", "marketplace-search.json", "pipeline-plan.json", "plugin-list.json", "plugin-mutation.json", "publish.json", "registry.json", "status.json", "verify.json"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("fixtures=%v want=%v", names, want)
 	}
@@ -43,6 +44,39 @@ func TestHistoricalMachineOutputV1FixturesRemainDecodable(t *testing.T) {
 			t.Fatalf("fixture %s has no payload fields", name)
 		}
 	}
+}
+
+func TestPluginAndMarketplaceMachineOutputsCarryStableV1Envelope(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_LANG_PLUGIN_DIR", t.TempDir())
+	t.Setenv("PLATFORM_FACTORY_PLUGIN_DIR", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	if code := runPlugin([]string{"list", "--format", "json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("plugin list code=%d stderr=%s", code, stderr.String())
+	}
+	requireCLIOutputV1(t, stdout.Bytes(), "plugins")
+
+	marketplaceDir := t.TempDir()
+	t.Setenv("PLATFORM_FACTORY_MARKETPLACE_DIR", marketplaceDir)
+	indexPath, err := marketplace.DefaultIndexPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&marketplace.Index{}).Save(indexPath); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMarketplace([]string{"search", "--format", "json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("marketplace search code=%d stderr=%s", code, stderr.String())
+	}
+	requireCLIOutputV1(t, stdout.Bytes(), "query", "hits", "page", "total_pages", "total")
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runMarketplace([]string{"list", "--format", "json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("marketplace list code=%d stderr=%s", code, stderr.String())
+	}
+	requireCLIOutputV1(t, stdout.Bytes(), "plugins")
 }
 
 func requireCLIOutputV1(t *testing.T, output []byte, required ...string) map[string]json.RawMessage {

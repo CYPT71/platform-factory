@@ -2,16 +2,24 @@ package verify
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/CYPT71/platform-factory/internal/attestation"
 	"github.com/CYPT71/platform-factory/internal/layout"
 	"github.com/CYPT71/platform-factory/internal/policy"
+	provenancegen "github.com/CYPT71/platform-factory/internal/provenance"
 	"github.com/CYPT71/platform-factory/internal/sbom"
 	"github.com/CYPT71/platform-factory/internal/signing"
 )
@@ -173,6 +181,78 @@ func TestLoadTrustedKeysCallsLoadKeyStoreKeyOnlyWhenKeyDirSet(t *testing.T) {
 	}
 }
 
+func TestLoadTrustedKeysValidatesX509ChainBeforeTrustingLeaf(t *testing.T) {
+	dir := t.TempDir()
+	rootKey, rootCert, rootFile := writeTestCertificate(t, dir, "root", nil, nil, true)
+	_, leafCert, leafFile := writeTestCertificate(t, dir, "leaf", rootCert, rootKey, false)
+
+	svc := fakeService(layout.Report{}, nil)
+	keys, err := svc.LoadTrustedKeysWithCertificates(nil, "", "", leafFile, nil, []string{rootFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey := leafCert.PublicKey.(ed25519.PublicKey)
+	keyID := "ed25519:" + base64.RawURLEncoding.EncodeToString(publicKey)
+	if len(keys) != 1 || keys[keyID] == nil {
+		t.Fatalf("keys=%v, want validated leaf %s", keys, keyID)
+	}
+
+	_, _, unrelatedRoot := writeTestCertificate(t, dir, "unrelated", nil, nil, true)
+	if _, err := svc.LoadTrustedKeysWithCertificates(nil, "", "", leafFile, nil, []string{unrelatedRoot}); err == nil {
+		t.Fatal("leaf signed by another root was trusted")
+	}
+}
+
+func TestLoadTrustedKeysX509FailsClosedOnIncompleteOrUnsafeInputs(t *testing.T) {
+	dir := t.TempDir()
+	_, _, leaf := writeTestCertificate(t, dir, "leaf", nil, nil, false)
+	svc := fakeService(layout.Report{}, nil)
+	if _, err := svc.LoadTrustedKeysWithCertificates(nil, "", "", leaf, nil, nil); err == nil {
+		t.Fatal("certificate without an explicit root was accepted")
+	}
+	alias := filepath.Join(dir, "leaf-alias.pem")
+	if err := os.Symlink(leaf, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCertificate(alias); err == nil {
+		t.Fatal("symlink certificate was accepted")
+	}
+}
+
+func writeTestCertificate(t *testing.T, dir, name string, parent *x509.Certificate, parentKey ed25519.PrivateKey, isCA bool) (ed25519.PrivateKey, *x509.Certificate, string) {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(int64(len(name) + 1)), Subject: pkix.Name{CommonName: name},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour),
+		BasicConstraintsValid: true, IsCA: isCA,
+		KeyUsage: x509.KeyUsageDigitalSignature,
+	}
+	if isCA {
+		template.KeyUsage |= x509.KeyUsageCertSign
+	}
+	if parent == nil {
+		parent, parentKey = template, privateKey
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, parent, publicKey, parentKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(dir, name+".pem")
+	if err := os.WriteFile(filename, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return privateKey, certificate, filename
+}
+
 func TestVerifySignatureRequiresAtLeastOneTrustedKey(t *testing.T) {
 	svc := fakeService(layout.Report{}, nil)
 	if err := svc.VerifySignature("irrelevant", "sha256:x", map[string]ed25519.PublicKey{}); err == nil {
@@ -231,6 +311,39 @@ func TestVerifyProvenanceRejectsMalformedJSON(t *testing.T) {
 	}
 	if _, err := svc.VerifyProvenance(path, nil); err == nil {
 		t.Fatal("expected an error for a malformed provenance predicate")
+	}
+}
+
+func TestVerifyProvenanceAgainstJournalAcceptsExactPredicateAndRejectsDrift(t *testing.T) {
+	dir := t.TempDir()
+	journalText := `{"api_version":"platform-factory.dev/journal/v1","pipeline_fingerprint":"sha256:abc","engine_version":"platform-factory/1","sandbox":"on","generated":"2026-08-20T12:00:00Z","stages":[{"id":"build","state":"succeeded"}]}`
+	journalFile := filepath.Join(dir, "journal.json")
+	if err := os.WriteFile(journalFile, []byte(journalText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	builderID := "https://platform-factory.dev/builder/v1"
+	predicate, err := provenancegen.FromJournal(strings.NewReader(journalText), builderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provenanceFile := filepath.Join(dir, "provenance.json")
+	writeJSON(t, provenanceFile, predicate)
+	svc := fakeService(layout.Report{}, nil)
+	if signed, err := svc.VerifyProvenanceAgainstJournal(provenanceFile, journalFile, builderID, nil); err != nil || signed {
+		t.Fatalf("signed=%v err=%v", signed, err)
+	}
+
+	predicate.RunDetails.Metadata.InvocationID = "sha256:other-build"
+	writeJSON(t, provenanceFile, predicate)
+	if _, err := svc.VerifyProvenanceAgainstJournal(provenanceFile, journalFile, builderID, nil); err == nil || !strings.Contains(err.Error(), "inconsistent") {
+		t.Fatalf("drifted provenance accepted: %v", err)
+	}
+	journalAlias := filepath.Join(dir, "journal-alias.json")
+	if err := os.Symlink(journalFile, journalAlias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.VerifyProvenanceAgainstJournal(provenanceFile, journalAlias, builderID, nil); err == nil || !strings.Contains(err.Error(), "non-symlink") {
+		t.Fatalf("symlink journal accepted: %v", err)
 	}
 }
 

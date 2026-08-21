@@ -711,6 +711,43 @@ func TestBudgetReaderPropagatesUnderlyingEOFOnceExhausted(t *testing.T) {
 	}
 }
 
+func TestParseRuntimeMetadataTranslatesAndRejectsOCIOptions(t *testing.T) {
+	var config imageConfig
+	config.Config.User = "1000:1001"
+	config.Config.Entrypoint = []string{"/opt/app/service"}
+	config.Config.Cmd = []string{"--serve"}
+	config.Config.WorkingDir = "/opt/app"
+	config.Config.Env = []string{"MODE=production"}
+	config.Config.ExposedPorts = map[string]struct{}{"8443/tcp": {}}
+	config.Config.Volumes = map[string]struct{}{"/srv/data": {}}
+	metadata, err := parseRuntimeMetadata(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(metadata.Process.Args, " ") != "/opt/app/service --serve" || metadata.Process.UID != 1000 || metadata.Process.GID != 1001 || metadata.Process.Cwd != "/opt/app" || len(metadata.Ports) != 1 || metadata.Ports[0] != "8443/tcp" || len(metadata.Volumes) != 1 || metadata.Volumes[0] != "/srv/data" {
+		t.Fatalf("metadata=%+v", metadata)
+	}
+	config.Config.Healthcheck = json.RawMessage(`{"Test":["CMD","true"]}`)
+	metadata, err = parseRuntimeMetadata(config)
+	if err != nil || len(metadata.UnsupportedOptions) != 1 || metadata.UnsupportedOptions[0] != "Healthcheck" {
+		t.Fatalf("unsupported metadata=%+v err=%v", metadata, err)
+	}
+}
+
+func TestParseRuntimeMetadataRejectsNamedUserAndMalformedEnvironment(t *testing.T) {
+	for _, mutate := range []func(*imageConfig){
+		func(config *imageConfig) { config.Config.User = "app" },
+		func(config *imageConfig) { config.Config.Env = []string{"MISSING_EQUALS"} },
+	} {
+		var config imageConfig
+		config.Config.Entrypoint = []string{"/app/service"}
+		mutate(&config)
+		if _, err := parseRuntimeMetadata(config); err == nil {
+			t.Fatal("invalid runtime metadata accepted")
+		}
+	}
+}
+
 func readTestBlob(t *testing.T, root, digest string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(testBlobPath(root, digest))

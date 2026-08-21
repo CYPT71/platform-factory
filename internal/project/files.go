@@ -1,6 +1,7 @@
 package project
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -142,7 +143,7 @@ func collectTree(source, destination, output, category string) ([]ExtraFile, err
 			return err
 		}
 		relativeSlash := filepath.ToSlash(relative)
-		if relativeSlash == ".platform-factory/freeze.lock.json" {
+		if relativeSlash == ".platform-factory/freeze.lock.json" || relativeSlash == "pf.lock" || relativeSlash == "platform-factory.lock" {
 			return nil
 		}
 		if entry.IsDir() && generatedPlatformFactoryDirs[relativeSlash] {
@@ -303,6 +304,46 @@ func (loaded Loaded) WriteFreezeInventory() (string, error) {
 		return "", err
 	}
 	return filename, nil
+}
+
+// FrozenInputPins converts the already verified freeze inventory into the v2
+// lock categories. It never hashes a second, different file set.
+func (loaded Loaded) FrozenInputPins() (sources, toolchains []LockedInput, err error) {
+	if err := loaded.VerifyFreezeInventory(); err != nil {
+		return nil, nil, err
+	}
+	filename := filepath.Join(loaded.Root, ".platform-factory", "freeze.lock.json")
+	raw, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, nil, err
+	}
+	var inventory FreezeInventory
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&inventory); err != nil {
+		return nil, nil, err
+	}
+	files, err := loaded.ImageFiles()
+	if err != nil {
+		return nil, nil, err
+	}
+	categories := map[string]string{}
+	for _, file := range files {
+		relative, relativeErr := filepath.Rel(loaded.Root, file.Source)
+		if relativeErr != nil || strings.HasPrefix(relative, "..") {
+			relative = file.Source
+		}
+		categories[filepath.ToSlash(relative)] = file.Category
+	}
+	for _, frozen := range inventory.Files {
+		pin := LockedInput{Name: frozen.Path, Digest: "sha256:" + frozen.SHA256}
+		if categories[frozen.Path] == CategoryToolchain {
+			toolchains = append(toolchains, pin)
+		} else {
+			sources = append(sources, pin)
+		}
+	}
+	return sources, toolchains, nil
 }
 
 func (loaded Loaded) configReference() string {

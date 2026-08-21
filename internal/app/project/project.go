@@ -13,8 +13,8 @@
 package project
 
 import (
+	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,26 +161,12 @@ func ValidateBuildDAG(loaded project.Loaded) error {
 	return err
 }
 
-// ValidateBuildCapability reports whether loaded's build can actually
-// proceed: an interpreted-language profile (python, node, java, dotnet,
-// ruby, php) requires an explicit runtime field - platform-factory does
-// not fetch or build an interpreter for you.
+// ValidateBuildCapability is the compatibility facade for callers that only
+// need a verdict. AssessBuildCapabilities is the authoritative structured
+// probe used by pf build and also exposes deferred run-time capabilities.
 func ValidateBuildCapability(loaded project.Loaded) error {
-	profile := strings.TrimSpace(loaded.Config.Profile)
-	if profile == "" {
-		// Compatibility for configurations created before plugins reported a
-		// runtime profile. Fresh pf init output always records the profile and
-		// therefore receives the strict interpreted-runtime preflight below.
-		return nil
-	}
-	switch profile {
-	case "python", "node", "java", "dotnet", "ruby", "php":
-		if strings.TrimSpace(loaded.Config.Runtime) == "" {
-			return fmt.Errorf("%s source was detected, but pf.yaml has no runtime field set; platform-factory does not fetch or build a %s interpreter for you, it packages a real Linux %s binary you already have - set 'runtime: PATH/TO/A/REAL/LINUX/%s/BINARY' in pf.yaml (see examples/project-config/.config_image.yaml); pf doctor does not check for this, it only reports local tool/runtime/hardware availability",
-				loaded.Config.Language, profile, profile, strings.ToUpper(profile))
-		}
-	}
-	return nil
+	_, err := AssessBuildCapabilities(context.Background(), loaded)
+	return err
 }
 
 // Profile maps a project language to a runtime profile. Go, Rust and

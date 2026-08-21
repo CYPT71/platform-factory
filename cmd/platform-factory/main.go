@@ -488,7 +488,7 @@ Usage:
   platform-factory rollback [OPTIONS] NAME
   platform-factory launch [--dry-run] [--config FILE] [DIRECTORY]
   platform-factory launch --isolation=<container|microvm> [RUNTIME OPTIONS]
-  platform-factory microvm <probe|create|start|run|status|logs|restart|stop|delete|rbac|package> [OPTIONS]
+  platform-factory microvm <build-legacy-oci|probe|create|extract-legacy-app|inspect-legacy-disk|run-legacy-disk|start|run|status|logs|restart|stop|delete|rbac|package> [OPTIONS]
   platform-factory completion <bash|zsh|fish|powershell>
   platform-factory doctor [--json]
   platform-factory plugin <load|unload|list> [OPTIONS]
@@ -931,6 +931,8 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	profileName := flags.String("profile", "", "runtime profile override")
 	imageName := flags.String("image", "platform-factory", "image name annotation")
 	tagName := flags.String("tag", "latest", "image tag annotation")
+	var referenceAliases repeatedFlag
+	flags.Var(&referenceAliases, "reference", "additional IMAGE:TAG annotation over the same content; repeatable")
 	createdName := flags.String("created", "1970-01-01T00:00:00Z", "reproducible RFC3339 creation time")
 	compression := flags.String("compression", "best", "gzip mode: best or fast")
 	outputFormat := flags.String("format", "json", "result format: json or text")
@@ -944,6 +946,7 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	flags.Var(&labels, "label", "image label key=value; repeatable")
 	distDir := flags.String("dist", "", "write the layout to DIST/oci-layout (unless --output/-o is also given) plus DIST/sbom.json")
 	reportsDir := flags.String("reports", "", "write REPORTS/build.json (and REPORTS/reproducibility.json with --rebuild) after a successful build")
+	policyFile := flags.String("policy", "", "strict build policy JSON; requires --reports")
 	signKeyDir := flags.String("sign-key-dir", "", "sign release evidence with an Ed25519 key stored in DIR")
 	signKeyName := flags.String("sign-key-name", "release", "signing key name used with --sign-key-dir")
 	maxWallClock := flags.Duration("max-wall-clock", 0, "maximum build wall-clock duration, for example 30s or 2m (0 disables)")
@@ -1040,6 +1043,20 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		SemanticLayers: *semanticLayers || config.SemanticLayers,
 		Budget:         budget.Budget{WallClock: *maxWallClock, CPU: *maxCPU, Memory: memoryLimit},
 	}
+	references := append([]string{*imageName + ":" + *tagName}, referenceAliases...)
+	if err := layout.ValidateReferences(references); err != nil {
+		fmt.Fprintf(stderr, "platform-factory build: %v\n", err)
+		return 2
+	}
+	buildPolicy, err := preflightDirectBuildPolicy(*policyFile, *distDir, *reportsDir, *signKeyDir, *signKeyName, *rebuild, *requireIdentical)
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory build: policy preflight failed: %v\n", err)
+		return 2
+	}
+	if buildPolicy.configured && len(targets) != 1 {
+		fmt.Fprintln(stderr, "platform-factory build: configured build policy currently requires exactly one target")
+		return 2
+	}
 	if *dryRun {
 		planned := make([]map[string]any, 0, len(targets))
 		for _, target := range targets {
@@ -1055,7 +1072,7 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		}
 		result, _ := json.MarshalIndent(map[string]any{
 			"api_version": cliOutputAPIVersion,
-			"dry_run":     true, "layout": output, "reference": *imageName + ":" + *tagName,
+			"dry_run":     true, "layout": output, "reference": *imageName + ":" + *tagName, "references": references,
 			"platforms": planned, "semantic_layers": settings.SemanticLayers,
 			"resource_budget": buildapp.ResourceBudgetPlan(settings.Budget), "valid": true,
 		}, "", "  ")
@@ -1071,7 +1088,14 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			fmt.Fprintln(stderr, "platform-factory build: --rebuild verifies a single target; run one --platform at a time")
 			return 2
 		}
-		return runReproducibleBuild(targets[0], output, settings, *rebuild, *requireIdentical, *outputFormat, *distDir, *reportsDir, stdout, stderr)
+		code := runReproducibleBuildWithPolicy(targets[0], output, settings, *rebuild, *requireIdentical, *outputFormat, *distDir, *reportsDir, buildPolicy, stdout, stderr)
+		if code == 0 && len(references) > 1 {
+			if _, err := layout.SetReferences(output, references); err != nil {
+				fmt.Fprintf(stderr, "platform-factory build: add image references: %v\n", err)
+				return 1
+			}
+		}
+		return code
 	}
 	results := make([]map[string]any, 0, len(targets))
 	if len(targets) == 1 {
@@ -1108,10 +1132,16 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			return 1
 		}
 	}
+	if len(references) > 1 {
+		if _, err := layout.SetReferences(output, references); err != nil {
+			fmt.Fprintf(stderr, "platform-factory build: add image references: %v\n", err)
+			return 1
+		}
+	}
 	result := map[string]any{
 		"api_version": cliOutputAPIVersion,
 		"layout":      output, "reference": *imageName + ":" + *tagName,
-		"platforms": results, "valid": true,
+		"platforms": results, "references": references, "valid": true,
 	}
 	if len(results) == 1 {
 		for key, value := range results[0] {
@@ -1133,6 +1163,12 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if len(targets) == 1 && (*distDir != "" || *reportsDir != "") {
 		if err := buildapp.WriteBuildEvidence(*distDir, *reportsDir, *signKeyDir, *signKeyName, version, result, targets[0], settings); err != nil {
 			fmt.Fprintf(stderr, "platform-factory build: write release evidence: %v\n", err)
+			return 1
+		}
+	}
+	if len(targets) == 1 {
+		if err := persistDirectBuildPolicy(buildPolicy, *distDir, *reportsDir, fmt.Sprint(result["digest"]), false); err != nil {
+			fmt.Fprintf(stderr, "platform-factory build: enforce configured build policy: %v\n", err)
 			return 1
 		}
 	}
@@ -1172,6 +1208,10 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 // runReproducibleBuild compares isolated builds and installs only identical output.
 func runReproducibleBuild(target buildapp.Target, output string, settings buildapp.Settings, rebuilds int, requireIdentical bool, outputFormat, distDir, reportsDir string, stdout, stderr io.Writer) int {
+	return runReproducibleBuildWithPolicy(target, output, settings, rebuilds, requireIdentical, outputFormat, distDir, reportsDir, directBuildPolicy{}, stdout, stderr)
+}
+
+func runReproducibleBuildWithPolicy(target buildapp.Target, output string, settings buildapp.Settings, rebuilds int, requireIdentical bool, outputFormat, distDir, reportsDir string, buildPolicy directBuildPolicy, stdout, stderr io.Writer) int {
 	if _, err := os.Stat(output); err == nil {
 		fmt.Fprintf(stderr, "platform-factory build: output already exists: %s\n", output)
 		return 1
@@ -1226,12 +1266,12 @@ func runReproducibleBuild(target buildapp.Target, output string, settings builda
 			}
 		}
 	}
-	return emitRebuildResult(rebuildOutcome{
+	return emitRebuildResultWithPolicy(rebuildOutcome{
 		reference: settings.Image + ":" + settings.Tag,
 		platform:  target.OS + "/" + target.Architecture,
 		rebuilds:  rebuilds, digest: digests[0], output: output,
 		divergences: divergences, requireIdentical: requireIdentical,
-	}, outputFormat, reportsDir, stdout, stderr)
+	}, outputFormat, reportsDir, buildPolicy, stdout, stderr)
 }
 
 type rebuildOutcome struct {
@@ -1243,6 +1283,10 @@ type rebuildOutcome struct {
 
 // emitRebuildResult reports divergence and enforces requireIdentical.
 func emitRebuildResult(outcome rebuildOutcome, outputFormat, reportsDir string, stdout, stderr io.Writer) int {
+	return emitRebuildResultWithPolicy(outcome, outputFormat, reportsDir, directBuildPolicy{}, stdout, stderr)
+}
+
+func emitRebuildResultWithPolicy(outcome rebuildOutcome, outputFormat, reportsDir string, buildPolicy directBuildPolicy, stdout, stderr io.Writer) int {
 	reproducible := len(outcome.divergences) == 0
 	result := map[string]any{
 		"api_version": cliOutputAPIVersion,
@@ -1260,6 +1304,10 @@ func emitRebuildResult(outcome rebuildOutcome, outputFormat, reportsDir string, 
 			fmt.Fprintf(stderr, "platform-factory build: write reproducibility report: %v\n", err)
 			return 1
 		}
+	}
+	if err := persistDirectBuildPolicy(buildPolicy, "", reportsDir, outcome.digest, reproducible); err != nil {
+		fmt.Fprintf(stderr, "platform-factory build: enforce configured build policy: %v\n", err)
+		return 1
 	}
 	if outputFormat == "text" {
 		if reproducible {
@@ -1287,5 +1335,8 @@ func main() {
 	executor.MaybeApplyRlimitHelper()
 	executor.MaybeApplySandboxHelper(networking.ServeDNSRelay)
 	plugin.MaybeApplyPluginSandboxHelper()
+	if len(os.Args) == 2 && os.Args[1] == "__disk-parser" {
+		os.Exit(runDiskParserWorker(os.Stdin, os.Stdout, os.Stderr))
+	}
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }

@@ -105,8 +105,8 @@ func TestDiscoverMissingConfig(t *testing.T) {
 func TestDiscoverValidatesAdjacentLock(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "pf.yaml"), "version: 1\nlanguage: go\nartifact: app\n", 0o600)
-	writeTestFile(t, filepath.Join(dir, "pf.lock"), `{"version":2}`, 0o600)
-	if _, err := Discover(dir, ""); err == nil || !strings.Contains(err.Error(), "lock version 2") {
+	writeTestFile(t, filepath.Join(dir, "pf.lock"), `{"version":3}`, 0o600)
+	if _, err := Discover(dir, ""); err == nil || !strings.Contains(err.Error(), "lock version 3") {
 		t.Fatalf("err=%v", err)
 	}
 	if err := os.Remove(filepath.Join(dir, "pf.lock")); err != nil {
@@ -123,7 +123,7 @@ func TestDiscoverValidatesAdjacentLock(t *testing.T) {
 func TestDiscoverLongConfigValidatesOnlyLongAdjacentLock(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "platform-factory.yaml"), "version: 1\nlanguage: go\nartifact: app\n", 0o600)
-	writeTestFile(t, filepath.Join(dir, "pf.lock"), `{"version":2}`, 0o600)
+	writeTestFile(t, filepath.Join(dir, "pf.lock"), `{"version":3}`, 0o600)
 	writeTestFile(t, filepath.Join(dir, "platform-factory.lock"), `{"version":1}`, 0o600)
 	if _, err := Discover(dir, ""); err == nil || !strings.Contains(err.Error(), "ambiguous project locks") {
 		t.Fatalf("conflicting alias lock accepted: %v", err)
@@ -134,8 +134,8 @@ func TestDiscoverLongConfigValidatesOnlyLongAdjacentLock(t *testing.T) {
 	if _, err := Discover(dir, ""); err != nil {
 		t.Fatalf("long project was not discovered: %v", err)
 	}
-	writeTestFile(t, filepath.Join(dir, "platform-factory.lock"), `{"version":2}`, 0o600)
-	if _, err := Discover(dir, ""); err == nil || !strings.Contains(err.Error(), "lock version 2") {
+	writeTestFile(t, filepath.Join(dir, "platform-factory.lock"), `{"version":3}`, 0o600)
+	if _, err := Discover(dir, ""); err == nil || !strings.Contains(err.Error(), "lock version 3") {
 		t.Fatalf("long lock was not validated: %v", err)
 	}
 }

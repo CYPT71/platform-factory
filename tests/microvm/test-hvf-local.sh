@@ -17,9 +17,11 @@ fi
 repo_root=$(cd "$(dirname "$script_path")/../.." && pwd)
 PLATFORM_FACTORY_TEST_KERNEL_IMAGE=${PLATFORM_FACTORY_TEST_KERNEL_IMAGE:-"$repo_root/.cache/microvm/arm64/kernel"}
 PLATFORM_FACTORY_TEST_INITRD=${PLATFORM_FACTORY_TEST_INITRD:-"$repo_root/.cache/microvm/arm64/initramfs.cpio.gz"}
-export PLATFORM_FACTORY_TEST_KERNEL_IMAGE PLATFORM_FACTORY_TEST_INITRD
+PLATFORM_FACTORY_TEST_ROSETTA_INITRD=${PLATFORM_FACTORY_TEST_ROSETTA_INITRD:-"$repo_root/.cache/microvm/arm64/rosetta-initramfs.cpio.gz"}
+export PLATFORM_FACTORY_TEST_KERNEL_IMAGE PLATFORM_FACTORY_TEST_INITRD PLATFORM_FACTORY_TEST_ROSETTA_INITRD
 test -s "$PLATFORM_FACTORY_TEST_KERNEL_IMAGE"
 test -s "$PLATFORM_FACTORY_TEST_INITRD"
+test -s "$PLATFORM_FACTORY_TEST_ROSETTA_INITRD"
 
 test_binary=$(mktemp "${TMPDIR:-/tmp}/platform-factory-vmm-hvf.XXXXXX")
 trap 'rm -f "$test_binary"' EXIT
@@ -33,7 +35,7 @@ trap 'rm -f "$test_binary"' EXIT
   test_output=$(mktemp "${TMPDIR:-/tmp}/platform-factory-vmm-hvf-output.XXXXXX")
   trap 'rm -f "$test_output"' EXIT
   set +e
-  "$test_binary" -test.run '^(TestRunLinuxWithRealHVF|TestDarwinVMMWithRealHVF)$' -test.count=1 -test.v \
+  "$test_binary" -test.run '^(TestRunLinuxWithRealHVF|TestDarwinVMMWithRealHVF|TestRunLinuxAMD64WithRosetta)$' -test.count=1 -test.v \
     2>&1 | tee "$test_output"
   test_status=${PIPESTATUS[0]}
   set -e
@@ -49,7 +51,7 @@ trap 'rm -f "$test_binary"' EXIT
     # previously re-matched TestDarwinVMMWithRealHVF itself (its name starts
     # with "TestDarwin"), so the "mandatory" fallback re-ran the same failing
     # hardware test and aborted under set -e instead of exiting 0.
-    "$test_binary" -test.skip '^(TestRunLinuxWithRealHVF|TestDarwinVMMWithRealHVF)$' \
+    "$test_binary" -test.skip '^(TestRunLinuxWithRealHVF|TestDarwinVMMWithRealHVF|TestRunLinuxAMD64WithRosetta)$' \
       -test.count=1 -test.v
     exit 0
   fi

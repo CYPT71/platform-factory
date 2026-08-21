@@ -126,6 +126,14 @@ func InspectLegacyDisk(diskImages []string, bootDiskOverride, reportDir string, 
 	if err != nil {
 		return InspectLegacyDiskResult{}, err
 	}
+	return CompleteLegacyDiskInspection(report, reportDir, strategy)
+}
+
+// CompleteLegacyDiskInspection turns an already parsed discovery report into
+// compatibility evidence and durable report files. Keeping this phase separate
+// lets the CLI parse attacker-controlled disk bytes in a disposable child
+// process while retaining report writes in the parent process.
+func CompleteLegacyDiskInspection(report vmdisk.DiscoveryReport, reportDir string, strategy vmdisk.ExecutionMode) (InspectLegacyDiskResult, error) {
 	compatibility, err := vmdisk.BuildCompatibilityReport(report, strategy)
 	if err != nil {
 		return InspectLegacyDiskResult{}, fmt.Errorf("%w: %w", ErrCompatibilityReport, err)

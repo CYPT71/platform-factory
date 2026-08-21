@@ -18,10 +18,15 @@ type publishedSchema struct {
 	Properties           map[string]json.RawMessage `json:"properties"`
 }
 
+type lockV1 struct {
+	Version   int    `json:"version"`
+	GitCommit string `json:"git_commit,omitempty"`
+}
+
 func TestPublishedSchemasMatchGoWireFields(t *testing.T) {
 	root := filepath.Join("..", "..", "schemas")
 	expectedDigests := map[string]string{"pf-v1.schema.json": "165181097a4f9691d38dcdbe1b73007f70c951cd4500c98283e2841c21c4d90c", "pf-lock-v1.schema.json": "930de3d533446b12c22ed7728d60afccad6b695631c52e1c32528c3fcdad376a"}
-	for name, typ := range map[string]reflect.Type{"pf-v1.schema.json": reflect.TypeOf(Config{}), "pf-lock-v1.schema.json": reflect.TypeOf(Lock{})} {
+	for name, typ := range map[string]reflect.Type{"pf-v1.schema.json": reflect.TypeOf(Config{}), "pf-lock-v1.schema.json": reflect.TypeOf(lockV1{}), "pf-lock-v2.schema.json": reflect.TypeOf(Lock{})} {
 		raw, err := os.ReadFile(filepath.Join(root, name))
 		if err != nil {
 			t.Fatal(err)
@@ -34,7 +39,8 @@ func TestPublishedSchemasMatchGoWireFields(t *testing.T) {
 			t.Fatalf("%s is not a closed 2020-12 schema", name)
 		}
 		digest := sha256.Sum256(raw)
-		if got := hex.EncodeToString(digest[:]); got != expectedDigests[name] {
+		if expected := expectedDigests[name]; expected != "" && hex.EncodeToString(digest[:]) != expected {
+			got := hex.EncodeToString(digest[:])
 			t.Fatalf("%s changed (%s): schema v1 is stable; publish a new schema version or intentionally update compatibility evidence", name, got)
 		}
 		var fields []string

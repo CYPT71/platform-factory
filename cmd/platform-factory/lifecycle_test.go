@@ -56,19 +56,27 @@ func freshOperationJournal(t *testing.T) {
 	t.Cleanup(func() { workloadStateStoreFor = previousState })
 }
 
-func stubRegistryPush(t *testing.T, digest string, failure error) {
+func stubRegistryPush(t *testing.T, _ string, failure error) {
 	t.Helper()
 	freshOperationJournal(t)
 	previous := pushOCI
 	previousTag := tagOCI
 	previousArtifact := pushOCIArtifact
 	previousVerify := verifyRemoteDigest
-	pushOCI = func(_ context.Context, _ string, target registry.Reference, _, _, _, _, _, _ string) (registry.Result, error) {
+	pushOCI = func(_ context.Context, layoutName string, target registry.Reference, sourceReference, _, _, _, _, _ string) (registry.Result, error) {
 		if failure != nil {
 			return registry.Result{}, failure
 		}
+		report, err := layout.Verify(layoutName)
+		if err != nil {
+			return registry.Result{}, err
+		}
+		verifiedDigest, err := selectedPublicationDigest(report, sourceReference)
+		if err != nil {
+			return registry.Result{}, err
+		}
 		return registry.Result{
-			Digest: digest, Reference: target.Registry + "/" + target.Repository + "@" + digest,
+			Digest: verifiedDigest, Reference: target.Registry + "/" + target.Repository + "@" + verifiedDigest,
 		}, nil
 	}
 	tagOCI = func(context.Context, string, registry.Reference, string, string, string, string) error {
@@ -102,6 +110,15 @@ func buildPublishLayout(t *testing.T, image, tag string) string {
 	return output
 }
 
+func publishLayoutDigest(t *testing.T, layoutName string) string {
+	t.Helper()
+	report, err := layout.Verify(layoutName)
+	if err != nil || len(report.Platforms) != 1 {
+		t.Fatalf("verify publication layout: report=%+v err=%v", report, err)
+	}
+	return report.Platforms[0].Digest
+}
+
 func TestRunPublishDryRunIncludesSupplyChainOperations(t *testing.T) {
 	layoutName := buildPublishLayout(t, "example/service", "v1")
 	var stdout, stderr bytes.Buffer
@@ -119,6 +136,24 @@ func TestRunPublishDryRunIncludesSupplyChainOperations(t *testing.T) {
 		if !strings.Contains(stdout.String(), command) {
 			t.Fatalf("dry-run missing %q: %s", command, stdout.String())
 		}
+	}
+}
+
+func TestRunPublishDryRunValidatesExternalAttestationBeforeUpload(t *testing.T) {
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	attestationFile := filepath.Join(t.TempDir(), "quality.json")
+	if err := os.WriteFile(attestationFile, []byte(`{"api_version":"platform-factory.dev/external-attestation/v1","name":"quality","predicate_type":"https://example.test/quality/v1","predicate":{"passed":true}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runPublish(context.Background(), []string{"--dry-run", "--allow-incomplete-evidence", "--sign", "--attestation", attestationFile, layoutName, "registry.example/service:v1"}, &stdout, &stderr, nil)
+	if code != 0 || !strings.Contains(stdout.String(), "subject-bind, sign, and publish external attestation") {
+		t.Fatalf("code=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPublish(context.Background(), []string{"--dry-run", "--allow-incomplete-evidence", "--attestation", attestationFile, layoutName, "registry.example/service:v1"}, &stdout, &stderr, nil); code != 2 || !strings.Contains(stderr.String(), "requires --sign") {
+		t.Fatalf("unsigned code=%d stderr=%s", code, stderr.String())
 	}
 }
 
@@ -242,9 +277,56 @@ func TestRunPublishReplaysAnAlreadyCompletedOperationWithoutRepushing(t *testing
 	}
 }
 
+func TestRunPublishRecoversFailedAttemptByReobservingDigest(t *testing.T) {
+	layoutName := buildPublishLayout(t, "example/service", "v1")
+	report, err := layout.Verify(layoutName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := report.Platforms[0].Digest
+	stubRegistryPush(t, digest, errors.New("connection dropped after an ambiguous registry write"))
+	args := []string{"--yes", "--allow-incomplete-evidence", layoutName, "registry.example/recover:v1"}
+	var stdout, stderr bytes.Buffer
+	if code := runPublish(context.Background(), args, &stdout, &stderr, nil); code != 1 {
+		t.Fatalf("initial code=%d stderr=%s", code, stderr.String())
+	}
+
+	pushes, tags := 0, 0
+	pushOCI = func(_ context.Context, _ string, target registry.Reference, _, _, _, _, _, _ string) (registry.Result, error) {
+		pushes++
+		return registry.Result{Digest: digest, Reference: target.Registry + "/" + target.Repository + "@" + digest}, nil
+	}
+	tagOCI = func(context.Context, string, registry.Reference, string, string, string, string) error {
+		tags++
+		return nil
+	}
+	stdout.Reset()
+	stderr.Reset()
+	recoveryArgs := append([]string{"--recover-operation=operator-confirmed-1"}, args...)
+	if code := runPublish(context.Background(), recoveryArgs, &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("recovery code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if pushes != 1 || tags != 1 {
+		t.Fatalf("pushes=%d tags=%d", pushes, tags)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runPublish(context.Background(), recoveryArgs, &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("replay code=%d stderr=%s", code, stderr.String())
+	}
+	if pushes != 1 || tags != 1 || !strings.Contains(stderr.String(), "already published") {
+		t.Fatalf("recovery replay repeated mutation: pushes=%d tags=%d stderr=%s", pushes, tags, stderr.String())
+	}
+}
+
 func TestRunPublishReferenceOutput(t *testing.T) {
 	layoutName := buildPublishLayout(t, "example/service", "v1")
-	digest := "sha256:" + strings.Repeat("e", 64)
+	report, err := layout.Verify(layoutName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := report.Platforms[0].Digest
 	stubRegistryPush(t, digest, nil)
 	var stdout, stderr bytes.Buffer
 	if code := runPublish(context.Background(), []string{
@@ -339,6 +421,18 @@ func TestPublishDeployRollbackHandleHelpFlag(t *testing.T) {
 	stderr.Reset()
 	if code := runRollback(context.Background(), []string{"--help"}, &stdout, &stderr, nil); code != 0 {
 		t.Fatalf("rollback --help code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestDeployDryRunMachineOutput(t *testing.T) {
+	image := "registry.example/api@sha256:" + strings.Repeat("a", 64)
+	var stdout, stderr bytes.Buffer
+	if code := runDeploy(context.Background(), []string{"--dry-run", "--format", "json", image}, &stdout, &stderr, nil); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	document := requireCLIOutputV1(t, stdout.Bytes(), "operation", "status", "image", "name", "namespace", "workload", "runtime_class", "manifest")
+	if string(document["operation"]) != `"deploy"` || string(document["status"]) != `"dry_run"` {
+		t.Fatalf("unexpected output: %s", stdout.String())
 	}
 }
 
@@ -468,7 +562,7 @@ func TestRunPublishDryRunJournalBranch(t *testing.T) {
 func TestRunPublishSurfacesArtifactPushFailure(t *testing.T) {
 	freshOperationJournal(t)
 	layoutName := buildPublishLayout(t, "example/service", "v1")
-	digest := "sha256:" + strings.Repeat("f", 64)
+	digest := publishLayoutDigest(t, layoutName)
 	previousPush, previousTag, previousArtifact := pushOCI, tagOCI, pushOCIArtifact
 	pushOCI = func(context.Context, string, registry.Reference, string, string, string, string, string, string) (registry.Result, error) {
 		return registry.Result{Digest: digest, Reference: "registry.example/service@" + digest}, nil
@@ -1159,17 +1253,18 @@ func TestRunPublishReplaysAPreviouslyFailedOperationWithoutRetrying(t *testing.T
 func TestRunPublishSurfacesAConflictingOperationClaim(t *testing.T) {
 	freshOperationJournal(t)
 	layoutName := buildPublishLayout(t, "example/service", "v1")
+	digest := publishLayoutDigest(t, layoutName)
 	journal, err := operationJournalFor()
 	if err != nil {
 		t.Fatal(err)
 	}
-	opID := cliOperationID("publish", "registry.example", "service", "v1", "explicit-ref")
+	opID := cliOperationID("publish", "registry.example", "service", "v1", "example/service:v1", digest)
 	if _, err := journal.Start(opID, "publish:some-other-scope"); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
 	code := runPublish(context.Background(), []string{
-		"--yes", "--allow-incomplete-evidence", "--source-ref", "explicit-ref",
+		"--yes", "--allow-incomplete-evidence", "--source-ref", "example/service:v1",
 		layoutName, "registry.example/service:v1",
 	}, &stdout, &stderr, nil)
 	if code != 1 || !strings.Contains(stderr.String(), "collides with a different operation scope") {
@@ -1238,9 +1333,10 @@ func TestRunPublishWarnsOnIllegalWorkloadStateTransitions(t *testing.T) {
 func TestRunPublishRejectsAnInvalidRegistryDigestReference(t *testing.T) {
 	freshOperationJournal(t)
 	layoutName := buildPublishLayout(t, "example/service", "v1")
+	digest := publishLayoutDigest(t, layoutName)
 	previousPush := pushOCI
 	pushOCI = func(context.Context, string, registry.Reference, string, string, string, string, string, string) (registry.Result, error) {
-		return registry.Result{Digest: "sha256:" + strings.Repeat("a", 64), Reference: "not-a-valid-digest-reference"}, nil
+		return registry.Result{Digest: digest, Reference: "not-a-valid-digest-reference"}, nil
 	}
 	t.Cleanup(func() { pushOCI = previousPush })
 	var stdout, stderr bytes.Buffer
@@ -1275,7 +1371,7 @@ func TestRunPublishSurfacesBuildArtifactsFailure(t *testing.T) {
 func TestRunPublishSurfacesTagMoveFailure(t *testing.T) {
 	freshOperationJournal(t)
 	layoutName := buildPublishLayout(t, "example/service", "v1")
-	digest := "sha256:" + strings.Repeat("4", 64)
+	digest := publishLayoutDigest(t, layoutName)
 	previousPush, previousTag := pushOCI, tagOCI
 	pushOCI = func(_ context.Context, _ string, target registry.Reference, _, _, _, _, _, _ string) (registry.Result, error) {
 		return registry.Result{Digest: digest, Reference: target.Registry + "/" + target.Repository + "@" + digest}, nil
@@ -1316,7 +1412,7 @@ func TestRunPublishPostPushPolicyEvaluationErrors(t *testing.T) {
 	if err := os.WriteFile(evidencePath, []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	digest := "sha256:" + strings.Repeat("8", 64)
+	digest := publishLayoutDigest(t, layoutName)
 	previousPush := pushOCI
 	pushOCI = func(_ context.Context, _ string, target registry.Reference, _, _, _, _, _, _ string) (registry.Result, error) {
 		if err := os.WriteFile(evidencePath, []byte(`not json`), 0o600); err != nil {
@@ -1347,7 +1443,7 @@ func TestRunPublishPostPushPolicyDiffersFromPreflight(t *testing.T) {
 	if err := os.WriteFile(evidencePath, []byte(`{"reproducible":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	digest := "sha256:" + strings.Repeat("7", 64)
+	digest := publishLayoutDigest(t, layoutName)
 	previousPush := pushOCI
 	pushOCI = func(_ context.Context, _ string, target registry.Reference, _, _, _, _, _, _ string) (registry.Result, error) {
 		// The preflight check already read and allowed reproducible=true;
@@ -1436,6 +1532,10 @@ func TestRunPublishRejectsRegistryDigestMismatchForDiscoveredProject(t *testing.
 	root, _ := setupDiscoveredPublishProject(t, "example/digest-mismatch")
 	t.Chdir(root)
 	stubRegistryPush(t, "sha256:"+strings.Repeat("9", 64), nil)
+	pushOCI = func(_ context.Context, _ string, target registry.Reference, _, _, _, _, _, _ string) (registry.Result, error) {
+		digest := "sha256:" + strings.Repeat("9", 64)
+		return registry.Result{Digest: digest, Reference: target.Registry + "/" + target.Repository + "@" + digest}, nil
+	}
 	var stdout, stderr bytes.Buffer
 	code := runPublish(context.Background(), []string{
 		"--yes", "--key-dir", filepath.Join(root, "keys"), "registry.example/digest-mismatch:v1",
@@ -1997,6 +2097,74 @@ func TestClaimOperationSurfacesJournalStartError(t *testing.T) {
 	sentinel := errors.New("journal unavailable")
 	if _, _, err := claimOperation(failingJournal{startErr: sentinel}, "op", "scope"); !errors.Is(err, sentinel) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestClaimRecoveryRequiresOriginalAndClaimsEachTokenOnce(t *testing.T) {
+	journal := idempotency.NewMemoryJournal()
+	const original core.OperationID = "publish-original"
+	const scope = "publish:registry.example/app:v1@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	if _, _, _, err := claimRecovery(journal, original, scope, "attempt-1"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("missing original err=%v", err)
+	}
+	if started, err := journal.Start(original, scope); err != nil || !started {
+		t.Fatalf("start original: started=%v err=%v", started, err)
+	}
+	recovery, proceed, done, err := claimRecovery(journal, original, scope, "attempt-1")
+	if err != nil || !proceed || done || recovery == original {
+		t.Fatalf("recovery=%q proceed=%v done=%v err=%v", recovery, proceed, done, err)
+	}
+	second, proceed, done, err := claimRecovery(journal, original, scope, "attempt-1")
+	if second != recovery || proceed || !done || !errors.Is(err, core.ErrOperationIndeterminate) {
+		t.Fatalf("duplicate recovery=%q proceed=%v done=%v err=%v", second, proceed, done, err)
+	}
+	if err := journal.Fail(recovery); err != nil {
+		t.Fatal(err)
+	}
+	next, proceed, done, err := claimRecovery(journal, original, scope, "attempt-2")
+	if err != nil || !proceed || done || next == recovery {
+		t.Fatalf("next recovery=%q proceed=%v done=%v err=%v", next, proceed, done, err)
+	}
+
+	for _, invalid := range []string{"", "bad/token", strings.Repeat("x", 65)} {
+		if _, _, _, err := claimRecovery(journal, original, scope, invalid); err == nil {
+			t.Fatalf("accepted invalid token %q", invalid)
+		}
+	}
+	if _, _, _, err := claimRecovery(journal, original, scope+"-changed", "attempt-3"); err == nil || !strings.Contains(err.Error(), "different digest") {
+		t.Fatalf("scope mismatch err=%v", err)
+	}
+}
+
+func TestClaimRecoveryNeverReplaysCompletedPublication(t *testing.T) {
+	journal := idempotency.NewMemoryJournal()
+	if started, err := journal.Start("published", "scope"); err != nil || !started {
+		t.Fatal(err)
+	}
+	if err := journal.Complete("published"); err != nil {
+		t.Fatal(err)
+	}
+	_, proceed, done, err := claimRecovery(journal, "published", "scope", "attempt")
+	if err != nil || proceed || !done {
+		t.Fatalf("proceed=%v done=%v err=%v", proceed, done, err)
+	}
+}
+
+func TestSelectedPublicationDigestBindsSourceReference(t *testing.T) {
+	report := layout.Report{Platforms: []layout.Platform{
+		{Reference: "app:v1", Digest: "sha256:" + strings.Repeat("a", 64)},
+		{Reference: "worker:v1", Digest: "sha256:" + strings.Repeat("b", 64)},
+	}}
+	digest, err := selectedPublicationDigest(report, "worker:v1")
+	if err != nil || digest != report.Platforms[1].Digest {
+		t.Fatalf("digest=%q err=%v", digest, err)
+	}
+	if _, err := selectedPublicationDigest(report, "missing:v1"); err == nil {
+		t.Fatal("accepted missing source reference")
+	}
+	if _, err := selectedPublicationDigest(report, ""); err == nil {
+		t.Fatal("accepted ambiguous layout")
 	}
 }
 

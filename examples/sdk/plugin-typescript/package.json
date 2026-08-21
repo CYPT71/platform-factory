@@ -1,5 +1,5 @@
 {
-  "name": "secure-oci-plugin-typescript-example",
+  "name": "platform-factory-typescript-example",
   "private": true,
   "version": "1.0.0",
   "description": "Reference secure-oci v1 language plugin, built on @secure-oci/plugin-sdk's TypeScript types.",

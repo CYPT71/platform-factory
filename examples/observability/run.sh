@@ -2,7 +2,7 @@
 set -euo pipefail
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH= cd -- "$here/../.." && pwd)
-work=$(mktemp -d "${TMPDIR:-/tmp}/secure-oci-example-observability.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-observability.XXXXXX")
 report_and_clean() {
   status=$?
   if [ "$status" -ne 0 ] && [ -s "$work/events.jsonl" ]; then

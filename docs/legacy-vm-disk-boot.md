@@ -99,6 +99,52 @@ the repo until it has its own hardening review. Concretely, today it:
   auto-selection. Calls `vmdisk.SelectBootDisk` first and refuses to
   invoke QEMU at all when the boot disk can't be determined, printing
   every disk's format/evidence to stderr either way.
+- **Isolated inspection process**: `microvm inspect-legacy-disk` no longer
+  parses attacker-controlled disk bytes in the long-lived CLI process. It
+  re-executes the installed `pf` binary in a hidden, disposable worker, sends
+  one strict and size-bounded JSON request over stdin, and accepts one bounded
+  report over stdout. The worker gets a 512 MiB Go memory budget, at most 32
+  disk paths and 60 seconds; it receives no inherited credentials, HOME,
+  proxy, registry or PATH environment. A crash, timeout, malformed response or
+  changed path fails closed before the parent writes reports. The worker still
+  has host read access to the explicitly supplied disk paths; format readers
+  continue to reject symlinks and external parent/extent chains.
+- **Selected application extraction from ext2/3/4**:
+  `pf microvm extract-legacy-app --disk old.raw --volume-index 0
+  --include /opt/app/service --output extracted` copies only explicitly
+  selected regular files through the same disposable worker. It refuses
+  traversal, duplicates, symlinks, special files, missing inventory entries,
+  existing outputs and non-ext volumes. The extraction is installed with one
+  rename after all reads succeed, keeps each selected POSIX mode, and records
+  source UID/GID, size and xattr presence in `extraction-report.json`.
+  Probable secret filenames are excluded unless `--include-secrets` is given.
+  Truncated inventories, excluded secrets and unpreserved xattrs fail without
+  writing anything unless the operator explicitly supplies
+  `--allow-incomplete`; that approval remains visible in the report. Bounds:
+  1,024 selected files, 64 MiB per file and 256 MiB total.
+- **Direct reviewed OCI build from ext2/3/4**:
+  `pf microvm build-legacy-oci --disk old.raw --volume-index 0
+  --include /opt/app/service --include /opt/app/config.yaml
+  --entrypoint /opt/app/service --output dist/legacy-oci` performs the same
+  isolated extraction and then builds a deterministic, verified OCI layout.
+  The entrypoint must be a selected executable Linux ELF; its detected
+  architecture/profile must match the requested target, and the standard OCI
+  ELF closure check requires its interpreter and every shared library to be in
+  the selected set. The image keeps each selected mode and UID/GID in its tar
+  headers. Runtime `User` defaults to the entrypoint's positive UID:GID and
+  `WorkingDir` to its parent; a root-owned service fails closed until a reviewed
+  positive `--user` mapping is supplied. Only allowlisted files enter the
+  image. Validated non-pseudo `/etc/fstab` mount points become OCI volumes and
+  high-confidence ports (currently validated `sshd_config`) become exposed TCP
+  ports; both lists are stable and deduplicated. Selected systemd service units
+  are parsed with a bounded, non-shell tokenizer: supported `ExecStart` args,
+  `Environment`, `WorkingDirectory`, `User` and `Group` are translated into OCI
+  runtime fields. Secret-like environment keys are recorded by name only and
+  their values never enter reports or images; `EnvironmentFile`, expansions,
+  ambiguous commands and unsupported syntax make the extraction incomplete and
+  require review. `--allow-incomplete` and
+  `--include-secrets` retain the same explicit
+  review semantics as extraction alone.
 - **`platform-factory init` integration**: `pf init [DIR]` now also
   scans `DIR`'s own top-level files (not recursive) for anything
   `internal/vmdisk.Detect` recognizes as a disk. If any are found, the
@@ -106,8 +152,11 @@ the repo until it has its own hardening review. Concretely, today it:
   → single confirmed match) and, failing that, **`pf init` prompts
   interactively** on stdin/stdout asking which one is the boot disk. The
   result is recorded in the generated `platform-factory.yaml` under a
-  new `legacy_disks: {boot, data}` field (paths relative to the project
-  root) — purely descriptive today; nothing downstream consumes it yet,
+  `legacy_disks: {boot, data, strategy}` field (paths relative to the project
+  root). `--legacy-strategy` records the reviewed plan; its default is
+  deliberately `unsupported`, so detection alone never silently authorizes
+  containerization or execution of an untrusted guest. The field is still
+  descriptive today; nothing downstream consumes it yet,
   `microvm run-legacy-disk` still takes its own `--disk` flags directly.
   A directory with no ambiguity resolvable and no `--boot-disk`/stdin
   available fails the whole `init` closed (exit 2, nothing written)
@@ -145,8 +194,8 @@ the repo until it has its own hardening review. Concretely, today it:
 
 - **amd64 only.** The script hard-refuses on non-amd64 hosts today
   (`-machine q35` + SeaBIOS/OVMF wiring hasn't been done for arm64).
-- **`legacy_disks` in the config is inert.** `pf build`/`pf publish`/etc.
-  don't read it; only `pf init` writes it. Wiring `microvm
+- **`legacy_disks` in the config is inert after planning.** `pf build`/`pf publish`/etc.
+  don't execute its retained `strategy`; only `pf init` writes it. Wiring `microvm
   run-legacy-disk` (or a future `pf run`) to consume it automatically is
   follow-on work.
 - **Compressed QCOW2 clusters and VMDK's text-descriptor/multi-extent

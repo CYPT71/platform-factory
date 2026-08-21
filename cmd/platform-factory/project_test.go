@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -17,8 +18,12 @@ import (
 
 	projectapp "github.com/CYPT71/platform-factory/internal/app/project"
 	"github.com/CYPT71/platform-factory/internal/layout"
+	microvmapi "github.com/CYPT71/platform-factory/internal/microvm"
 	"github.com/CYPT71/platform-factory/internal/plugin"
+	"github.com/CYPT71/platform-factory/internal/policy"
 	"github.com/CYPT71/platform-factory/internal/project"
+	runtimeapp "github.com/CYPT71/platform-factory/internal/runtime"
+	"github.com/CYPT71/platform-factory/internal/signing"
 	api "github.com/CYPT71/platform-factory/sdk/plugin"
 )
 
@@ -133,10 +138,23 @@ func TestRunProjectFreezeExecutesConfiguredCommand(t *testing.T) {
 	}
 }
 
-func TestFreezeProjectWritesToolOutputAndInventory(t *testing.T) {
-	loaded := loadProjectTest(t, "language: python\nruntime: python\n")
+func TestFreezeProjectWritesToolOutputInventoryAndV2Pins(t *testing.T) {
+	loaded := loadProjectTest(t, "language: python\nruntime: python\ninclude:\n  - {source: python, destination: /runtime/python, category: toolchain}\n")
 	writeProjectTestFile(t, filepath.Join(loaded.Root, "requirements.txt"), "example==1.0\n", 0o644)
 	writeProjectTestFile(t, filepath.Join(loaded.Root, "python"), "runtime", 0o755)
+	raw, err := os.ReadFile(loaded.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planDigest, err := project.CanonicalManifestDigest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockBytes, err := json.Marshal(project.Lock{Version: 2, PlanDigest: planDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProjectTestFile(t, loaded.AdjacentLockPath(), string(lockBytes), 0o600)
 	calls := 0
 	execute := func(_ string, args []string, _ string, stdout, _ io.Writer) error {
 		calls++
@@ -155,6 +173,144 @@ func TestFreezeProjectWritesToolOutputAndInventory(t *testing.T) {
 	lock, err := os.ReadFile(filepath.Join(loaded.Root, "requirements.lock"))
 	if err != nil || string(lock) != "example==1.0\n" {
 		t.Fatalf("lock=%q err=%v", lock, err)
+	}
+	projectLock, err := project.LoadLock(loaded.AdjacentLockPath())
+	if err != nil || len(projectLock.Sources) == 0 || len(projectLock.Toolchains) != 1 || projectLock.Toolchains[0].Name != "python" {
+		t.Fatalf("project lock=%+v err=%v", projectLock, err)
+	}
+	if err := loaded.VerifyAdjacentLock(); err != nil {
+		t.Fatalf("fresh lock pins do not verify: %v", err)
+	}
+}
+
+func TestFreezePinsMicroVMKernelAndInitramfs(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nisolation: microvm\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "kernel"), "kernel-v1", 0o600)
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "initramfs"), "initramfs-v1", 0o600)
+	raw, err := os.ReadFile(loaded.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := project.CanonicalManifestDigest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(project.Lock{Version: 2, PlanDigest: digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProjectTestFile(t, loaded.AdjacentLockPath(), string(encoded), 0o600)
+	var stdout, stderr bytes.Buffer
+	if code := freezeProjectWithBootPins(loaded, nil, "kernel", "initramfs", &stdout, &stderr, func(string, []string, string, io.Writer, io.Writer) error { return nil }); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	lock, err := project.LoadLock(loaded.AdjacentLockPath())
+	if err != nil || lock.Kernel == nil || lock.Initramfs == nil {
+		t.Fatalf("lock=%+v err=%v", lock, err)
+	}
+	if err := loaded.VerifyAdjacentLock(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(loaded.Root, "kernel"), []byte("tampered"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := loaded.VerifyAdjacentLock(); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("tamper err=%v", err)
+	}
+	stderr.Reset()
+	if code := freezeProjectWithBootPins(loaded, nil, "kernel", "", &stdout, &stderr, func(string, []string, string, io.Writer, io.Writer) error { return nil }); code != 2 {
+		t.Fatalf("half pins code=%d", code)
+	}
+}
+
+func TestWriteProjectBootBundleUsesOnlyVerifiedPinnedDigests(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nisolation: microvm\nimage: example/microvm\ntag: v1\nplatform: linux/arm64\n")
+	digest := func(character string) string { return "sha256:" + strings.Repeat(character, 64) }
+	lock := project.Lock{
+		Version: project.CurrentLockVersion, PlanDigest: digest("a"),
+		Kernel:    &project.LockedInput{Name: "kernel", Digest: digest("b")},
+		Initramfs: &project.LockedInput{Name: "initramfs", Digest: digest("c")},
+	}
+	encoded, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProjectTestFile(t, loaded.AdjacentLockPath(), string(encoded), 0o600)
+	bundleDir, err := writeProjectBootBundle(loaded, digest("d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(bundleDir, "bundle.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle microvmapi.BootBundle
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimeapp.ValidateBootBundle(bundle); err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Kernel != digest("b") || bundle.Initrd != digest("c") || bundle.RootFS != digest("d") || bundle.Metadata["platform"] != "linux/arm64" {
+		t.Fatalf("bundle=%+v", bundle)
+	}
+
+	unsafeRoot := t.TempDir()
+	unsafeLoaded := loadProjectTest(t, "language: compiled\nartifact: app\nisolation: microvm\n")
+	writeProjectTestFile(t, unsafeLoaded.AdjacentLockPath(), string(encoded), 0o600)
+	if err := os.Symlink(unsafeRoot, filepath.Join(unsafeLoaded.Root, "dist")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeProjectBootBundle(unsafeLoaded, digest("d")); err == nil || !strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("unsafe dist accepted: %v", err)
+	}
+}
+
+func TestProjectBuildMicroVMProducesDistBootBundle(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nisolation: microvm\nimage: example/microvm\ntag: v1\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "kernel"), "kernel", 0o600)
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "initramfs"), "initramfs", 0o600)
+	raw, err := os.ReadFile(loaded.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planDigest, err := project.CanonicalManifestDigest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kernel, err := loaded.PinLocalFile("kernel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	initramfs, err := loaded.PinLocalFile("initramfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(project.Lock{Version: project.CurrentLockVersion, PlanDigest: planDigest, Kernel: &kernel, Initramfs: &initramfs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProjectTestFile(t, loaded.AdjacentLockPath(), string(encoded), 0o600)
+
+	var stdout, stderr bytes.Buffer
+	digest, code := buildProject(loaded, &stdout, &stderr, func(string, []string, string, io.Writer, io.Writer) error { return nil })
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	raw, err = os.ReadFile(filepath.Join(loaded.Root, "dist", "boot-bundle", "bundle.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle microvmapi.BootBundle
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if bundle.RootFS != digest || bundle.Kernel != kernel.Digest || bundle.Initrd != initramfs.Digest {
+		t.Fatalf("bundle=%+v build digest=%s", bundle, digest)
+	}
+	if !strings.Contains(stdout.String(), `"boot_bundle"`) {
+		t.Fatalf("machine output omits boot bundle: %s", stdout.String())
 	}
 }
 
@@ -981,6 +1137,91 @@ include:
 	stderr.Reset()
 	if _, code := buildProject(badPlatform, &stdout, &stderr, execute); code != 2 {
 		t.Fatalf("bad platform code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestBuildProjectRefusesManifestDriftFromV2Lock(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
+	raw, err := os.ReadFile(loaded.File)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := project.CanonicalManifestDigest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(project.Lock{Version: 2, PlanDigest: digest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "pf.lock"), string(encoded), 0o600)
+	writeProjectTestFile(t, loaded.File, "language: compiled\nartifact: changed\n", 0o600)
+	var stdout, stderr bytes.Buffer
+	called := false
+	if _, code := buildProject(loaded, &stdout, &stderr, func(string, []string, string, io.Writer, io.Writer) error { called = true; return nil }); code != 2 || !strings.Contains(stderr.String(), "lock preflight failed") || called {
+		t.Fatalf("code=%d called=%v stderr=%s", code, called, stderr.String())
+	}
+}
+
+func TestProjectBuildEnforcesConfiguredPolicyAndSignature(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nuser: 1000:1000\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	keyDir := filepath.Join(loaded.Root, ".platform-factory", "keys")
+	store, err := signing.NewFileKeyStore(keyDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublicKey("release"); err != nil {
+		t.Fatal(err)
+	}
+	rules := policy.Rules{APIVersion: policy.APIVersion, RequireSBOM: true, RequireProvenance: true, RequireSignature: true}
+	encoded, err := json.Marshal(rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "policies", "build.json"), string(encoded), 0o600)
+	var stdout, stderr bytes.Buffer
+	if _, code := buildProject(loaded, &stdout, &stderr, func(string, []string, string, io.Writer, io.Writer) error { return nil }); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	for _, relative := range []string{"attestations/provenance.dsse.json", "signatures/subject.dsse.json", "reports/policy.json"} {
+		if !regularFile(filepath.Join(loaded.Root, ".platform-factory", "release", relative)) {
+			t.Fatalf("missing %s", relative)
+		}
+	}
+	var report struct {
+		Decision policy.Decision `json:"decision"`
+		Rules    policy.Rules    `json:"rules"`
+	}
+	reportBytes, err := os.ReadFile(filepath.Join(loaded.Root, ".platform-factory", "release", "reports", "policy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(reportBytes, &report); err != nil || !report.Decision.Allowed || !report.Rules.RequireSignature {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+}
+
+func TestProjectBuildPolicyFailsClosedBeforeExecutor(t *testing.T) {
+	for name, rules := range map[string]policy.Rules{
+		"pins":         {APIVersion: policy.APIVersion, RequirePins: true},
+		"hardening":    {APIVersion: policy.APIVersion, RequireHardening: true},
+		"reproducible": {APIVersion: policy.APIVersion, RequireReproducible: true},
+		"signature":    {APIVersion: policy.APIVersion, RequireSignature: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
+			encoded, err := json.Marshal(rules)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeProjectTestFile(t, filepath.Join(loaded.Root, "policies", "build.json"), string(encoded), 0o600)
+			called := false
+			var stdout, stderr bytes.Buffer
+			if _, code := buildProject(loaded, &stdout, &stderr, func(string, []string, string, io.Writer, io.Writer) error { called = true; return nil }); code != 2 || called || !strings.Contains(stderr.String(), "policy preflight failed") {
+				t.Fatalf("code=%d called=%v stderr=%s", code, called, stderr.String())
+			}
+		})
 	}
 }
 

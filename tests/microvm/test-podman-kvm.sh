@@ -119,6 +119,21 @@ grep -Fq '"component":"example-service"' "$supervisor_log"
 
 podman stop --time 20 "$container_name" | tee "$evidence_dir/podman-microvm-stop.txt"
 test "$(podman inspect --format '{{.State.Status}}' "$container_name")" = exited
+state_file=${supervisor_log%.supervisor.log}.json
+test -s "$state_file"
+python3 - "$state_file" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1], encoding="utf-8"))
+metrics = state.get("metrics") or {}
+assert metrics.get("api_version") == "platform-factory.dev/vmm-metrics/v1", metrics
+assert metrics.get("backend") == "kvm-native", metrics
+assert metrics.get("architecture") == "amd64", metrics
+assert metrics.get("runtime_ms", -1) >= 0, metrics
+assert metrics.get("memory_mib") == 128, metrics
+assert metrics.get("vcpus") == 1, metrics
+assert metrics.get("exit_status") == state.get("exitStatus"), (metrics, state)
+PY
+cp "$state_file" "$evidence_dir/podman-microvm-terminal-state.json"
 podman rm "$container_name" | tee "$evidence_dir/podman-microvm-rm.txt"
 if podman container exists "$container_name"; then
   echo "error: Podman retained $container_name after rm" >&2

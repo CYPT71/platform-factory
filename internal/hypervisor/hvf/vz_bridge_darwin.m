@@ -46,10 +46,25 @@ int vz_is_supported(void) {
     return VZVirtualMachine.isSupported ? 1 : 0;
 }
 
+int vz_linux_rosetta_is_supported(void) {
+    if (@available(macOS 13.0, *)) {
+        return VZLinuxRosettaDirectoryShare.availability != VZLinuxRosettaAvailabilityNotSupported;
+    }
+    return 0;
+}
+
+int vz_linux_rosetta_is_installed(void) {
+    if (@available(macOS 13.0, *)) {
+        return VZLinuxRosettaDirectoryShare.availability == VZLinuxRosettaAvailabilityInstalled;
+    }
+    return 0;
+}
+
 vz_machine_t *vz_create_machine(
     const char *kernel_path, const char *initrd_path, const char *command_line,
     const char *serial_log_path, unsigned long long memory_bytes, unsigned int vcpu_count,
-    const char *mac_address, int *guest_agent_fd_out, char *error_out, size_t error_cap) {
+    const char *mac_address, int enable_linux_rosetta, int *guest_agent_fd_out,
+    char *error_out, size_t error_cap) {
     @autoreleasepool {
         if (guest_agent_fd_out != NULL) {
             *guest_agent_fd_out = -1;
@@ -107,6 +122,40 @@ vz_machine_t *vz_create_machine(
         configuration.CPUCount = vcpu_count;
         configuration.serialPorts = serialPorts;
         configuration.entropyDevices = @[ entropy ];
+
+        if (enable_linux_rosetta != 0) {
+            if (@available(macOS 13.0, *)) {
+                if (VZLinuxRosettaDirectoryShare.availability != VZLinuxRosettaAvailabilityInstalled) {
+                    set_error("Rosetta for Linux is not installed", error_out, error_cap);
+                    if (guestAgentHostFD >= 0) {
+                        close(guestAgentHostFD);
+                    }
+                    [guestAgentHandle closeFile];
+                    return NULL;
+                }
+                NSError *rosettaError = nil;
+                VZLinuxRosettaDirectoryShare *share = [[VZLinuxRosettaDirectoryShare alloc] initWithError:&rosettaError];
+                if (share == nil) {
+                    copy_error(rosettaError, error_out, error_cap);
+                    if (guestAgentHostFD >= 0) {
+                        close(guestAgentHostFD);
+                    }
+                    [guestAgentHandle closeFile];
+                    return NULL;
+                }
+                VZVirtioFileSystemDeviceConfiguration *fileSystem =
+                    [[VZVirtioFileSystemDeviceConfiguration alloc] initWithTag:@"rosetta"];
+                fileSystem.share = share;
+                configuration.directorySharingDevices = @[ fileSystem ];
+            } else {
+                set_error("Rosetta for Linux requires macOS 13 or newer", error_out, error_cap);
+                if (guestAgentHostFD >= 0) {
+                    close(guestAgentHostFD);
+                }
+                [guestAgentHandle closeFile];
+                return NULL;
+            }
+        }
 
         // See vz_bridge_darwin.h: NAT-attached virtio-net, guest negotiates
         // its own address (this project's kernel does that via `ip=dhcp`,

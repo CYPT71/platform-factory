@@ -106,6 +106,28 @@ func claimOperation(journal core.OperationJournal, id core.OperationID, scope st
 	}
 }
 
+// claimRecovery creates a separately claimed attempt only after the original
+// publication is proven indeterminate or failed. The caller then re-observes
+// the registry through the digest-addressed publication path.
+func claimRecovery(journal core.OperationJournal, original core.OperationID, scope, token string) (core.OperationID, bool, bool, error) {
+	if token == "" || len(token) > 64 || !core.ValidOperationID(core.OperationID(token)) {
+		return "", false, false, errors.New("recovery token must be 1..64 printable characters without slash, backslash or colon")
+	}
+	record, found := journal.Lookup(original)
+	if !found {
+		return "", false, false, fmt.Errorf("original operation %q does not exist", original)
+	}
+	if record.Scope != scope {
+		return "", false, false, fmt.Errorf("original operation %q belongs to a different digest or target", original)
+	}
+	if record.Status == core.OperationCompleted {
+		return "", false, true, nil
+	}
+	recovery := core.OperationID(string(original) + "-recovery-" + core.DeriveID("platform-factory/publish-recovery/v1", token))
+	proceed, done, err := claimOperation(journal, recovery, scope)
+	return recovery, proceed, done, err
+}
+
 var pushOCI = func(ctx context.Context, layoutName string, target registry.Reference, sourceReference, scheme, username, password, mountFrom, sessionDir string) (registry.Result, error) {
 	client := &registry.Client{
 		Scheme: scheme, Username: username, Password: password,
@@ -126,6 +148,24 @@ var pushOCIArtifact = func(ctx context.Context, target registry.Reference, publi
 	client := &registry.Client{Scheme: scheme, Username: username, Password: password}
 	return client.PushArtifact(ctx, target, published.Digest, published.MediaType, published.Size,
 		artifactType, payloadType, payload)
+}
+
+func selectedPublicationDigest(report layout.Report, reference string) (string, error) {
+	if len(report.Platforms) == 0 {
+		return "", errors.New("verified layout contains no platform manifest")
+	}
+	if reference == "" {
+		if len(report.Platforms) != 1 {
+			return "", errors.New("verified layout contains multiple manifests; select one with --source-ref")
+		}
+		return report.Platforms[0].Digest, nil
+	}
+	for _, platform := range report.Platforms {
+		if platform.Reference == reference {
+			return platform.Digest, nil
+		}
+	}
+	return "", fmt.Errorf("source reference %q is not present in the verified layout", reference)
 }
 
 var verifyRemoteDigest = func(ctx context.Context, repository, digest, scheme, username, password string) error {
@@ -173,6 +213,8 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 	sign := flags.Bool("sign", false, "sign the published digest with the native Ed25519 engine")
 	includeSBOM := flags.Bool("sbom", false, "generate and publish a native SBOM artifact")
 	provenance := flags.String("provenance", "", "provenance predicate to publish as a linked artifact")
+	var externalAttestations stringList
+	flags.Var(&externalAttestations, "attestation", "external predicate document to subject-bind, sign, and publish; repeatable")
 	journal := flags.String("journal", "", "pipeline journal used to generate native SLSA provenance")
 	builderID := flags.String("builder-id", "https://platform-factory.dev/builder/v1", "SLSA builder identity")
 	keyDir := flags.String("key-dir", "", "native signing key directory (default: ~/.platform-factory/keys)")
@@ -187,6 +229,7 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 	uploadSessionDir := flags.String("upload-session-dir", defaultUploadSessionDir(), "persistent registry upload session directory")
 	outputFormat := flags.String("format", "json", "result format: json or reference")
 	reportsDir := flags.String("reports", "", "write versioned publication metrics to DIR/metrics.json")
+	recoveryToken := flags.String("recover-operation", "", "explicit unique token to reconcile and retry a failed or indeterminate publication")
 	if containsHelpFlag(args) {
 		printPublishUsage(stdout, flags)
 		return 0
@@ -221,6 +264,14 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 	}
 	if *provenance != "" && *journal != "" {
 		fmt.Fprintln(stderr, "platform-factory publish: --provenance and --journal are mutually exclusive")
+		return 2
+	}
+	if len(externalAttestations) > 0 && !*sign {
+		fmt.Fprintln(stderr, "platform-factory publish: --attestation requires --sign")
+		return 2
+	}
+	if err := publish.ValidateExternalAttestations(externalAttestations); err != nil {
+		fmt.Fprintf(stderr, "platform-factory publish: %v\n", err)
 		return 2
 	}
 	var discoveredProject *project.Loaded
@@ -297,13 +348,17 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 	if *username == "" {
 		*username = strings.TrimSpace(os.Getenv("PLATFORM_FACTORY_REGISTRY_USERNAME"))
 	}
+	localDigest, err := selectedPublicationDigest(report, *sourceReference)
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory publish: %v\n", err)
+		return 2
+	}
 	password := os.Getenv("PLATFORM_FACTORY_REGISTRY_PASSWORD")
 	scheme := "https"
 	if *insecureRegistry {
 		scheme = "http"
 	}
 	if *policyFile != "" {
-		localDigest := report.Platforms[0].Digest
 		decision, policyErr := publish.EvaluatePolicy(*policyFile, *evidenceFile,
 			registry.Result{Digest: localDigest}, *includeSBOM, *provenance != "" || *journal != "", *sign)
 		if policyErr != nil {
@@ -333,6 +388,9 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 		if *journal != "" {
 			fmt.Fprintln(stdout, "generate SLSA provenance from the pipeline journal and publish it as an OCI subject artifact")
 		}
+		for _, attestationPath := range externalAttestations {
+			fmt.Fprintf(stdout, "validate, subject-bind, sign, and publish external attestation %s as an OCI subject artifact\n", attestationPath)
+		}
 		fmt.Fprintf(stdout, "move tag %s only after every evidence artifact and policy check succeeds\n", target.Tag)
 		return 0
 	}
@@ -343,8 +401,16 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 		return 1
 	}
 	publishScope := target.Registry + "/" + target.Repository + ":" + target.Tag
-	opID := cliOperationID("publish", target.Registry, target.Repository, target.Tag, *sourceReference)
-	proceed, done, doneErr := claimOperation(opJournal, opID, "publish:"+publishScope)
+	operationScope := "publish:" + publishScope + "@" + localDigest
+	baseOperationID := cliOperationID("publish", target.Registry, target.Repository, target.Tag, *sourceReference, localDigest)
+	opID := baseOperationID
+	var proceed, done bool
+	var doneErr error
+	if *recoveryToken == "" {
+		proceed, done, doneErr = claimOperation(opJournal, opID, operationScope)
+	} else {
+		opID, proceed, done, doneErr = claimRecovery(opJournal, baseOperationID, operationScope, *recoveryToken)
+	}
 	if done {
 		if doneErr != nil {
 			fmt.Fprintf(stderr, "platform-factory publish: %v\n", doneErr)
@@ -390,8 +456,8 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 	}
 	digest := published.Digest
 	immutable := published.Reference
-	if discoveredProject != nil && len(report.Platforms) == 1 && digest != report.Platforms[0].Digest {
-		fmt.Fprintf(stderr, "platform-factory publish: registry digest %s does not match verified build digest %s\n", digest, report.Platforms[0].Digest)
+	if digest != localDigest {
+		fmt.Fprintf(stderr, "platform-factory publish: registry digest %s does not match verified build digest %s\n", digest, localDigest)
 		return 1
 	}
 	if !validDigestReference(immutable) {
@@ -399,8 +465,8 @@ func runPublish(ctx context.Context, args []string, stdout, stderr io.Writer, ex
 		return 1
 	}
 	_ = execute // retained in the command boundary for deploy/rollback test injection.
-	artifacts, err := publish.BuildArtifacts(layoutName, published, *includeSBOM,
-		*provenance, *journal, *builderID, *sign, *keyDir, *keyName)
+	artifacts, err := publish.BuildArtifactsWithAttestations(layoutName, published, *includeSBOM,
+		*provenance, *journal, *builderID, *sign, *keyDir, *keyName, externalAttestations)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory publish: build native evidence: %v\n", err)
 		return 1
@@ -534,6 +600,7 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 	evidenceFile := flags.String("evidence", "", "evidence JSON evaluated by --policy - e.g. one pf publish already wrote for this digest")
 	dryRun := flags.Bool("dry-run", false, "print the manifest without applying it")
 	yes := flags.Bool("yes", false, "confirm cluster deployment")
+	outputFormat := flags.String("format", "text", "result format: text or json")
 	pluginFlags := registerPluginFlags(flags)
 	if containsHelpFlag(args) {
 		printDeployUsage(stdout, flags)
@@ -545,7 +612,7 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 		}
 		return 2
 	}
-	if flags.NArg() > 1 || !validKubernetesName(*name) || !validKubernetesName(*namespace) ||
+	if flags.NArg() > 1 || !validOutputFormat(*outputFormat) || !validKubernetesName(*name) || !validKubernetesName(*namespace) ||
 		*replicas < 1 || *port < 1 || *port > 65535 {
 		fmt.Fprintln(stderr, "usage: platform-factory deploy [--workload auto|service|job] [--name NAME] [--namespace NS] [--policy FILE --evidence FILE] [--dry-run] [--yes] [IMAGE]")
 		return 2
@@ -665,6 +732,13 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 	}
 	if *dryRun {
 		fmt.Fprintf(stderr, "platform-factory deploy: selected Kubernetes %s (%s)\n", selectedWorkload, map[string]string{"job": "the project declares no listening ports", "service": "a service workload was requested or ports are declared"}[selectedWorkload])
+		if *outputFormat == "json" {
+			return writeDeployJSON(stdout, stderr, map[string]any{
+				"api_version": cliOutputAPIVersion, "operation": "deploy", "status": "dry_run",
+				"image": image, "name": *name, "namespace": *namespace, "workload": selectedWorkload,
+				"runtime_class": *runtimeClass, "manifest": string(manifest),
+			})
+		}
 		_, _ = stdout.Write(manifest)
 		return 0
 	}
@@ -689,15 +763,18 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 	if deployErr != nil {
 		fmt.Fprintf(stderr, "platform-factory deploy: %v\n", deployErr)
 		code = 1
-	} else if observeOutput != "" {
+	} else if observeOutput != "" && *outputFormat == "text" {
 		fmt.Fprintln(stdout, observeOutput)
 	}
 	const deployOperationCount = 2 // apply, then one workload-appropriate observation
+	deploymentReceipt := ""
+	metricsReceipt := ""
 	if code == 0 && deploymentProject != nil {
 		if *reportsDir == "" {
 			*reportsDir = filepath.Join(deploymentProject.Root, ".platform-factory", "deployment")
 		}
-		if err := atomicfile.WriteJSONSensitive(filepath.Join(deploymentProject.Root, ".platform-factory", "deployed.json"), map[string]any{
+		deploymentReceipt = filepath.Join(deploymentProject.Root, ".platform-factory", "deployed.json")
+		if err := atomicfile.WriteJSONSensitive(deploymentReceipt, map[string]any{
 			"api_version": "platform-factory.dev/deployment/v1", "image": image,
 			"name": *name, "namespace": *namespace, "workload": selectedWorkload,
 			"runtime_class": *runtimeClass,
@@ -708,6 +785,7 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 	}
 	if code == 0 && *reportsDir != "" {
 		_, digest, _ := strings.Cut(image, "@")
+		metricsReceipt = filepath.Join(*reportsDir, "metrics.json")
 		if err := atomicfile.WriteJSON(*reportsDir, "metrics.json", map[string]any{
 			"api_version": "platform-factory.dev/metrics/v1", "operation": "deploy",
 			"trace_id": traceID, "duration_ms": time.Since(startedAt).Milliseconds(),
@@ -717,7 +795,23 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 			fmt.Fprintf(stderr, "platform-factory deploy: warning: deployment succeeded but metrics could not be written: %v\n", err)
 		}
 	}
+	if code == 0 && *outputFormat == "json" {
+		return writeDeployJSON(stdout, stderr, map[string]any{
+			"api_version": cliOutputAPIVersion, "operation": "deploy", "status": "deployed",
+			"image": image, "name": *name, "namespace": *namespace, "workload": selectedWorkload,
+			"runtime_class": *runtimeClass, "observation": observeOutput, "operations": deployOperationCount,
+			"deployment_receipt": deploymentReceipt, "metrics_receipt": metricsReceipt,
+		})
+	}
 	return code
+}
+
+func writeDeployJSON(stdout, stderr io.Writer, result map[string]any) int {
+	if err := json.NewEncoder(stdout).Encode(result); err != nil {
+		fmt.Fprintf(stderr, "platform-factory deploy: encode output: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // deployToCluster applies manifest to the cluster through the deployment

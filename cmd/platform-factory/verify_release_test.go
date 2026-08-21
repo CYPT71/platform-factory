@@ -3,15 +3,22 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/CYPT71/platform-factory/internal/attestation"
 	"github.com/CYPT71/platform-factory/internal/layout"
 	"github.com/CYPT71/platform-factory/internal/policy"
+	provenancegen "github.com/CYPT71/platform-factory/internal/provenance"
 	"github.com/CYPT71/platform-factory/internal/sbom"
 	"github.com/CYPT71/platform-factory/internal/signing"
 )
@@ -123,6 +130,73 @@ func verifyReleaseArgs(f releaseFixture, extra ...string) []string {
 	}
 	args = append(args, extra...)
 	return append(args, f.layoutDir)
+}
+
+func TestVerifyReleaseAcceptsExplicitlyPinnedX509Root(t *testing.T) {
+	fixture := buildReleaseFixture(t, true)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "release-test-root"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour),
+		BasicConstraintsValid: true, IsCA: true,
+		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, publicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := filepath.Join(t.TempDir(), "release-root.pem")
+	if err := os.WriteFile(certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"verify-release", "--allow-incomplete-evidence", "--certificate", certificate,
+		"--root-certificate", certificate, fixture.layoutDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	if !bytes.Contains(stdout.Bytes(), []byte(`"valid": true`)) {
+		t.Fatalf("stdout=%s", stdout.String())
+	}
+}
+
+func TestVerifyReleaseChecksProvenanceAgainstActualJournal(t *testing.T) {
+	fixture := buildReleaseFixture(t, true)
+	dir := t.TempDir()
+	journalText := `{"api_version":"platform-factory.dev/journal/v1","pipeline_fingerprint":"sha256:cli-journal","engine_version":"platform-factory/1","sandbox":"on","stages":[{"id":"build","state":"succeeded"}]}`
+	journalFile := filepath.Join(dir, "journal.json")
+	if err := os.WriteFile(journalFile, []byte(journalText), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	builderID := "https://platform-factory.dev/builder/v1"
+	predicate, err := provenancegen.FromJournal(bytes.NewBufferString(journalText), builderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provenanceFile := filepath.Join(dir, "provenance.json")
+	writeJSONFile(t, provenanceFile, predicate)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"verify-release", "--allow-incomplete-evidence", "--provenance", provenanceFile,
+		"--journal", journalFile, "--builder-id", builderID, fixture.layoutDir}, &stdout, &stderr)
+	if code != 0 || !bytes.Contains(stdout.Bytes(), []byte(`"provenance_journal_valid": true`)) {
+		t.Fatalf("code=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+
+	predicate.RunDetails.Metadata.InvocationID = "sha256:tampered"
+	writeJSONFile(t, provenanceFile, predicate)
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{"verify-release", "--allow-incomplete-evidence", "--provenance", provenanceFile,
+		"--journal", journalFile, "--builder-id", builderID, fixture.layoutDir}, &stdout, &stderr)
+	if code != 1 || !bytes.Contains(stdout.Bytes(), []byte("inconsistent with the supplied build journal")) {
+		t.Fatalf("tampered code=%d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
 }
 
 func TestRunVerifyReleaseCompleteChainSucceeds(t *testing.T) {

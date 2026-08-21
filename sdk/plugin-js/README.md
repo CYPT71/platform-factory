@@ -6,7 +6,7 @@ plugins speak over stdin/stdout (an LSP/DAP-style header-framed message on
 the wire) and the plugin-side `Server`. This mirrors Go's `sdk/plugin`
 package field for field; a plugin written against either SDK speaks the
 exact same wire protocol and passes the exact same conformance suite
-(`secure-oci-conformance plugin`).
+(`platform-factory plugin`).
 
 No third-party dependencies. CommonJS, with `index.d.ts` for TypeScript.
 

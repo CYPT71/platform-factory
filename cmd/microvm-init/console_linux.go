@@ -44,6 +44,21 @@ func prepareConsole() error {
 	return nil
 }
 
+// prepareProc provides the process and kernel view required by PID 1 itself,
+// the guest-agent, and DHCP address reporting. In particular /proc/cmdline is
+// the authoritative signal that the HVF guest requested ip=dhcp.
+func prepareProc() error {
+	if err := os.MkdirAll("/proc", 0o555); err != nil {
+		return fmt.Errorf("create /proc: %w", err)
+	}
+	if err := syscall.Mount("proc", "/proc", "proc",
+		syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC, ""); err != nil &&
+		!errors.Is(err, syscall.EBUSY) {
+		return fmt.Errorf("mount proc: %w", err)
+	}
+	return nil
+}
+
 // prepareMessageQueue supplies the kernel-owned POSIX message queue
 // filesystem requested by the standard OCI mount set. It is deliberately
 // created inside the guest rather than forwarding Podman's host mount.

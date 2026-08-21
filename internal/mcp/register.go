@@ -71,7 +71,7 @@ func NewPlatformFactoryServer(repoRoot, version string, langPlugins plugins.Lang
 		Name: "pf_plugin_create",
 		Description: "Scaffold a brand-new RPC plugin under plugins/<name>: a plugin.json manifest, README, go.mod " +
 			"(using this repository's local-replace convention), and a cmd/platform-factory-<name>/main.go that starts " +
-			"a real sdk/plugin.Server with one handler stub per requested capability. Refuses to overwrite an existing directory.",
+			"runtime plugin.json and marketplace plugin.yaml manifests, a real sdk/plugin.Server with deterministic handlers, and executable tests. Refuses to overwrite an existing directory.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"required": ["name", "description", "capabilities"],
@@ -148,6 +148,13 @@ func NewPlatformFactoryServer(repoRoot, version string, langPlugins plugins.Lang
 		Name:        "pf_git_status",
 		Description: "Report this repository's current branch and working-tree dirty state.",
 		Handler:     git.StatusToolHandler(repoRoot),
+	})
+	s.AddResource(Resource{
+		URI:         "pf://git/status",
+		Name:        "git-status",
+		Description: "The repository's live branch and working-tree dirty state.",
+		MimeType:    "application/json",
+		Handler:     git.StatusResourceHandler(repoRoot),
 	})
 	s.AddTool(Tool{
 		Name: "pf_git_prepare_branch",

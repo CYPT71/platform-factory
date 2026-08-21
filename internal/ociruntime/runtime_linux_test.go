@@ -631,6 +631,125 @@ func TestDeadSupervisorCleansCommandSocket(t *testing.T) {
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("command socket survived dead supervisor reconciliation: %v", err)
 	}
+	reconciled, found, err := store.Get(ctx, "secure-img")
+	if err != nil || !found {
+		t.Fatalf("reconciled state found=%t err=%v", found, err)
+	}
+	if reconciled.PID != 0 || reconciled.PIDStartTicks != 0 || reconciled.Status != "stopped" ||
+		reconciled.ExitStatus == nil || *reconciled.ExitStatus != 255 || reconciled.ExitedAt == nil {
+		t.Fatalf("dead supervisor left orphaned runtime identity: %+v", reconciled)
+	}
+}
+
+// TestCrashedProcessWithKVMDescriptorLeavesNoRuntimeResources is a real
+// process-crash test. The helper owns an open /dev/kvm descriptor while the
+// canonical runtime state and command socket point at it; SIGKILL bypasses all
+// Go defers. The kernel must release the descriptor and Store.Get must remove
+// the stale socket and terminalize the one canonical state record.
+func TestCrashedProcessWithKVMDescriptorLeavesNoRuntimeResources(t *testing.T) {
+	probe, err := os.OpenFile("/dev/kvm", os.O_RDWR, 0)
+	if err != nil {
+		if os.Getenv("PLATFORM_FACTORY_REQUIRE_KVM_CRASH_TEST") == "1" {
+			t.Fatalf("required real /dev/kvm unavailable: %v", err)
+		}
+		t.Skipf("real /dev/kvm unavailable: %v", err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.Create(ctx, "crash-kvm", testBundle(t)); err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(os.Args[0], "-test.run=^TestKVMDescriptorCrashHelper$", "-test.count=1")
+	child.Env = append(os.Environ(), "PLATFORM_FACTORY_KVM_CRASH_HELPER=1")
+	var childOutput bytes.Buffer
+	child.Stdout = &childOutput
+	child.Stderr = &childOutput
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	}()
+	if err := waitForKVMDescriptor(child.Process.Pid, 5*time.Second); err != nil {
+		t.Fatalf("helper did not retain a real KVM descriptor: %v; output=%s", err, childOutput.String())
+	}
+	if err := store.SetSupervisor(ctx, "crash-kvm", child.Process.Pid); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetStatus(ctx, "crash-kvm", "running"); err != nil {
+		t.Fatal(err)
+	}
+	state, found, err := store.readPersisted(ctx, "crash-kvm")
+	if err != nil || !found {
+		t.Fatalf("state found=%t err=%v", found, err)
+	}
+	socketPath := store.controlSocketPath(state)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.Wait(); err == nil {
+		t.Fatal("SIGKILLed KVM helper exited successfully")
+	}
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d", child.Process.Pid)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("crashed supervisor PID remains visible: %v", err)
+	}
+	reconciled, found, err := store.Get(ctx, "crash-kvm")
+	if err != nil || !found {
+		t.Fatalf("reconciled state found=%t err=%v", found, err)
+	}
+	if reconciled.Status != "stopped" || reconciled.PID != 0 || reconciled.PIDStartTicks != 0 ||
+		reconciled.ExitStatus == nil || *reconciled.ExitStatus != 255 || reconciled.ExitedAt == nil {
+		t.Fatalf("crash left orphaned runtime state: %+v", reconciled)
+	}
+	if _, err := os.Lstat(socketPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("crash left command socket behind: %v", err)
+	}
+}
+
+func TestKVMDescriptorCrashHelper(t *testing.T) {
+	if os.Getenv("PLATFORM_FACTORY_KVM_CRASH_HELPER") != "1" {
+		t.Skip("subprocess helper")
+	}
+	device, err := os.OpenFile("/dev/kvm", os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.Close()
+	for {
+		time.Sleep(time.Hour)
+	}
+}
+
+func waitForKVMDescriptor(pid int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		entries, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
+		if err == nil {
+			for _, entry := range entries {
+				target, readErr := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, entry.Name()))
+				if readErr == nil && target == "/dev/kvm" {
+					return nil
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.New("timed out waiting for /dev/kvm descriptor")
 }
 
 // TestSetSupervisorRecordsRealStartTicks confirms SetSupervisor captures a
@@ -973,11 +1092,36 @@ func TestStorePersistsExactGuestExitStatus(t *testing.T) {
 		t.Fatalf("state=%+v", stored)
 	}
 	if stored.Metrics == nil || stored.Metrics.APIVersion != "platform-factory.dev/vmm-metrics/v1" ||
+		stored.Metrics.Backend != "kvm-native" || stored.Metrics.Architecture != "amd64" ||
 		stored.Metrics.RuntimeMS != 1500 || stored.Metrics.MemoryMiB != 256 || stored.Metrics.VCPUs != 2 || stored.Metrics.ExitStatus != 23 {
 		t.Fatalf("metrics=%+v", stored.Metrics)
 	}
 	if err := store.SetExited(ctx, state.ID, 1, time.Time{}); err == nil {
 		t.Fatal("zero exit time accepted")
+	}
+}
+
+func TestStoreVMMMetricsUseRuntimeDefaults(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	state, err := store.Create(ctx, "default-metrics", testBundle(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetExited(ctx, state.ID, 0, state.Created.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	stored, _, err := store.Get(ctx, state.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Metrics == nil || stored.Metrics.MemoryMiB != 128 || stored.Metrics.VCPUs != 1 ||
+		stored.Metrics.Backend != "kvm-native" || stored.Metrics.Architecture != "amd64" {
+		t.Fatalf("default metrics=%+v", stored.Metrics)
 	}
 }
 

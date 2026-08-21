@@ -1,0 +1,7 @@
+{
+  "api_version": "platform-factory.dev/cli-output/v1",
+  "plugins": [
+    {"name": "go", "kind": "language", "status": "loaded"},
+    {"name": "acme-runtime", "kind": "rpc", "status": "installed", "version": "1.0.0"}
+  ]
+}

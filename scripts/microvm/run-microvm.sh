@@ -53,45 +53,7 @@ for cmd in go python3 curl cpio; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "error: '$cmd' is required on PATH" >&2; exit 1; }
 done
 
-# Not optional, not skippable: never trust a layout we haven't verified.
-log "phase=verify-layout path=$image_dir"
-python3 "$repo_root/scripts/ci/verify-oci-layout.py" "$image_dir"
-
-log "phase=read-config reading OCI image metadata"
-image_meta=$(python3 -c "
-import json, sys
-
-image_dir = sys.argv[1]
-idx = json.load(open(f'{image_dir}/index.json'))
-manifest_digest = idx['manifests'][0]['digest'].split(':', 1)[1]
-manifest = json.load(open(f'{image_dir}/blobs/sha256/{manifest_digest}'))
-
-if len(manifest['layers']) != 1:
-    sys.exit(f'expected exactly one layer, found {len(manifest[\"layers\"])}')
-layer_digest = manifest['layers'][0]['digest'].split(':', 1)[1]
-
-config_digest = manifest['config']['digest'].split(':', 1)[1]
-config = json.load(open(f'{image_dir}/blobs/sha256/{config_digest}'))
-entrypoint = config['config'].get('Entrypoint') or []
-if not entrypoint:
-    sys.exit('image config has no Entrypoint')
-
-print(config['architecture'])
-print(layer_digest)
-for part in entrypoint:
-    print(part)
-" "$image_dir")
-
-image_arch=$(sed -n '1p' <<<"$image_meta")
-layer_digest=$(sed -n '2p' <<<"$image_meta")
-entrypoint=()
-while IFS= read -r part; do entrypoint+=("$part"); done < <(sed -n '3,$p' <<<"$image_meta")
-
-if [ "$image_arch" != "$HOST_ARCH" ]; then
-  echo "error: image architecture is '$image_arch' but the host is '$HOST_ARCH' - KVM cannot accelerate a cross-architecture guest" >&2
-  exit 1
-fi
-log "phase=read-config arch=$image_arch entrypoint=${entrypoint[*]}"
+image_arch=$HOST_ARCH
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/platform-factory-base-microvm.XXXXXX")
 qemu_pid=""
@@ -109,10 +71,17 @@ CGO_ENABLED=0 GOOS=linux GOARCH="$HOST_ARCH" go build -trimpath -ldflags='-s -w'
   -o "$work/init" "$repo_root/cmd/microvm-init"
 log "phase=build-init complete bytes=$(wc -c < "$work/init")"
 
-log "phase=initramfs extracting verified layer and assembling guest filesystem"
-"$script_dir/assemble-initramfs.sh" \
-  "$image_dir/blobs/sha256/$layer_digest" "$work/init" "$work/initramfs.cpio.gz" \
-  "${entrypoint[@]}"
+log "phase=initramfs verifying layout, translating OCI process config, and assembling guest filesystem"
+if command -v microvm-initramfs >/dev/null 2>&1; then
+  initramfs_tool=$(command -v microvm-initramfs)
+else
+  initramfs_tool="$work/microvm-initramfs"
+  go build -trimpath -ldflags='-s -w' -o "$initramfs_tool" "$repo_root/cmd/microvm-initramfs"
+fi
+"$initramfs_tool" -layout "$image_dir" -platform "linux/$HOST_ARCH" \
+  -init "$work/init" -output "$work/initramfs.cpio.gz" > "$work/initramfs-result.json"
+manifest_digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["manifest_digest"])' "$work/initramfs-result.json")
+rootfs_digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["rootfs_digest"])' "$work/initramfs-result.json")
 log "phase=initramfs complete bytes=$(wc -c < "$work/initramfs.cpio.gz")"
 
 kernel="${MICROVM_KERNEL:-$repo_root/.cache/microvm/$HOST_ARCH/kernel}"
@@ -129,12 +98,13 @@ log "phase=boot-manifest computing combined digest path=$boot_manifest"
 kernel_provenance="$(dirname "$kernel")/kernel.provenance.json"
 python3 "$repo_root/scripts/ci/write-microvm-boot-manifest.py" \
   --architecture "$image_arch" \
-  --layer-digest "sha256:$layer_digest" \
+  --manifest-digest "$manifest_digest" \
+  --rootfs-digest "$rootfs_digest" \
+  --initramfs "$work/initramfs.cpio.gz" \
   --init "$work/init" \
   --kernel "$kernel" \
   --kernel-provenance "$kernel_provenance" \
-  --output "$boot_manifest" \
-  -- "${entrypoint[@]}"
+  --output "$boot_manifest"
 combined_digest=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["combined_digest"])' "$boot_manifest")
 log "phase=boot-manifest complete combined_digest=$combined_digest"
 

@@ -47,7 +47,7 @@ summarized from.
 | Capability | Maturity | Notes |
 | --- | --- | --- |
 | Native Registry client — push path (push, tag, artifact push) | Stable | See `internal/registry` |
-| Native Registry client — pull path (`GetManifest`, `GetBlob`) | Alpha | Added 2026-08-04, digest-verified, tested against a real local `registry:2` in addition to mocked unit tests — but nothing in the shipped CLI consumes it yet (no `platform-factory pull`; `verify-release` remains local-artifact-only by design) |
+| Native Registry client — pull path (`GetManifest`, `GetBlob`) | Alpha | Added 2026-08-04 and digest-verified. The compatibility job now publishes with the native client to a pinned real OCI Distribution 2.8.3 server, re-hashes the installed manifest, and independently pulls it with Podman; nothing in the shipped CLI exposes a general-purpose pull command yet. |
 | Native SBOM/provenance/signing (Ed25519/ECDSA, DSSE) | Stable | Replaced Cosign as the primary path; Cosign retained only as a CI interoperability cross-check |
 | Native publication policy (`internal/policy`) | Stable | `platform-factory publish`/`verify-release` both gate on it |
 | `platform-factory verify-release` | Beta | New 2026-08-04; real cryptographic/schema checks, but the command surface itself hasn't had a release cycle yet to prove its flags are the right shape |
@@ -58,7 +58,7 @@ summarized from.
 | Capability | Maturity | Notes |
 | --- | --- | --- |
 | KVM (Linux/amd64) | Stable | Boots a real kernel against real hardware in CI, exercised through Podman/Docker/containerd |
-| HVF (macOS/arm64) | Beta | Boots a real kernel against real hardware in CI, but only one job, no multi-runtime exercise the way KVM gets |
+| HVF (macOS/arm64) | Beta | Boots a real arm64 Linux kernel against native Apple virtualization in CI and separately executes a Linux/amd64 probe through Rosetta 2 inside that guest; it still has no multi-runtime exercise comparable to KVM |
 | KVM (Linux/arm64) | Alpha | Code exists (`internal/hypervisor/kvm` has amd64-specific boot files); not CI-tested |
 | WHPX (Windows) | Alpha | Code exists (`internal/hypervisor/whpx`); not CI-tested; tracked in the roadmap as "non-blocking" |
 | `internal/hypervisor/virtio` | Alpha | Configuration stubs, no real virtio protocol implementation yet (per the implementation roadmap's 2026-08-03 audit) |

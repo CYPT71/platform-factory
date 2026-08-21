@@ -9,6 +9,10 @@ cleanup() {
 }
 trap cleanup EXIT
 export GOCACHE="$work_root/go-build-cache"
+export PLATFORM_FACTORY_LANG_PLUGIN_DIR="$work_root/lang-plugins"
+export PLATFORM_FACTORY_PLUGIN_DIR="$work_root/rpc-plugins"
+export PLATFORM_FACTORY_MARKETPLACE_DIR="$work_root/marketplace"
+mkdir -p "$PLATFORM_FACTORY_LANG_PLUGIN_DIR" "$PLATFORM_FACTORY_PLUGIN_DIR" "$PLATFORM_FACTORY_MARKETPLACE_DIR"
 
 # Exercise the public installer with a relative prefix from outside the repo.
 (

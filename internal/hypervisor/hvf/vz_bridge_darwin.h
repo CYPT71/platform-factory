@@ -20,6 +20,12 @@ extern "C" {
 // fail to validate).
 int vz_is_supported(void);
 
+// Rosetta for Linux is available only on supported Apple-silicon hosts.
+// Installation is an explicit user-owned action; this bridge never triggers
+// the interactive/networked installer.
+int vz_linux_rosetta_is_supported(void);
+int vz_linux_rosetta_is_installed(void);
+
 // vz_machine_t is an opaque handle owned by the Objective-C side; release
 // it with vz_machine_free exactly once, after the machine is stopped.
 typedef struct vz_machine vz_machine_t;
@@ -42,16 +48,18 @@ typedef struct vz_machine vz_machine_t;
 // client; this project's own kernel config enables the kernel's built-in
 // one via `ip=dhcp`, no userspace client needed). mac_address NULL means
 // no network device at all, matching the previous no-network behavior.
-// UNVERIFIED ON REAL HARDWARE as of the commit that added this parameter -
-// see docs/legacy-vm-disk-boot.md's HVF networking section: written and
-// compile-checked, never runtime-tested (no signed entitlement, no test
-// kernel in the environment that wrote it).
+// enable_linux_rosetta attaches Apple's read-only Rosetta directory share as
+// VirtioFS tag "rosetta". It fails closed unless Rosetta is already installed;
+// this bridge never starts the installer.
+// The complete DHCP plus TCP/UDP relay path is exercised by
+// TestNativeHVFRealTCPAndUDP on entitled Apple-silicon hardware.
 // Returns NULL and fills error_out (a caller-owned buffer of error_cap
 // bytes, always NUL-terminated on failure) otherwise.
 vz_machine_t *vz_create_machine(
     const char *kernel_path, const char *initrd_path, const char *command_line,
     const char *serial_log_path, unsigned long long memory_bytes, unsigned int vcpu_count,
-    const char *mac_address, int *guest_agent_fd_out, char *error_out, size_t error_cap);
+    const char *mac_address, int enable_linux_rosetta, int *guest_agent_fd_out,
+    char *error_out, size_t error_cap);
 
 // vz_machine_start blocks until -[VZVirtualMachine startWithCompletionHandler:]
 // completes. Returns 0 on success, non-zero with error_out filled otherwise.
