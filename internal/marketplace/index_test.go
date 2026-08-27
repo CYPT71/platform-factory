@@ -7,6 +7,33 @@ import (
 	"time"
 )
 
+func TestDefaultIndexPathHonorsOverrideEnvVar(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_MARKETPLACE_DIR", filepath.Join(t.TempDir(), "custom"))
+	path, err := DefaultIndexPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(path) != fileName || filepath.Dir(path) != os.Getenv("PLATFORM_FACTORY_MARKETPLACE_DIR") {
+		t.Fatalf("DefaultIndexPath()=%q, want it under the override dir", path)
+	}
+}
+
+func TestDefaultIndexPathFallsBackToUserConfigDir(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_MARKETPLACE_DIR", "")
+	config, err := os.UserConfigDir()
+	if err != nil {
+		t.Skipf("no user config dir available in this environment: %v", err)
+	}
+	path, err := DefaultIndexPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(config, "platform-factory", "marketplace", fileName)
+	if path != want {
+		t.Fatalf("DefaultIndexPath()=%q, want %q", path, want)
+	}
+}
+
 func TestLoadIndexMissingFileReturnsEmpty(t *testing.T) {
 	idx, err := LoadIndex(filepath.Join(t.TempDir(), "nope.json"))
 	if err != nil {

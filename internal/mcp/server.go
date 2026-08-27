@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 // maxLineBytes bounds a single incoming JSON-RPC message. MCP messages
@@ -166,7 +168,7 @@ func (s *Server) handleToolsCall(ctx context.Context, logger *log.Logger, req re
 
 	text, err := tool.Handler(ctx, args)
 	if err != nil {
-		var te *toolError
+		var te *toolerror.ToolError
 		if errors.As(err, &te) {
 			return s.result(req, toolCallResult{
 				Content: []contentBlock{{Type: "text", Text: te.Error()}},
@@ -175,7 +177,7 @@ func (s *Server) handleToolsCall(ctx context.Context, logger *log.Logger, req re
 		}
 		logger.Printf("tool %q internal error: %v", params.Name, err)
 		return s.result(req, toolCallResult{
-			Content: []contentBlock{{Type: "text", Text: fmt.Sprintf("%s: internal error", ErrInternal)}},
+			Content: []contentBlock{{Type: "text", Text: fmt.Sprintf("%s: internal error", toolerror.ErrInternal)}},
 			IsError: true,
 		})
 	}

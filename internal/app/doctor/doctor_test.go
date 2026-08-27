@@ -3,11 +3,35 @@ package doctor
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/CYPT71/platform-factory/internal/hypervisor/sandbox"
 	"github.com/CYPT71/platform-factory/internal/microvm"
 )
+
+func TestProbeRegistryAgainstARealServer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	if err := probeRegistry(context.Background(), server.URL); err != nil {
+		t.Fatalf("probeRegistry: %v", err)
+	}
+}
+
+func TestProbeRegistryRejectsInvalidAddresses(t *testing.T) {
+	for _, address := range []string{"://not-a-url", "https://user:pass@example.com"} {
+		if err := probeRegistry(context.Background(), address); err == nil {
+			t.Fatalf("address=%q accepted", address)
+		}
+	}
+}
 
 // fakeService builds a Service with every dependency faked, so tests
 // never shell out to a real tool or probe real hardware.
@@ -298,6 +322,19 @@ func TestPolicyCheckStrictlyValidatesSchemaAndVersion(t *testing.T) {
 	assertCheck(t, svc.RunScopeWithOptions(context.Background(), "build", Options{Policy: "policy.json"}), "policy", false)
 	svc.readFile = func(string) ([]byte, error) {
 		return []byte(`{"api_version":"unsupported/v1"}`), nil
+	}
+	assertCheck(t, svc.RunScopeWithOptions(context.Background(), "build", Options{Policy: "policy.json"}), "policy", false)
+}
+
+func TestPolicyCheckRejectsTrailingJSONContent(t *testing.T) {
+	svc, _, _ := fakeService()
+	svc.readFile = func(string) ([]byte, error) {
+		return []byte(`{"api_version":"platform-factory.dev/policy/v1","require_sbom":true}{"extra":true}`), nil
+	}
+	assertCheck(t, svc.RunScopeWithOptions(context.Background(), "build", Options{Policy: "policy.json"}), "policy", false)
+
+	svc.readFile = func(string) ([]byte, error) {
+		return []byte(`{"api_version":"platform-factory.dev/policy/v1","require_sbom":true} not-json`), nil
 	}
 	assertCheck(t, svc.RunScopeWithOptions(context.Background(), "build", Options{Policy: "policy.json"}), "policy", false)
 }

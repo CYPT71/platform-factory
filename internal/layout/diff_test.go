@@ -197,3 +197,12 @@ func TestDiffRejectsInvalidLayouts(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestDescribeTargetFormatsReferenceAndPlatform(t *testing.T) {
+	if got := describeTarget("registry.example/app:v1\x00linux/amd64"); got != "registry.example/app:v1 linux/amd64" {
+		t.Fatalf("got=%q", got)
+	}
+	if got := describeTarget("\x00linux/amd64"); got != "linux/amd64" {
+		t.Fatalf("got=%q, want just the platform when the reference is empty", got)
+	}
+}

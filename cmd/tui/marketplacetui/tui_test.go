@@ -51,6 +51,39 @@ func newTestModel(t *testing.T, index *marketplace.Index, pluginsDir string) *mo
 	return m
 }
 
+func TestRunSurfacesALoadIndexFailureBeforeLaunchingTheProgram(t *testing.T) {
+	dir := t.TempDir()
+	indexPath := filepath.Join(dir, "index.json")
+	if err := os.WriteFile(indexPath, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := Run(Config{IndexPath: indexPath, PluginsDir: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected an error for a malformed index file")
+	}
+}
+
+func TestRunSurfacesAnInstalledPluginsFailureBeforeLaunchingTheProgram(t *testing.T) {
+	dir := t.TempDir()
+	// A regular file where the plugins directory should be makes
+	// Manager.Installed fail while scanning it.
+	pluginsDir := filepath.Join(dir, "plugins")
+	if err := os.WriteFile(pluginsDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := Run(Config{IndexPath: filepath.Join(dir, "missing-index.json"), PluginsDir: pluginsDir})
+	if err == nil {
+		t.Fatal("expected an error when the plugins directory cannot be scanned")
+	}
+}
+
+func TestModelInitReturnsTheTextInputBlinkCommand(t *testing.T) {
+	m := newTestModel(t, sampleIndexForTUI(), t.TempDir())
+	if m.Init() == nil {
+		t.Fatal("expected a non-nil Init command")
+	}
+}
+
 func TestModelSearchFiltersList(t *testing.T) {
 	m := newTestModel(t, sampleIndexForTUI(), t.TempDir())
 	if got := len(m.list.Items()); got != 2 {
@@ -95,6 +128,31 @@ func TestModelViewRendersWithoutPanicking(t *testing.T) {
 	m = updated.(*model)
 	if out := m.View(); out == "" {
 		t.Fatal("detail view should render something")
+	}
+}
+
+func TestStatusLineCoversWorkingEmptyErrorAndSuccessStates(t *testing.T) {
+	m := newTestModel(t, sampleIndexForTUI(), t.TempDir())
+
+	m.working = true
+	if got := m.statusLine(); !strings.Contains(got, "Working") {
+		t.Fatalf("working=%q, want it to mention Working", got)
+	}
+
+	m.working = false
+	m.status = ""
+	if got := m.statusLine(); got != "" {
+		t.Fatalf("empty status=%q, want empty", got)
+	}
+
+	m.status, m.statusIsError = "install failed", true
+	if got := m.statusLine(); !strings.Contains(got, "install failed") || !strings.Contains(got, "✗") {
+		t.Fatalf("error status=%q, want it to mention the message and an error marker", got)
+	}
+
+	m.status, m.statusIsError = "installed", false
+	if got := m.statusLine(); !strings.Contains(got, "installed") || !strings.Contains(got, "✓") {
+		t.Fatalf("success status=%q, want it to mention the message and a success marker", got)
 	}
 }
 

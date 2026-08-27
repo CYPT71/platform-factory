@@ -123,6 +123,56 @@ func TestRunPluginProvenanceSignsWithKeyDir(t *testing.T) {
 	}
 }
 
+func TestReadGoModulePathParsesTheModuleDirective(t *testing.T) {
+	dir := t.TempDir()
+	goMod := filepath.Join(dir, "go.mod")
+	if err := os.WriteFile(goMod, []byte("module github.com/example/widget\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readGoModulePath(goMod)
+	if err != nil || got != "github.com/example/widget" {
+		t.Fatalf("got=%q err=%v", got, err)
+	}
+}
+
+func TestReadGoModulePathRejectsAMissingFile(t *testing.T) {
+	if _, err := readGoModulePath(filepath.Join(t.TempDir(), "go.mod")); err == nil {
+		t.Fatal("expected an error for a missing go.mod")
+	}
+}
+
+func TestReadGoModulePathRejectsAFileWithoutAModuleDirective(t *testing.T) {
+	dir := t.TempDir()
+	goMod := filepath.Join(dir, "go.mod")
+	if err := os.WriteFile(goMod, []byte("go 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readGoModulePath(goMod); err == nil {
+		t.Fatal("expected an error for a go.mod with no module directive")
+	}
+}
+
+func TestRunPluginProvenanceUsesExplicitModulePathWithoutReadingGoMod(t *testing.T) {
+	if !gitAvailableForProvenanceTest(t) {
+		t.Skip("git not available")
+	}
+	sourceDir, executable := provenanceTestModule(t)
+	if err := os.Remove(filepath.Join(sourceDir, "go.mod")); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := runPluginProvenance([]string{
+		"--executable", executable, "--name", "example",
+		"--source-dir", sourceDir, "--module-path", "github.com/example/explicit",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "github.com/example/explicit") {
+		t.Fatalf("stdout=%s", stdout.String())
+	}
+}
+
 func TestRunPluginProvenanceRejectsMissingRequiredFlags(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := runPluginProvenance(nil, &stdout, &stderr); code != 2 {

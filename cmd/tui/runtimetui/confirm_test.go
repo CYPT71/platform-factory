@@ -1,6 +1,7 @@
 package runtimetui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -66,6 +67,43 @@ func TestEscCancelsWithSourceSkip(t *testing.T) {
 	got := updated.(*model)
 	if !got.done || got.result.Source != SourceSkip {
 		t.Fatalf("result=%+v", got.result)
+	}
+}
+
+func TestInitReturnsTheTextInputBlinkCommand(t *testing.T) {
+	m := newTestModel("/usr/bin/python3")
+	if m.Init() == nil {
+		t.Fatal("expected a non-nil Init command")
+	}
+}
+
+func TestViewRendersChoicesThenTheImagePromptOnceEditing(t *testing.T) {
+	m := newTestModel("/usr/bin/python3")
+	view := m.View()
+	if !strings.Contains(view, "Provision the python runtime") || !strings.Contains(view, "up/down select") {
+		t.Fatalf("view=%q", view)
+	}
+
+	updated, _ := m.Update(key("down"))
+	m = updated.(*model)
+	updated, _ = m.Update(key("enter"))
+	m = updated.(*model)
+	if !m.editingImage {
+		t.Fatal("expected the image prompt to be open")
+	}
+	view = m.View()
+	if !strings.Contains(view, "Image reference:") || !strings.Contains(view, "esc back") {
+		t.Fatalf("view=%q", view)
+	}
+
+	m.err = "boom"
+	if !strings.Contains(m.View(), "boom") {
+		t.Fatal("expected the error message to be rendered")
+	}
+
+	m.done = true
+	if m.View() != "" {
+		t.Fatalf("expected an empty view once done, got %q", m.View())
 	}
 }
 

@@ -794,3 +794,118 @@ func TestPackageLevelMetricFunctionsAll(t *testing.T) {
 		t.Error("expected non-empty metrics from GetAllMetrics")
 	}
 }
+
+func TestLoggerGetLevel(t *testing.T) {
+	logger := newDefaultLogger()
+	logger.SetLevel(LevelWarn)
+	if got := logger.GetLevel(); got != LevelWarn {
+		t.Errorf("GetLevel()=%v, want %v", got, LevelWarn)
+	}
+}
+
+func TestSetDefaultReplacesGlobalLogger(t *testing.T) {
+	original := globalLogger
+	defer func() { globalLogger = original }()
+
+	var buf bytes.Buffer
+	replacement := newDefaultLogger()
+	replacement.SetOutput(&buf)
+	replacement.SetLevel(LevelDebug)
+	SetDefault(replacement)
+
+	Debug("via package-level Debug")
+	if !strings.Contains(buf.String(), "via package-level Debug") {
+		t.Errorf("expected the replacement logger to receive the message, got %q", buf.String())
+	}
+}
+
+func TestPackageLevelDebugDPanicAndPanic(t *testing.T) {
+	original := globalLogger
+	defer func() { globalLogger = original }()
+
+	var buf bytes.Buffer
+	replacement := newDefaultLogger()
+	replacement.SetOutput(&buf)
+	replacement.SetLevel(LevelDebug)
+	globalLogger = replacement
+
+	Debug("debug msg")
+	DPanic("dpanic msg")
+	if !strings.Contains(buf.String(), "debug msg") || !strings.Contains(buf.String(), "dpanic msg") {
+		t.Errorf("expected both messages logged, got %q", buf.String())
+	}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected the package-level Panic to panic")
+		}
+	}()
+	Panic("panic msg")
+}
+
+func TestSetDefaultTracerReplacesGlobalTracer(t *testing.T) {
+	original := globalTracer
+	defer func() { globalTracer = original }()
+
+	replacement := newDefaultTracer(newDefaultLogger())
+	SetDefaultTracer(replacement)
+	if DefaultTracer() != Tracer(replacement) {
+		t.Fatal("expected DefaultTracer to return the replacement tracer")
+	}
+
+	span := StartSpan("pkg-level-span")
+	if span == nil || span.Name != "pkg-level-span" {
+		t.Fatalf("StartSpan()=%+v", span)
+	}
+}
+
+func TestDefaultTracerStartSpanWithoutAContext(t *testing.T) {
+	tracer := newDefaultTracer(newDefaultLogger())
+	span := tracer.StartSpan("no-context-span")
+	if span == nil || span.Name != "no-context-span" || span.ID == "" {
+		t.Fatalf("span=%+v", span)
+	}
+}
+
+func TestTracerCurrentSpanFindsActiveRootSpan(t *testing.T) {
+	tracer := newDefaultTracer(newDefaultLogger())
+	if got := tracer.CurrentSpan(nil); got != nil {
+		t.Fatalf("expected nil for a nil context, got %v", got)
+	}
+	if got := tracer.CurrentSpan(context.Background()); got != nil {
+		t.Fatalf("expected nil when the context carries no span, got %v", got)
+	}
+
+	span, ctx := tracer.StartSpanWithContext(context.Background(), "root-span")
+	if got := tracer.CurrentSpan(ctx); got == nil || got.ID != span.ID {
+		t.Fatalf("CurrentSpan()=%+v, want the active root span %+v", got, span)
+	}
+}
+
+func TestRedactValueCoversMapSliceReflectAndErrorBranches(t *testing.T) {
+	stringMap := redactValue(map[string]string{"password": "hunter2", "user": "alice"}).(map[string]any)
+	if stringMap["password"] != redactedValue || stringMap["user"] != "alice" {
+		t.Fatalf("redactValue(map[string]string)=%+v", stringMap)
+	}
+
+	anySlice := redactValue([]any{"https://user:pw@example.com/x", 42}).([]any)
+	if anySlice[0] == "https://user:pw@example.com/x" {
+		t.Fatalf("expected the URL in an []any slice to be redacted, got %+v", anySlice)
+	}
+	if anySlice[1] != 42 {
+		t.Fatalf("expected the non-string element to pass through unchanged, got %+v", anySlice[1])
+	}
+
+	reflectSlice := redactValue([]string{"https://user:pw@example.com/y", "plain"}).([]any)
+	if reflectSlice[0] == "https://user:pw@example.com/y" || reflectSlice[1] != "plain" {
+		t.Fatalf("expected a reflect-driven []string to be redacted element-wise, got %+v", reflectSlice)
+	}
+
+	if got := redactValue(errors.New("token=abc123")); got != "token=abc123" {
+		t.Fatalf("redactValue(error) with no URL to redact = %+v, want the original message unchanged", got)
+	}
+
+	if got := redactValue(7); got != 7 {
+		t.Fatalf("expected an unrecognized scalar type to pass through unchanged, got %+v", got)
+	}
+}

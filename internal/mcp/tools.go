@@ -9,10 +9,10 @@ import (
 
 // ToolHandler implements one MCP tool. It receives the raw JSON
 // "arguments" object from the tools/call request and returns the text
-// to send back as the tool result. Returning a *toolError produces an
-// isError:true tool result with a safe, structured message; returning
-// any other error is treated as an internal failure and logged to
-// stderr without exposing its text to the caller.
+// to send back as the tool result. Returning a *toolerror.ToolError
+// produces an isError:true tool result with a safe, structured message;
+// returning any other error is treated as an internal failure and
+// logged to stderr without exposing its text to the caller.
 type ToolHandler func(ctx context.Context, arguments json.RawMessage) (string, error)
 
 // Tool is one registered MCP tool: its wire descriptor plus the handler

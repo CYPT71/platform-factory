@@ -199,6 +199,50 @@ func TestMigrationWorkflowStorePersistsCompleteHostEvidence(t *testing.T) {
 	}
 }
 
+func TestMigrationWorkflowStoreCanonicalizesGapsDependenciesAndTransformations(t *testing.T) {
+	store, err := NewMigrationExecutionStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := appmigration.WorkflowEvidence{
+		TraceID: "trace-canon", SourcePluginID: "plugin-a", SourcePluginDigest: migrationTestDigest, SourceCapability: "migration.discover",
+		CanonicalGraphDigest: migrationTestDigest, PlanDigest: migrationTestDigest,
+		SourceResourceIDs: []string{"api"}, TargetResourceIDs: []string{"api"},
+		TargetPluginIDs: []string{"plugin-b"}, TargetPluginDigests: []string{migrationTestDigest},
+		RequestedCapabilities: []string{"compute"}, ResolvedCapabilities: []string{"compute"}, VerifiedCapabilities: []string{"compute"},
+		OperationIDs: []string{"migration-operation-a"}, ObservationCount: 1, VerificationCount: 1, FinalState: "verified",
+		CompatibilityGaps: []domainmigration.CompatibilityGap{
+			{ResourceID: "database", Requirement: "encryption", Reason: "no KMS on target"},
+			{ResourceID: "api", Requirement: "quota", Reason: "no quota plugin on target"},
+		},
+		ExternalDependencies: []domainmigration.ExternalDependency{
+			{ResourceID: "database", Kind: "secret", Reference: "db-password"},
+			{ResourceID: "api", Kind: "config", Reference: "api-config"},
+		},
+		Transformations: []domainmigration.Transformation{
+			{ResourceID: "database", Field: "engine", From: "postgres", To: "mysql", Reason: "target unsupported"},
+			{ResourceID: "api", Field: "port", From: "8080", To: "80", Reason: "target convention"},
+		},
+	}
+	if err := store.RecordWorkflow(context.Background(), evidence); err != nil {
+		t.Fatal(err)
+	}
+	records := store.WorkflowRecords()
+	if len(records) != 1 {
+		t.Fatalf("records=%+v", records)
+	}
+	record := records[0]
+	if record.CompatibilityGaps[0].ResourceID != "api" || record.CompatibilityGaps[1].ResourceID != "database" {
+		t.Fatalf("compatibility gaps not sorted by (resource, requirement, reason): %+v", record.CompatibilityGaps)
+	}
+	if record.ExternalDependencies[0].ResourceID != "api" || record.ExternalDependencies[1].ResourceID != "database" {
+		t.Fatalf("external dependencies not sorted by (resource, kind, reference): %+v", record.ExternalDependencies)
+	}
+	if record.Transformations[0].ResourceID != "api" || record.Transformations[1].ResourceID != "database" {
+		t.Fatalf("transformations not sorted by (resource, field, from, to, reason): %+v", record.Transformations)
+	}
+}
+
 func TestMigrationWorkflowStoreRejectsFalseOrSecretEvidence(t *testing.T) {
 	store, err := NewMigrationExecutionStore(t.TempDir())
 	if err != nil {

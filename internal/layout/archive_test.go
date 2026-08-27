@@ -32,6 +32,12 @@ func archiveBytes(t *testing.T, entries map[string]byte) []byte {
 	_ = gz.Close()
 	return b.Bytes()
 }
+func TestArchiveVerifierVerifyArtifactDelegatesToVerifyArchive(t *testing.T) {
+	if err := (ArchiveVerifier{}).VerifyArtifact(context.Background(), "oci-layout.tar.gz", strings.NewReader("not a gzip stream")); err == nil {
+		t.Fatal("expected an error for a malformed archive")
+	}
+}
+
 func TestVerifyArchiveRejectsHostileEntries(t *testing.T) {
 	for name, entries := range map[string]map[string]byte{"traversal": {"../x": tar.TypeReg}, "absolute": {"/x": tar.TypeReg}, "symlink": {"x": tar.TypeSymlink}, "hardlink": {"x": tar.TypeLink}, "duplicate": nil} {
 		t.Run(name, func(t *testing.T) {

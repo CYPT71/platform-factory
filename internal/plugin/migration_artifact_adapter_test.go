@@ -9,6 +9,14 @@ import (
 	appmigration "github.com/CYPT71/platform-factory/internal/app/migration"
 )
 
+func TestMigrationArtifactRPCIdentityReportsIDAndDigest(t *testing.T) {
+	rpc := &migrationArtifactRPC{id: "migration-test", digest: migrationTestDigest, resourceID: "r"}
+	id, digest := rpc.Identity()
+	if id != "migration-test" || digest != migrationTestDigest {
+		t.Fatalf("Identity()=(%q,%q)", id, digest)
+	}
+}
+
 func TestMigrationArtifactFactoryRequiresExactRuntimeResourceScope(t *testing.T) {
 	r, _ := migrationTestRegistry(t, map[string]testHandler{migrationExportCapability: func(context.Context, json.RawMessage) (any, error) { return migrationExportResult{}, nil }})
 	state := r.states["migration-test"]

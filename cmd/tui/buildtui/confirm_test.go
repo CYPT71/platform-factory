@@ -1,6 +1,7 @@
 package buildtui
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -86,6 +87,33 @@ func TestEditingTheFocusedFieldUpdatesItsValue(t *testing.T) {
 	}
 	if got.tag.Value() != "v1" {
 		t.Fatalf("tag should be untouched: %q", got.tag.Value())
+	}
+}
+
+func TestInitReturnsTheTextInputBlinkCommand(t *testing.T) {
+	m := newTestModel("myimage", "v1")
+	if m.Init() == nil {
+		t.Fatal("expected a non-nil Init command")
+	}
+}
+
+func TestViewRendersTheProposedReferenceAndHelpText(t *testing.T) {
+	m := newTestModel("myimage", "v1")
+	view := m.View()
+	for _, want := range []string{"Confirm image reference", "myimage:v1", "tab switch field"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q:\n%s", want, view)
+		}
+	}
+
+	m.err = "boom"
+	if !strings.Contains(m.View(), "boom") {
+		t.Fatal("expected the error message to be rendered")
+	}
+
+	m.done = true
+	if m.View() != "" {
+		t.Fatalf("expected an empty view once done, got %q", m.View())
 	}
 }
 

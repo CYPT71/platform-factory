@@ -3,8 +3,37 @@ package sandbox
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"testing"
 )
+
+// TestSelectiveStageMethodsOnNonLinuxAreNoOps proves ApplySeccomp/
+// ApplyCgroups/ApplyStrictSeccomp/DropBoundingCapabilities are safe to
+// call directly (the selective, probe-gated entry points
+// internal/ociruntime/supervisor_linux.go's applyVMMSandbox uses) on a
+// platform with no sandboxing primitives at all: every stage is a
+// documented no-op (sandbox_other.go) rather than a panic or a
+// platform-inappropriate syscall attempt. The Linux behavior of these
+// same methods is exercised by sandbox_linux_test.go/seccomp_linux_test.go
+// against real kernel primitives instead.
+func TestSelectiveStageMethodsOnNonLinuxAreNoOps(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("Linux has real seccomp/cgroup/capability primitives, exercised elsewhere")
+	}
+	s := NewSandbox(Config{DropCapabilities: []string{"CAP_NET_RAW"}})
+	if err := s.ApplySeccomp(); err != nil {
+		t.Fatalf("ApplySeccomp: %v", err)
+	}
+	if err := s.ApplyCgroups(); err != nil {
+		t.Fatalf("ApplyCgroups: %v", err)
+	}
+	if err := s.ApplyStrictSeccomp(); err != nil {
+		t.Fatalf("ApplyStrictSeccomp: %v", err)
+	}
+	if err := s.DropBoundingCapabilities(); err != nil {
+		t.Fatalf("DropBoundingCapabilities: %v", err)
+	}
+}
 
 func TestDefaultConfig(t *testing.T) {
 	config := DefaultConfig()

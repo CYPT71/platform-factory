@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -165,6 +166,57 @@ func TestVerifyStartAndPublishAvailableRequiresRegistry(t *testing.T) {
 	_, err := VerifyStartAndPublishAvailable(context.Background(), nil, t.TempDir(), Manifest{Name: "missing-registry"}, TrustPolicy{})
 	if err == nil || !strings.Contains(err.Error(), "registry is required") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestVerifyStartAndPublishAvailablePublishesOnSuccess exercises the
+// non-journal entry point's success path: VerifyStartAndPublishAvailableWithJournal's
+// own success path is already covered by migration_thirdparty_test.go's
+// fixtures, but this sibling function (used by capability-verification
+// callers that have no durable journal to inject) was only ever tested
+// for its nil-registry rejection.
+func TestVerifyStartAndPublishAvailablePublishesOnSuccess(t *testing.T) {
+	tmp := t.TempDir()
+	binary := filepath.Join(tmp, "migration-fixture")
+	cmd := exec.Command("go", "build", "-o", binary, ".")
+	cmd.Dir = filepath.Join("..", "..", "testdata", "plugins", "migration")
+	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod -buildvcs=false", "GOPROXY=off", "GOWORK=off")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build external migration plugin: %v: %s", err, output)
+	}
+	payload, err := os.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(payload)
+	dir := filepath.Join(tmp, "installed")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plugin"), payload, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{
+		APIVersion: ManifestAPIVersion, Name: "migration-fixture", Version: "v1",
+		Family: PluginFamilyCapability, Capabilities: []string{migrationDiscoverCapability, migrationInspectCapability, migrationObserveCapability, migrationApplyCapability, migrationExportCapability, migrationImportCapability, migrationArtifactObserveCapability},
+		Executable: "plugin", Digest: "sha256:" + hex.EncodeToString(sum[:]),
+	}
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manifest.Sign(private, "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry()
+	registry.registerDiscovered(manifest)
+	client, err := VerifyStartAndPublishAvailable(context.Background(), registry, dir, manifest, TrustPolicy{Keys: []ed25519.PublicKey{public}, AllowUnsandboxedExecution: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if !registry.HasCapability(migrationDiscoverCapability) {
+		t.Fatal("expected the plugin's capability to be published to the registry")
 	}
 }
 
@@ -402,5 +454,34 @@ func TestLoadPublicKeyRejectsNonEd25519Input(t *testing.T) {
 	}
 	if _, err := LoadPublicKey(rsaFile); err == nil {
 		t.Fatal("RSA key accepted as Ed25519")
+	}
+}
+
+func TestSameStringSetIsOrderIndependent(t *testing.T) {
+	if !SameStringSet([]string{"a", "b", "c"}, []string{"c", "a", "b"}) {
+		t.Fatal("expected the same elements in different orders to match")
+	}
+	if SameStringSet([]string{"a", "b"}, []string{"a", "b", "c"}) {
+		t.Fatal("expected different lengths to never match")
+	}
+	if SameStringSet([]string{"a", "b"}, []string{"a", "c"}) {
+		t.Fatal("expected a different element to fail the match")
+	}
+	if !SameStringSet(nil, nil) {
+		t.Fatal("expected two empty sets to match")
+	}
+}
+
+func TestManifestHasCapabilityAndGetFamily(t *testing.T) {
+	m := Manifest{Capabilities: []string{"detect", "build"}}
+	if !m.HasCapability("detect") || m.HasCapability("deploy") {
+		t.Fatalf("capabilities=%v", m.Capabilities)
+	}
+	if m.GetFamily() != "unknown" {
+		t.Fatalf("GetFamily()=%q, want unknown for an empty Family", m.GetFamily())
+	}
+	m.Family = PluginFamilyBuild
+	if m.GetFamily() != PluginFamilyBuild {
+		t.Fatalf("GetFamily()=%q", m.GetFamily())
 	}
 }

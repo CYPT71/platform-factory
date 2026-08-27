@@ -57,7 +57,7 @@ func (r *Repo) CreatePR(ctx context.Context, pr PullRequest) (string, error) {
 		return "", toolerror.New(toolerror.ErrInvalidArgument, "head branch must not be empty")
 	}
 	if IsProtectedBranch(head) {
-		return "", toolerror.New(toolerror.ErrInvalidArgument, "refusing to open a PR whose head is the protected branch %q", head)
+		return "", toolerror.New(toolerror.ErrBranchProtected, "refusing to open a PR whose head is the protected branch %q", head)
 	}
 	if strings.TrimSpace(pr.Title) == "" {
 		return "", toolerror.New(toolerror.ErrInvalidArgument, "PR title must not be empty")

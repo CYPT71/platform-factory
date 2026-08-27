@@ -79,6 +79,20 @@ func TestExternalConsumerCanFingerprintWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestPublicAnalyzeAndCanonicalJSONWrapTheAPIPackage(t *testing.T) {
+	definition := pipeline.Pipeline{APIVersion: pipeline.APIVersion, Name: "sdk-example", Stages: []pipeline.Stage{{
+		ID: "build", Command: pipeline.Command{Executable: "/bin/build"},
+	}}}
+	graph, err := public.Analyze(definition)
+	if err != nil || len(graph.Order) != 1 || graph.Order[0] != "build" {
+		t.Fatalf("public.Analyze() graph=%+v err=%v", graph, err)
+	}
+	canonical, err := public.CanonicalJSON(definition)
+	if err != nil || !strings.Contains(string(canonical), `"name":"sdk-example"`) {
+		t.Fatalf("public.CanonicalJSON()=%s err=%v", canonical, err)
+	}
+}
+
 func TestExternalConsumerCanAnalyzeAndCanonicalize(t *testing.T) {
 	definition := pipeline.Pipeline{APIVersion: pipeline.APIVersion, Name: "sdk-example", Stages: []pipeline.Stage{{
 		ID: "build", Command: pipeline.Command{Executable: "/bin/build"},

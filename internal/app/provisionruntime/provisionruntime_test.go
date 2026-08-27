@@ -2,7 +2,9 @@ package provisionruntime
 
 import (
 	"bytes"
+	"context"
 	"debug/elf"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -12,6 +14,24 @@ import (
 
 	"github.com/CYPT71/platform-factory/internal/project"
 )
+
+// writeMinimalELF writes a bare ELF64 header (no sections, no program
+// headers) naming machine - the smallest input debug/elf.Open accepts,
+// enough to exercise ResolveHostCandidate's architecture-match logic
+// without a real cross-compiled binary.
+func writeMinimalELF(t *testing.T, path string, machine elf.Machine) {
+	t.Helper()
+	data := make([]byte, 64)
+	copy(data, []byte{0x7f, 'E', 'L', 'F', 2, 1, 1})
+	order := binary.LittleEndian
+	order.PutUint16(data[16:], uint16(elf.ET_EXEC))
+	order.PutUint16(data[18:], uint16(machine))
+	order.PutUint32(data[20:], 1)
+	order.PutUint16(data[52:], 64)
+	if err := os.WriteFile(path, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestAppendRuntimeToConfigProducesAValidLoadableConfig(t *testing.T) {
 	dir := t.TempDir()
@@ -119,6 +139,50 @@ func TestResolveHostCandidateReportsNoneWhenNothingIsOnPath(t *testing.T) {
 	svc := New(noLangpluginResolve)
 	if got := svc.ResolveHostCandidate("python", "amd64"); got != "" {
 		t.Fatalf("got=%q, want empty - PATH was overridden to contain nothing", got)
+	}
+}
+
+func TestResolveHostCandidateReportsNoneForAMalformedELF(t *testing.T) {
+	dir := t.TempDir()
+	binaryPath := filepath.Join(dir, "python3")
+	if err := os.WriteFile(binaryPath, []byte("not an ELF file"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	svc := New(noLangpluginResolve)
+	if got := svc.ResolveHostCandidate("python", "amd64"); got != "" {
+		t.Fatalf("got=%q, want empty - the binary on PATH is not a valid ELF file", got)
+	}
+}
+
+func TestResolveHostCandidateReportsNoneOnArchitectureMismatch(t *testing.T) {
+	dir := t.TempDir()
+	binaryPath := filepath.Join(dir, "python3")
+	writeMinimalELF(t, binaryPath, elf.EM_AARCH64)
+	t.Setenv("PATH", dir)
+	svc := New(noLangpluginResolve)
+	if got := svc.ResolveHostCandidate("python", "amd64"); got != "" {
+		t.Fatalf("got=%q, want empty - the host binary is arm64, not the requested amd64", got)
+	}
+}
+
+func TestResolveHostCandidateReturnsTheMatchingBinaryPath(t *testing.T) {
+	dir := t.TempDir()
+	binaryPath := filepath.Join(dir, "python3")
+	writeMinimalELF(t, binaryPath, elf.EM_X86_64)
+	t.Setenv("PATH", dir)
+	svc := New(noLangpluginResolve)
+	got := svc.ResolveHostCandidate("python", "amd64")
+	resolved, err := filepath.EvalSymlinks(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(binaryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != want {
+		t.Fatalf("got=%q, want the matching host binary %q", got, binaryPath)
 	}
 }
 
@@ -271,5 +335,39 @@ func TestProvisionRuntimeFromRootSucceeds(t *testing.T) {
 	}
 	if reloaded.Config.Runtime != manifest.Runtime {
 		t.Fatalf("runtime not persisted: %q", reloaded.Config.Runtime)
+	}
+}
+
+func TestExecuteCommandRunsARealSubprocessWithStreamsAndDirectory(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if err := executeCommand("sh", []string{"-c", "pwd && echo err >&2"}, dir, &stdout, &stderr); err != nil {
+		t.Fatalf("executeCommand: %v", err)
+	}
+	if !strings.Contains(strings.TrimSpace(stdout.String()), filepath.Base(dir)) {
+		t.Fatalf("stdout=%q, want it to mention the working directory %q", stdout.String(), dir)
+	}
+	if strings.TrimSpace(stderr.String()) != "err" {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+	if err := executeCommand("/does/not/exist", nil, dir, &stdout, &stderr); err == nil {
+		t.Fatal("expected an error for a nonexistent executable")
+	}
+}
+
+func TestServicePullImageRootfsDelegatesToTheInjectedFunc(t *testing.T) {
+	var gotRef, gotArch, gotDest string
+	svc := &service{
+		pullImageRootfs: func(_ context.Context, imageRef, architecture, destDir string) (string, error) {
+			gotRef, gotArch, gotDest = imageRef, architecture, destDir
+			return "sha256:deadbeef", nil
+		},
+	}
+	digest, err := svc.PullImageRootfs(context.Background(), "python@sha256:abc", "amd64", "/dest")
+	if err != nil || digest != "sha256:deadbeef" {
+		t.Fatalf("digest=%q err=%v", digest, err)
+	}
+	if gotRef != "python@sha256:abc" || gotArch != "amd64" || gotDest != "/dest" {
+		t.Fatalf("ref=%q arch=%q dest=%q", gotRef, gotArch, gotDest)
 	}
 }

@@ -52,6 +52,60 @@ func TestMigrationWireUsesStableSnakeCase(t *testing.T) {
 	}
 }
 
+func TestRegisterMigrationInspectHandlesAndIgnoresNilArgs(t *testing.T) {
+	RegisterMigrationInspect(nil, nil) // must not panic
+
+	server := NewServer("source", "v1")
+	RegisterMigrationInspect(server, nil)
+	if len(server.capabilities) != 0 {
+		t.Fatalf("a nil inspect func must not register a handler: %v", server.capabilities)
+	}
+
+	RegisterMigrationInspect(server, func(context.Context, MigrationInspectParams) (MigrationInspectResult, error) {
+		return MigrationInspectResult{Found: true, Resource: &MigrationResource{ID: "r"}}, nil
+	})
+	if len(server.capabilities) != 1 || server.capabilities[0] != CapabilityMigrationInspect {
+		t.Fatalf("capabilities=%v", server.capabilities)
+	}
+	raw, _ := json.Marshal(MigrationInspectParams{ResourceID: "r"})
+	resp := server.dispatch(context.Background(), Request{ID: "1", Method: "v1.migration.inspect", Params: raw})
+	if resp.Error != nil {
+		t.Fatalf("response=%+v", resp)
+	}
+}
+
+func TestRegisterMigrationArtifactsRegistersEachIndependentCapability(t *testing.T) {
+	RegisterMigrationArtifacts(nil, nil, nil, nil) // must not panic
+
+	server := NewServer("target", "v1")
+	RegisterMigrationArtifacts(server,
+		func(context.Context, MigrationExportParams) (MigrationExportResult, error) {
+			return MigrationExportResult{Artifact: MigrationArtifact{Digest: "sha256:x"}}, nil
+		},
+		func(context.Context, MigrationImportParams) (MigrationImportResult, error) {
+			return MigrationImportResult{Accepted: true}, nil
+		},
+		func(context.Context, MigrationArtifactObserveParams) (MigrationArtifactObserveResult, error) {
+			return MigrationArtifactObserveResult{Found: true}, nil
+		},
+	)
+	want := []string{CapabilityMigrationExport, CapabilityMigrationImport, CapabilityMigrationArtifactObserve}
+	if len(server.capabilities) != len(want) {
+		t.Fatalf("capabilities=%v, want %v", server.capabilities, want)
+	}
+	for i, capability := range want {
+		if server.capabilities[i] != capability {
+			t.Fatalf("capabilities=%v, want %v", server.capabilities, want)
+		}
+	}
+
+	raw, _ := json.Marshal(MigrationExportParams{Resource: MigrationResource{ID: "r"}})
+	resp := server.dispatch(context.Background(), Request{ID: "1", Method: "v1.migration.export", Params: raw})
+	if resp.Error != nil {
+		t.Fatalf("export response=%+v", resp)
+	}
+}
+
 func TestMigrationApplyReceivesOperationID(t *testing.T) {
 	server := NewServer("target", "v1")
 	RegisterMigration(server, nil, nil, func(ctx context.Context, _ MigrationApplyParams) (MigrationApplyResult, error) {

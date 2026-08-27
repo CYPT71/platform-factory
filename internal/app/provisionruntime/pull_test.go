@@ -224,6 +224,21 @@ func TestPullImageRootfsWithClientSelectsRequestedArchitectureFromAnIndex(t *tes
 // PLATFORM_FACTORY_TEST_LIVE_REGISTRY=1, matching this repo's existing
 // convention for opt-in real-infrastructure tests (see
 // PLATFORM_FACTORY_TEST_BZIMAGE in internal/hypervisor/kvm).
+// TestPullImageRootfsRejectsAnInvalidReferenceBeforeAnyNetworkCall
+// exercises pullImageRootfs itself (not pullImageRootfsWithClient's fake-
+// registry variants above) - reference parsing fails before the real
+// *registry.Client it constructs ever makes a request, so this needs no
+// network and never runs against the fake or real registry.
+func TestPullImageRootfsRejectsAnInvalidReferenceBeforeAnyNetworkCall(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "rootfs")
+	if _, err := pullImageRootfs(context.Background(), "not a valid reference", "amd64", dest); err == nil {
+		t.Fatal("expected an error for an unparseable image reference")
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("destination should not have been created: err=%v", err)
+	}
+}
+
 func TestPullImageRootfsAgainstRealDockerHub(t *testing.T) {
 	if os.Getenv("PLATFORM_FACTORY_TEST_LIVE_REGISTRY") != "1" {
 		t.Skip("set PLATFORM_FACTORY_TEST_LIVE_REGISTRY=1 to pull python:3.12-slim from the real Docker Hub")

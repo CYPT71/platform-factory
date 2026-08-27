@@ -255,6 +255,20 @@ func TestDNSQueryValidationRejectsTruncatedQuestion(t *testing.T) {
 	}
 }
 
+func TestDNSForwarderCoreNetworkRelayGetters(t *testing.T) {
+	upstream := netip.MustParseAddrPort("127.0.0.1:53")
+	forwarder := &DNSForwarder{Upstream: upstream, Timeout: 5 * time.Second, MaxInflight: 32}
+	if got := forwarder.GetUpstream(); got != upstream {
+		t.Errorf("GetUpstream()=%v, want %v", got, upstream)
+	}
+	if got := forwarder.GetTimeout(); got != int64(5*time.Second) {
+		t.Errorf("GetTimeout()=%d, want %d", got, int64(5*time.Second))
+	}
+	if got := forwarder.GetMaxInflight(); got != 32 {
+		t.Errorf("GetMaxInflight()=%d, want 32", got)
+	}
+}
+
 func listenUDP(t *testing.T) *net.UDPConn {
 	t.Helper()
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})

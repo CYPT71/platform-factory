@@ -182,6 +182,17 @@ func TestDiscoverValidatesSourceAndGenericFailure(t *testing.T) {
 	}
 }
 
+func TestDiscoveryFailureUnwrapReturnsWrappedError(t *testing.T) {
+	inner := errors.New("denied")
+	failure := &DiscoveryFailure{Kind: DiscoveryPermissionDenied, Scope: "instances", Reason: "read scope denied", Err: inner}
+	if !errors.Is(failure, inner) {
+		t.Fatalf("expected errors.Is to find the wrapped error via Unwrap, failure=%v", failure)
+	}
+	if got := failure.Unwrap(); got != inner {
+		t.Fatalf("Unwrap()=%v, want %v", got, inner)
+	}
+}
+
 func resource(id string) domainmigration.Resource {
 	return domainmigration.Resource{ID: id, Kind: "vm", Origin: domainmigration.ResourceOrigin{Source: "source", NativeType: "instance", NativeID: id}}
 }

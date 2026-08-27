@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"strings"
 	"testing"
+
+	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
 
 func newTestServer() *Server {
@@ -19,10 +22,10 @@ func newTestServer() *Server {
 				Text string `json:"text"`
 			}
 			if err := json.Unmarshal(arguments, &args); err != nil {
-				return "", newToolError(ErrInvalidArgument, "invalid arguments: %v", err)
+				return "", toolerror.New(toolerror.ErrInvalidArgument, "invalid arguments: %v", err)
 			}
 			if args.Text == "" {
-				return "", newToolError(ErrInvalidArgument, "text must not be empty")
+				return "", toolerror.New(toolerror.ErrInvalidArgument, "text must not be empty")
 			}
 			return args.Text, nil
 		},
@@ -141,7 +144,7 @@ func TestToolsCallToolErrorSetsIsErrorWithoutJSONRPCFailure(t *testing.T) {
 		t.Fatalf("expected isError=true, got %v", result)
 	}
 	content := result["content"].([]any)[0].(map[string]any)
-	if !strings.Contains(content["text"].(string), ErrInvalidArgument) {
+	if !strings.Contains(content["text"].(string), toolerror.ErrInvalidArgument) {
 		t.Fatalf("expected the tool error code in the message, got %v", content["text"])
 	}
 }
@@ -252,4 +255,23 @@ func TestDuplicateToolRegistrationPanics(t *testing.T) {
 	s := NewServer("x", "0")
 	s.AddTool(Tool{Name: "dup", Handler: func(context.Context, json.RawMessage) (string, error) { return "", nil }})
 	s.AddTool(Tool{Name: "dup", Handler: func(context.Context, json.RawMessage) (string, error) { return "", nil }})
+}
+
+func TestWriteResponseLogsAnEncodingFailureInsteadOfPanicking(t *testing.T) {
+	s := NewServer("x", "0")
+	var stdout, stderr bytes.Buffer
+	enc := json.NewEncoder(&stdout)
+	logger := log.New(&stderr, "", 0)
+
+	// A channel is not JSON-marshalable, forcing enc.Encode to fail so we
+	// can observe writeResponse's error-logging branch instead of its
+	// (already well-covered elsewhere) success path.
+	s.writeResponse(enc, logger, response{JSONRPC: jsonrpcVersion, Result: make(chan int)})
+
+	if stdout.Len() != 0 {
+		t.Fatalf("expected nothing written to stdout on an encode failure, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "write error") {
+		t.Fatalf("expected the encode failure to be logged, got %q", stderr.String())
+	}
 }

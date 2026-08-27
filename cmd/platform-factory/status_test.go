@@ -8,6 +8,16 @@ import (
 	"testing"
 )
 
+func TestStatusHelpFlagPrintsUsageWithoutMutating(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runStatus([]string{"-h"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "platform-factory status") {
+		t.Fatalf("stdout=%s", stdout.String())
+	}
+}
+
 func TestStatusGuidesAnEmptyDirectoryWithoutWriting(t *testing.T) {
 	root := t.TempDir()
 	var stdout, stderr bytes.Buffer

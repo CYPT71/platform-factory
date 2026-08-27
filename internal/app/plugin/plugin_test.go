@@ -8,6 +8,41 @@ import (
 	"testing"
 )
 
+func TestGenericPluginDirPrefersAnExplicitValue(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_PLUGIN_DIR", filepath.Join(t.TempDir(), "env-dir"))
+	explicit := filepath.Join(t.TempDir(), "explicit")
+	got, err := GenericPluginDir(explicit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.Abs(explicit)
+	if got != want {
+		t.Fatalf("got=%q want=%q", got, want)
+	}
+}
+
+func TestGenericPluginDirFallsBackToEnvThenUserConfigDir(t *testing.T) {
+	envDir := filepath.Join(t.TempDir(), "env-dir")
+	t.Setenv("PLATFORM_FACTORY_PLUGIN_DIR", envDir)
+	got, err := GenericPluginDir("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.Abs(envDir)
+	if got != want {
+		t.Fatalf("got=%q want=%q", got, want)
+	}
+
+	t.Setenv("PLATFORM_FACTORY_PLUGIN_DIR", "")
+	got, err = GenericPluginDir("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got, filepath.Join("platform-factory", "plugins")) {
+		t.Fatalf("got=%q, want a platform-factory/plugins suffix", got)
+	}
+}
+
 func TestPrepareSourceRejectsMissingPath(t *testing.T) {
 	_, cleanup, err := PrepareSource(filepath.Join(t.TempDir(), "does-not-exist"))
 	cleanup()

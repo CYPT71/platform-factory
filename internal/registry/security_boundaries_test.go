@@ -14,6 +14,32 @@ import (
 	"testing"
 )
 
+func TestCheckRedirectHostSafeRejectsEmptyAndBlockedLiterals(t *testing.T) {
+	if err := checkRedirectHostSafe(context.Background(), ""); err == nil {
+		t.Fatal("expected an error for an empty host")
+	}
+	for _, blocked := range []string{"127.0.0.1", "10.0.0.5", "169.254.169.254", "::1", "224.0.0.1"} {
+		if err := checkRedirectHostSafe(context.Background(), blocked); err == nil {
+			t.Fatalf("expected %q to be rejected as a blocked literal address", blocked)
+		}
+	}
+	if err := checkRedirectHostSafe(context.Background(), "93.184.216.34"); err != nil {
+		t.Fatalf("expected a globally-routable literal address to be accepted: %v", err)
+	}
+}
+
+func TestCheckRedirectHostSafeRejectsAHostnameResolvingToLoopback(t *testing.T) {
+	if err := checkRedirectHostSafe(context.Background(), "localhost"); err == nil {
+		t.Fatal("expected localhost to resolve to a blocked loopback address")
+	}
+}
+
+func TestCheckRedirectHostSafeRejectsAnUnresolvableHostname(t *testing.T) {
+	if err := checkRedirectHostSafe(context.Background(), "this-host-does-not-exist.invalid"); err == nil {
+		t.Fatal("expected an error for a hostname that cannot resolve")
+	}
+}
+
 type failingReader struct{ err error }
 
 func (r failingReader) Read([]byte) (int, error) { return 0, r.err }

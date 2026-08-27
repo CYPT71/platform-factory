@@ -339,6 +339,35 @@ func TestMultiError(t *testing.T) {
 	}
 }
 
+func TestMultiErrorUnwrapReturnsFirstIssue(t *testing.T) {
+	multi := NewMultiError(CodePipelineValidation, []Issue{
+		{Path: "field1", Code: CodeInvalidArgument, Message: "field1 is invalid"},
+		{Path: "field2", Code: CodeInvalidArgument, Message: "field2 is required"},
+	})
+	var target *MultiError
+	if !stderrors.As(multi, &target) {
+		t.Fatal("expected the error to be a *MultiError")
+	}
+	unwrapped := target.Unwrap()
+	if unwrapped == nil {
+		t.Fatal("expected a non-nil unwrapped error for the first issue")
+	}
+	if !strings.Contains(unwrapped.Error(), "field1 is invalid") {
+		t.Errorf("unwrapped=%v, want it to mention field1", unwrapped)
+	}
+}
+
+func TestMultiErrorUnwrapHandlesNilAndEmpty(t *testing.T) {
+	var nilMulti *MultiError
+	if got := nilMulti.Unwrap(); got != nil {
+		t.Errorf("nil receiver: got %v, want nil", got)
+	}
+	empty := &MultiError{}
+	if got := empty.Unwrap(); got != nil {
+		t.Errorf("no issues: got %v, want nil", got)
+	}
+}
+
 func TestMultiErrorCodeMethod(t *testing.T) {
 	// Test MultiError.Code() method directly
 	issues := []Issue{

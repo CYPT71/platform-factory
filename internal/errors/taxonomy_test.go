@@ -1,8 +1,11 @@
 package errors
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+
+	"github.com/CYPT71/platform-factory/internal/observability"
 )
 
 func TestRetryableClassifiesKnownCodes(t *testing.T) {
@@ -126,3 +129,53 @@ func TestMarshalJSONIncludesRetryableAndTraceID(t *testing.T) {
 type errorString string
 
 func (e errorString) Error() string { return string(e) }
+
+func TestNewTraceIDIncludesOriginAndCommand(t *testing.T) {
+	traceID := NewTraceID("cli", "build")
+	if traceID == "" {
+		t.Fatal("expected a non-empty trace ID")
+	}
+	other := NewTraceID("cli", "build")
+	if traceID == other {
+		t.Fatal("expected two generated trace IDs to differ")
+	}
+}
+
+func TestWithObservabilityTraceIDAttachesTraceID(t *testing.T) {
+	traceID := NewTraceID("cli", "publish")
+	err := WithObservabilityTraceID(New(CodeTimeout, "boom"), traceID)
+	if got := TraceID(err); got != string(traceID) {
+		t.Fatalf("TraceID=%q, want %q", got, traceID)
+	}
+}
+
+func TestTraceIDFromContextReturnsEmptyWithoutOne(t *testing.T) {
+	if got := TraceIDFromContext(context.Background()); got != "" {
+		t.Fatalf("got=%q, want empty", got)
+	}
+}
+
+func TestTraceIDFromContextReturnsAttachedValue(t *testing.T) {
+	ctx := observability.ContextWithTraceID(context.Background(), "trace-xyz")
+	if got := TraceIDFromContext(ctx); got != "trace-xyz" {
+		t.Fatalf("got=%q, want trace-xyz", got)
+	}
+}
+
+func TestWithTraceIDFromContextAttachesWhenPresent(t *testing.T) {
+	ctx := observability.ContextWithTraceID(context.Background(), "trace-ctx")
+	err := WithTraceIDFromContext(New(CodeTimeout, "boom"), ctx)
+	if got := TraceID(err); got != "trace-ctx" {
+		t.Fatalf("TraceID=%q, want trace-ctx", got)
+	}
+}
+
+func TestWithTraceIDFromContextLeavesErrorUnchangedWithoutOne(t *testing.T) {
+	original := New(CodeTimeout, "boom")
+	if got := WithTraceIDFromContext(original, context.Background()); got != original {
+		t.Fatalf("expected the original error unchanged, got %v", got)
+	}
+	if WithTraceIDFromContext(nil, context.Background()) != nil {
+		t.Fatal("expected nil in, nil out")
+	}
+}
