@@ -1030,10 +1030,10 @@ func FuzzLabelsFromPairs(f *testing.F) {
 }
 
 func FuzzEntrypointValidation(f *testing.F) {
+	dir := f.TempDir()
 	f.Add("/app/service")
 	f.Add("../../escape")
 	f.Fuzz(func(t *testing.T, entrypoint string) {
-		dir := t.TempDir()
 		options := Options{Binary: "service", Output: filepath.Join(dir, "image"), Entrypoint: entrypoint}
 		_ = normalize(&options)
 	})

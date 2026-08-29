@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("LazyDockerPlugin")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a2a69c94fe3199ffe54ce07e4b3fd8b72f2c6b66")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3132ce2c31ab95dcaee8220148e62f24cab0f450")]
 [assembly: System.Reflection.AssemblyProductAttribute("LazyDockerPlugin")]
 [assembly: System.Reflection.AssemblyTitleAttribute("LazyDockerPlugin")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

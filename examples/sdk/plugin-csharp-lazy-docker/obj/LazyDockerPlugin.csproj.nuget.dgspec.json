@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/examples/sdk/plugin-csharp-lazy-docker/LazyDockerPlugin.csproj": {}
+    "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.GTVWpio2hw/platform-factory/examples/sdk/plugin-csharp-lazy-docker/LazyDockerPlugin.csproj": {}
   },
   "projects": {
-    "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/examples/sdk/plugin-csharp-lazy-docker/LazyDockerPlugin.csproj": {
+    "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.GTVWpio2hw/platform-factory/examples/sdk/plugin-csharp-lazy-docker/LazyDockerPlugin.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/examples/sdk/plugin-csharp-lazy-docker/LazyDockerPlugin.csproj",
+        "projectUniqueName": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.GTVWpio2hw/platform-factory/examples/sdk/plugin-csharp-lazy-docker/LazyDockerPlugin.csproj",
         "projectName": "LazyDockerPlugin",
-        "projectPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/examples/sdk/plugin-csharp-lazy-docker/LazyDockerPlugin.csproj",
+        "projectPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.GTVWpio2hw/platform-factory/examples/sdk/plugin-csharp-lazy-docker/LazyDockerPlugin.csproj",
         "packagesPath": "/Users/cyprien/.nuget/packages/",
-        "outputPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/examples/sdk/plugin-csharp-lazy-docker/obj/",
+        "outputPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.GTVWpio2hw/platform-factory/examples/sdk/plugin-csharp-lazy-docker/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "/Users/cyprien/.nuget/NuGet/NuGet.Config"
@@ -27,8 +27,8 @@
             "framework": "net8.0",
             "targetAlias": "net8.0",
             "projectReferences": {
-              "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/sdk/plugin-csharp/SecureOci.Plugin.csproj": {
-                "projectPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/sdk/plugin-csharp/SecureOci.Plugin.csproj"
+              "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.GTVWpio2hw/platform-factory/sdk/plugin-csharp/SecureOci.Plugin.csproj": {
+                "projectPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.GTVWpio2hw/platform-factory/sdk/plugin-csharp/SecureOci.Plugin.csproj"
               }
             }
           }
@@ -83,14 +83,14 @@
         }
       }
     },
-    "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/sdk/plugin-csharp/SecureOci.Plugin.csproj": {
+    "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.GTVWpio2hw/platform-factory/sdk/plugin-csharp/SecureOci.Plugin.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/sdk/plugin-csharp/SecureOci.Plugin.csproj",
+        "projectUniqueName": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.GTVWpio2hw/platform-factory/sdk/plugin-csharp/SecureOci.Plugin.csproj",
         "projectName": "SecureOci.Plugin",
-        "projectPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/sdk/plugin-csharp/SecureOci.Plugin.csproj",
+        "projectPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.GTVWpio2hw/platform-factory/sdk/plugin-csharp/SecureOci.Plugin.csproj",
         "packagesPath": "/Users/cyprien/.nuget/packages/",
-        "outputPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.etSsFNFB2J/platform-factory/sdk/plugin-csharp/obj/",
+        "outputPath": "/private/var/folders/8d/q48hwx0n3d5chj3vj8ss2t8c0000gn/T/tmp.GTVWpio2hw/platform-factory/sdk/plugin-csharp/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "/Users/cyprien/.nuget/NuGet/NuGet.Config"

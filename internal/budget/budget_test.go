@@ -548,9 +548,20 @@ func TestManagerTotalCPU(t *testing.T) {
 	manager.CreateTracker(Budget{})
 	manager.CreateTracker(Budget{})
 
-	for i := 0; i < 1000000; i++ {
-		_ = i * i
+	// See TestTrackerCPUElapsed's comment above: a fixed iteration count
+	// burns CPU for a duration that depends on host speed, and can finish
+	// under cpuTime()'s OS accounting granularity on a fast or throttled
+	// CI host, reporting a measured total of exactly 0. Spin on
+	// wall-clock time instead so this burns a guaranteed minimum of real
+	// CPU regardless of host speed.
+	var sum int64
+	start := time.Now()
+	for time.Since(start) < 100*time.Millisecond {
+		for i := 0; i < 1000000; i++ {
+			sum += int64(i)
+		}
 	}
+	_ = sum
 
 	total := manager.TotalCPU()
 

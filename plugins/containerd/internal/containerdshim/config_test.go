@@ -32,7 +32,7 @@ func TestRuntimeClassMatchesHandler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "name: platform-factory: platform-factory") {
+	if !strings.Contains(got, "name: platform-factory\nhandler: platform-factory") {
 		t.Fatalf("unexpected RuntimeClass:\n%s", got)
 	}
 }

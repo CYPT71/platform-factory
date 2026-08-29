@@ -24,7 +24,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache/microvm/arm64
-          key: microvm-hvf-arm64-${{ hashFiles('scripts/microvm/build-kernel.sh', 'scripts/microvm/kernel-common.config', 'scripts/microvm/kernel-arm64.config', 'cmd/microvm-init/**', 'cmd/microvm-initramfs/**', 'cmd/example-service/**', 'internal/rootfs/**', 'internal/oci/**') }}
+          key: microvm-hvf-arm64-${{ hashFiles('scripts/microvm/build-kernel.sh', 'scripts/microvm/kernel-common.config', 'scripts/microvm/kernel-arm64.config', 'cmd/microvm-init/**', 'cmd/microvm-initramfs/**', 'cmd/example-service/**', 'internal/rootfs/**', 'oci/**') }}
       # The downloaded Linux kernel source tarball is identical regardless
       # of target architecture (only the build below differs by arch), so
       # this cache is shared with boot-under-kvm's own amd64 build below:
@@ -98,7 +98,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache/microvm/arm64
-          key: microvm-hvf-arm64-${{ hashFiles('scripts/microvm/build-kernel.sh', 'scripts/microvm/kernel-common.config', 'scripts/microvm/kernel-arm64.config', 'cmd/microvm-init/**', 'cmd/microvm-initramfs/**', 'cmd/example-service/**', 'internal/rootfs/**', 'internal/oci/**') }}
+          key: microvm-hvf-arm64-${{ hashFiles('scripts/microvm/build-kernel.sh', 'scripts/microvm/kernel-common.config', 'scripts/microvm/kernel-arm64.config', 'cmd/microvm-init/**', 'cmd/microvm-initramfs/**', 'cmd/example-service/**', 'internal/rootfs/**', 'oci/**') }}
           fail-on-cache-miss: true
       - name: Validate the local ARM64 HVF guest cache
         env:
@@ -174,6 +174,16 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 cpio build-essential flex bison bc libssl-dev libelf-dev \
             containernetworking-plugins apparmor-utils podman skopeo
+      - name: Re-assert access to /dev/kvm after package installation
+        # The apt-get install above pulls in packages (qemu-system-x86 among
+        # them) whose postinst/trigger scripts reload udev, and udev's
+        # default rule for /dev/kvm reinstates root:kvm 0660 - silently
+        # undoing the chmod 666 done earlier in this job, before any of the
+        # engines below (or the later non-destructive check-kvm.sh) get to
+        # rely on it.
+        run: |
+          set -euo pipefail
+          sudo chmod 666 /dev/kvm
       - name: Install crictl (pinned)
         env: { GOTOOLCHAIN: local }
         run: |
