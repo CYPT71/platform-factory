@@ -102,6 +102,8 @@ Includes the eight language plugins, OCI tools, distributed workers and
 Kubernetes/KubeVirt/containerd integrations, with runtime components selected
 for the target platform. See [distribution and verification](docs/commercial-distribution.md)
 for relocatable releases, integrity checks and remaining commercial scope.
+[Signed plugin bundles](docs/plugin-bundles.md) activate Kubernetes/KubeVirt
+through offline verification and managed installation.
 
 ## Documentation
 

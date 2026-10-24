@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 
+	pluginapp "github.com/CYPT71/platform-factory/internal/app/plugin"
 	"github.com/CYPT71/platform-factory/internal/core"
 	"github.com/CYPT71/platform-factory/internal/plugin"
 	api "github.com/CYPT71/platform-factory/sdk/plugin"
@@ -24,6 +26,16 @@ type pluginOptions struct {
 
 func registerPluginFlags(flags *flag.FlagSet) *pluginOptions {
 	options := &pluginOptions{dir: os.Getenv("PLATFORM_FACTORY_PLUGIN_DIR")}
+	if options.dir == "" {
+		// Match `pf plugin install`'s managed location. A fresh installation with
+		// no plugin directory still has no plugins; other filesystem errors must
+		// remain visible when discovery runs instead of hiding installed plugins.
+		if dir, err := pluginapp.GenericPluginDir(""); err == nil {
+			if _, statErr := os.Stat(dir); !errors.Is(statErr, os.ErrNotExist) {
+				options.dir = dir
+			}
+		}
+	}
 	flags.StringVar(&options.dir, "plugin-dir", options.dir,
 		"directory of installed plugins, one subdirectory with plugin.json each")
 	flags.Var(&options.keyFiles, "plugin-key", "PEM Ed25519 public key trusted for plugin manifests; repeatable")

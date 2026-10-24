@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -30,6 +29,10 @@ func runPlugin(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "load":
 		return runPluginLoad(args[1:], stdout, stderr)
+	case "bundle":
+		return runPluginBundle(args[1:], stdout, stderr)
+	case "verify":
+		return runPluginVerify(args[1:], stdout, stderr)
 	case "install":
 		return runPluginInstall(args[1:], stdout, stderr)
 	case "create":
@@ -54,6 +57,8 @@ func printPluginUsage(output io.Writer) {
 
 Usage:
   platform-factory plugin load [--from PATH] [--format text|json] NAME
+  platform-factory plugin bundle --from DIR --executable FILE --output DIR --key-dir DIR
+  platform-factory plugin verify --from DIR --key PUBLIC.pem [--format text|json]
   platform-factory plugin install --from DIR [--key PUBLIC.pem] [--format text|json]
   platform-factory plugin create --language LANGUAGE [--dialect js|ts] [--output DIR] [--format text|json] NAME
   platform-factory plugin unload [--format text|json] NAME
@@ -77,8 +82,10 @@ source/project, or a directory containing one of those plugin entrypoints.
 Go and C# sources are compiled before loading; script sources are installed
 with their required interpreter entrypoint.
 
-load/unload manage language-command plugins. install/remove manage generic
-framed-RPC bundles containing plugin.json and its digest-pinned executable.
+load/unload manage language-command plugins. bundle signs a prebuilt framed-RPC
+plugin using an explicitly selected private key directory; verify checks it
+without executing it. install/remove manage the verified plugin.json bundle.
+Only the public publisher key is exported; trust is always selected explicitly.
 
 Examples:
   platform-factory plugin load python
@@ -111,27 +118,7 @@ func runPluginInstall(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: platform-factory plugin install --from DIR [--key PUBLIC.pem] [--format text|json]")
 		return 2
 	}
-	manifest, err := hostplugin.LoadManifest(*from)
-	if err == nil {
-		err = manifest.VerifyExecutable(*from)
-	}
-	if err == nil && manifest.Signature == nil && !*allowUnsigned {
-		err = errors.New("unsigned manifest; pass --allow-unsigned only for local development")
-	}
-	if err == nil && manifest.Signature != nil {
-		keys := make([]ed25519.PublicKey, 0, len(keyFiles))
-		for _, filename := range keyFiles {
-			key, loadErr := hostplugin.LoadPublicKey(filename)
-			if loadErr != nil {
-				err = loadErr
-				break
-			}
-			keys = append(keys, key)
-		}
-		if err == nil {
-			err = manifest.VerifySignature(keys)
-		}
-	}
+	manifest, err := verifyPluginBundle(*from, keyFiles, *allowUnsigned)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory plugin install: %v\n", err)
 		return 1

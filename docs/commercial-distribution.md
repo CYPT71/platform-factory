@@ -22,9 +22,10 @@ Core always includes all eight language binaries. `integrations` selects the
 three deployment/runtime integration binaries. `builder` includes the OCI
 builder and distribution packager. The OCI runtime and containerd shim are
 included only for Linux/amd64, their supported execution target. Kubernetes
-and KubeVirt remain plugins subject to the existing manifest, executable digest
-and publisher trust checks; merely shipping a binary never enables it or
-relaxes that policy. See [plugin marketplace](plugin-marketplace.md) and
+and KubeVirt are activated with [signed plugin bundles](plugin-bundles.md):
+`pf plugin bundle` pins the built executable and signs its manifest;
+`pf plugin verify` checks it offline before installation. Shipping a binary
+never relaxes publisher trust or execution isolation. See [plugin marketplace](plugin-marketplace.md) and
 [containerd integration](containerd-kubernetes.md).
 
 Native macOS builds enable CGO for Apple Virtualization.framework and apply
