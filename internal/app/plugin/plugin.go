@@ -28,7 +28,7 @@ import (
 
 // BuiltinLanguages is every language platform-factory ships its own
 // plugin for.
-var BuiltinLanguages = []string{"python", "node", "ruby", "php", "java", "dotnet", "rust"}
+var BuiltinLanguages = []string{"go", "python", "node", "ruby", "php", "java", "dotnet", "rust"}
 
 func isBuiltinLanguage(name string) bool {
 	for _, l := range BuiltinLanguages {

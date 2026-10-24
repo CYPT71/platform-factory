@@ -120,9 +120,9 @@ if [ "$goos" = darwin ]; then
   fi
 fi
 
-commands="platform-factory oci-builder example-service microvm-init microvm-initramfs platform-factory-control-plane platform-factory-worker"
+commands="platform-factory platform-factory-packager oci-builder example-service microvm-init microvm-initramfs platform-factory-control-plane platform-factory-worker platform-factory-kubernetes platform-factory-kubevirt platform-factory-containerd"
 if [ "$goos/$goarch" = linux/amd64 ]; then
-  commands="$commands platform-factory-runtime"
+  commands="$commands platform-factory-runtime containerd-shim-platform-factory-v1"
 else
   echo "platform-factory-runtime skipped: OCI runtime integration requires linux/amd64 (target is $goos/$goarch)" >&2
 fi
@@ -135,9 +135,22 @@ for command_name in $commands; do
   if [ "$command_name" = platform-factory ] && [ "$native_vmm" = true ]; then
     command_cgo=1
   fi
-  CGO_ENABLED="$command_cgo" GOOS="$goos" GOARCH="$goarch" \
-    go build -trimpath -ldflags="$ldflags" \
-    -o "$environment/bin/$command_name$suffix" "$repo_root/cmd/$command_name"
+  module_dir="$repo_root"
+  package="./cmd/$command_name"
+  case "$command_name" in
+    platform-factory-kubernetes) module_dir="$repo_root/plugins/kubernetes" ;;
+    platform-factory-kubevirt) module_dir="$repo_root/plugins/kubevirt" ;;
+    platform-factory-containerd) module_dir="$repo_root/plugins/containerd" ;;
+    containerd-shim-platform-factory-v1) module_dir="$repo_root/plugins/containerd"; package=./cmd/platform-factory-shim ;;
+  esac
+  (
+    cd "$module_dir"
+    CGO_ENABLED="$command_cgo" GOOS="$goos" GOARCH="$goarch" \
+      go build -trimpath -ldflags="$ldflags" -o "$environment/bin/$command_name$suffix" "$package"
+  )
+  if [ "$command_cgo" = 1 ]; then
+    codesign --force --sign - --entitlements "$repo_root/scripts/microvm/hvf.entitlements" "$environment/bin/$command_name$suffix"
+  fi
 done
 
 for language in $language_plugins; do

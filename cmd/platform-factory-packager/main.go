@@ -16,12 +16,20 @@ import (
 func run(args []string) error {
 	flags := flag.NewFlagSet("platform-factory-packager", flag.ContinueOnError)
 	env := flags.String("env", "", "bootstrap environment")
+	verify := flags.String("verify", "", "verify an extracted distribution without executing it")
 	out := flags.String("out", "", "output archive")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	if *verify != "" {
+		if *env != "" || *out != "" || flags.NArg() != 0 {
+			return errors.New("--verify cannot be combined with packaging flags")
+		}
+		_, err := packager.Verify(*verify)
+		return err
+	}
 	if *env == "" || *out == "" || flags.NArg() != 0 {
-		return errors.New("usage: platform-factory-packager --env DIR --out ARCHIVE")
+		return errors.New("usage: platform-factory-packager --env DIR --out ARCHIVE | --verify DIR")
 	}
 	return packager.Package(*env, *out)
 }

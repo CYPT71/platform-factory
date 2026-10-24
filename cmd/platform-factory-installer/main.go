@@ -58,7 +58,7 @@ func main() {
 
 func run() error {
 	var (
-		flagComponents = flag.String("components", "", "comma-separated component keys to install non-interactively (core is always included); see -list")
+		flagComponents = flag.String("components", "", "comma-separated component keys, or all, to install non-interactively (core is always included); see -list")
 		flagPrefix     = flag.String("prefix", defaultPrefix(), "installation directory for binaries")
 		flagYes        = flag.Bool("yes", false, "confirm and skip the interactive wizard (required together with -components outside a terminal)")
 		flagList       = flag.Bool("list", false, "list available components and exit")
@@ -320,7 +320,10 @@ func (m buildModel) Init() tea.Cmd {
 // one place that actually shells out, shared by the animated bubbletea
 // view and the plain sequential fallback used outside a terminal.
 func buildBinary(repoRoot, prefix, goos, goarch, version string, step stepView) ([]byte, error) {
-	out := filepath.Join(prefix, step.Name+installer.BinSuffix(goos))
+	out, err := filepath.Abs(filepath.Join(prefix, step.Name+installer.BinSuffix(goos)))
+	if err != nil {
+		return nil, err
+	}
 	ldflags := "-s -w"
 	if step.Name == "platform-factory" {
 		ldflags += " -X main.version=" + version
@@ -330,9 +333,27 @@ func buildBinary(repoRoot, prefix, goos, goarch, version string, step stepView) 
 		cgo = "1"
 	}
 	cmd := exec.Command("go", "build", "-trimpath", "-ldflags="+ldflags, "-o", out, step.Pkg)
-	cmd.Dir = repoRoot
+	// Build in the owning module so GOWORK=off installations work too.
+	if strings.HasPrefix(step.Pkg, "./plugins/") {
+		relative := strings.TrimPrefix(step.Pkg, "./")
+		parts := strings.SplitN(relative, "/", 3)
+		cmd.Dir = filepath.Join(repoRoot, parts[0], parts[1])
+		cmd.Args[len(cmd.Args)-1] = "."
+		if len(parts) == 3 {
+			cmd.Args[len(cmd.Args)-1] = "./" + parts[2]
+		}
+	} else {
+		cmd.Dir = repoRoot
+	}
 	cmd.Env = append(os.Environ(), "CGO_ENABLED="+cgo, "GOOS="+goos, "GOARCH="+goarch)
-	return cmd.CombinedOutput()
+	output, err := cmd.CombinedOutput()
+	if err != nil || !step.CGO || goos != "darwin" {
+		return output, err
+	}
+	// Apple's native VM API requires this entitlement on the executable.
+	sign := exec.Command("codesign", "--force", "--sign", "-", "--entitlements", filepath.Join(repoRoot, "scripts/microvm/hvf.entitlements"), out)
+	signedOutput, err := sign.CombinedOutput()
+	return append(output, signedOutput...), err
 }
 
 func runPlainBuild(steps []stepView, repoRoot, prefix, goos, goarch, version string) error {

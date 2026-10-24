@@ -91,6 +91,18 @@ Install the full CLI (`platform-factory`, alias `pf`) locally:
 pf version
 ```
 
+## All-in-one installation
+
+```sh
+./install.sh --components all --prefix ./dist/local/bin --yes
+./dist/local/bin/pf version
+```
+
+Includes the eight language plugins, OCI tools, distributed workers and
+Kubernetes/KubeVirt/containerd integrations, with runtime components selected
+for the target platform. See [distribution and verification](docs/commercial-distribution.md)
+for relocatable releases, integrity checks and remaining commercial scope.
+
 ## Documentation
 
 - [CLI guide](docs/cli-guide.md) — full command reference, installation,

@@ -12,7 +12,7 @@ usage() {
 usage: scripts/local/install.sh [OPTIONS]
 
 Options:
-  --components LIST   comma-separated component keys to install
+  --components LIST   all, or comma-separated component keys to install
                        non-interactively (core is always included); see --list
   --prefix DIR         installation directory (default: $HOME/.local/bin)
   --os GOOS             target OS (default: host)
@@ -43,26 +43,29 @@ repo_root=$(cd "$(dirname "$script_path")/../.." && pwd)
 command -v go >/dev/null 2>&1 || { echo "error: Go is required on PATH" >&2; exit 1; }
 
 # --- component catalog -------------------------------------------------
-component_keys=(core builder microvm distributed)
+component_keys=(core builder microvm distributed integrations)
 component_labels=(
   "Core CLI"
   "OCI Builder"
   "MicroVM support"
   "Distributed platform"
+  "Deployment integrations"
 )
 component_descriptions=(
   "platform-factory (pf alias) + official language plugins: ready for init, launch, build, pipeline, sbom and diff"
-  "oci-builder: builds an OCI image standalone"
+  "oci-builder + platform-factory-packager: OCI and verified release archives"
   "microvm-init + microvm-initramfs; platform-factory-runtime on linux/amd64 only: isolated microVM execution (KVM/HVF)"
   "platform-factory-control-plane + platform-factory-worker: multi-node orchestration"
+  "Kubernetes, KubeVirt, containerd and Linux/amd64 shim"
 )
 component_binaries=(
   "platform-factory"
-  "oci-builder"
+  "oci-builder platform-factory-packager"
   "microvm-init microvm-initramfs platform-factory-runtime"
   "platform-factory-control-plane platform-factory-worker"
+  "platform-factory-kubernetes platform-factory-kubevirt platform-factory-containerd containerd-shim-platform-factory-v1"
 )
-component_mandatory=(1 0 0 0)
+component_mandatory=(1 0 0 0 0)
 
 component_index() {
   local key=$1 i
@@ -252,6 +255,14 @@ else
   fi
 fi
 
+# Expand the all-in-one profile before validating individual components.
+expanded_keys=""
+for key in $selected_keys; do
+  if [ "$key" = all ]; then expanded_keys="$expanded_keys ${component_keys[*]}"
+  else expanded_keys="$expanded_keys $key"; fi
+done
+selected_keys=$expanded_keys
+
 # de-duplicate and validate
 final_keys=""
 for key in $selected_keys; do
@@ -327,8 +338,8 @@ build_failed=false
 for key in $final_keys; do
   idx=$(component_index "$key")
   for name in ${component_binaries[$idx]}; do
-    if [ "$name" = platform-factory-runtime ] && { [ "$flag_os" != linux ] || [ "$flag_arch" != amd64 ]; }; then
-      echo "  $(dim "–") platform-factory-runtime skipped: OCI runtime integration requires linux/amd64 (target is $flag_os/$flag_arch)"
+    if { [ "$name" = platform-factory-runtime ] || [ "$name" = containerd-shim-platform-factory-v1 ]; } && { [ "$flag_os" != linux ] || [ "$flag_arch" != amd64 ]; }; then
+      echo "  $(dim "–") $name skipped: OCI runtime integration requires linux/amd64 (target is $flag_os/$flag_arch)"
       continue
     fi
     out="$flag_prefix/$name$suffix"
@@ -338,9 +349,20 @@ for key in $final_keys; do
     [ "$name" = platform-factory ] && [ "$native_vmm" = true ] && cgo=1
     log=$(mktemp)
     (
-      cd "$repo_root"
+      module_dir="$repo_root"
+      package="./cmd/$name"
+      case "$name" in
+        platform-factory-kubernetes) module_dir="$repo_root/plugins/kubernetes" ;;
+        platform-factory-kubevirt) module_dir="$repo_root/plugins/kubevirt" ;;
+        platform-factory-containerd) module_dir="$repo_root/plugins/containerd" ;;
+        containerd-shim-platform-factory-v1) module_dir="$repo_root/plugins/containerd"; package=./cmd/platform-factory-shim ;;
+      esac
+      cd "$module_dir"
       CGO_ENABLED="$cgo" GOOS="$flag_os" GOARCH="$flag_arch" \
-        go build -trimpath -ldflags="$ldflags" -o "$out" "./cmd/$name"
+        go build -trimpath -ldflags="$ldflags" -o "$out" "$package"
+      if [ "$cgo" = 1 ]; then
+        codesign --force --sign - --entitlements "$repo_root/scripts/microvm/hvf.entitlements" "$out"
+      fi
     ) >"$log" 2>&1 &
     build_pid=$!
     if ! spin "$build_pid" "$name"; then

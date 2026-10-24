@@ -23,20 +23,29 @@ type Component struct {
 	Mandatory   bool
 }
 
+// LanguageBinaries lists the official command plugins shipped with core.
+func LanguageBinaries() []string {
+	var result []string
+	for _, language := range []string{"go", "python", "node", "java", "dotnet", "rust", "ruby", "php"} {
+		result = append(result, "platform-factory-lang-"+language)
+	}
+	return result
+}
+
 // Components is the installer's full catalog, in display/build order.
 var Components = []Component{
 	{
 		Key:         "core",
 		Label:       "CLI de base",
 		Description: "platform-factory (alias pf) : launch, build, pipeline, sbom, plugins, diff",
-		Binaries:    []string{"platform-factory"},
+		Binaries:    append([]string{"platform-factory"}, LanguageBinaries()...),
 		Mandatory:   true,
 	},
 	{
 		Key:         "builder",
 		Label:       "OCI Builder",
-		Description: "oci-builder : construit une image OCI de façon autonome",
-		Binaries:    []string{"oci-builder"},
+		Description: "oci-builder + platform-factory-packager : images OCI et archives de distribution",
+		Binaries:    []string{"oci-builder", "platform-factory-packager"},
 	},
 	{
 		Key:         "microvm",
@@ -49,6 +58,12 @@ var Components = []Component{
 		Label:       "Plateforme distribuée",
 		Description: "platform-factory-control-plane + platform-factory-worker : orchestration multi-nœuds",
 		Binaries:    []string{"platform-factory-control-plane", "platform-factory-worker"},
+	},
+	{
+		Key:         "integrations",
+		Label:       "Intégrations de déploiement",
+		Description: "Kubernetes, KubeVirt, containerd et shim Linux",
+		Binaries:    []string{"platform-factory-kubernetes", "platform-factory-kubevirt", "platform-factory-containerd", "containerd-shim-platform-factory-v1"},
 	},
 }
 
@@ -74,7 +89,17 @@ func ResolveComponents(keys []string) ([]Component, error) {
 		known[c.Key] = c
 	}
 	requested := map[string]bool{"core": true}
+	for _, key := range keys {
+		if key == "all" {
+			for name := range known {
+				requested[name] = true
+			}
+		}
+	}
 	for _, k := range keys {
+		if k == "all" {
+			continue
+		}
 		if _, ok := known[k]; !ok {
 			return nil, fmt.Errorf("unknown component %q (use -list to see available components)", k)
 		}
@@ -107,9 +132,25 @@ func BuildSteps(selected []Component, goos, goarch string) []BuildStep {
 	var steps []BuildStep
 	for _, c := range selected {
 		for _, name := range c.Binaries {
+			if (name == "platform-factory-runtime" || name == "containerd-shim-platform-factory-v1") && (goos != "linux" || goarch != "amd64") {
+				continue
+			}
+			pkg := "./cmd/" + name
+			switch {
+			case strings.HasPrefix(name, "platform-factory-lang-"):
+				pkg = "./plugins/lang-" + strings.TrimPrefix(name, "platform-factory-lang-")
+			case name == "platform-factory-kubernetes":
+				pkg = "./plugins/kubernetes/cmd/" + name
+			case name == "platform-factory-kubevirt":
+				pkg = "./plugins/kubevirt/cmd/" + name
+			case name == "platform-factory-containerd":
+				pkg = "./plugins/containerd/cmd/" + name
+			case name == "containerd-shim-platform-factory-v1":
+				pkg = "./plugins/containerd/cmd/platform-factory-shim"
+			}
 			steps = append(steps, BuildStep{
 				Name: name,
-				Pkg:  "./cmd/" + name,
+				Pkg:  pkg,
 				CGO:  name == "platform-factory" && nativeMacVMM,
 			})
 		}

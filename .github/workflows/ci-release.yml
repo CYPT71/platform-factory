@@ -12,6 +12,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15, windows-2025]
+        arch: [amd64, arm64]
+        exclude:
+          - {os: macos-15, arch: amd64}
+          - {os: windows-2025, arch: arm64}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -24,6 +28,7 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           GOTOOLCHAIN: local
+          TARGET_ARCH: ${{ matrix.arch }}
         run: |
           # set -euo pipefail (PowerShell equivalent follows)
           $ErrorActionPreference = "Stop"
@@ -33,23 +38,34 @@ jobs:
             "windows-2025" { @{ OS = "windows"; Arch = "amd64"; Extension = "zip" } }
             default { throw "unsupported release runner" }
           }
+          $target.Arch = $env:TARGET_ARCH
           $envDir = Join-Path $env:RUNNER_TEMP "platform-factory-env"
           ./scripts/local/bootstrap.ps1 -TargetOS $target.OS -TargetArch $target.Arch -Environment $envDir
           $archive = "platform-factory-$env:TAG-$($target.OS)-$($target.Arch).$($target.Extension)"
           go run ./cmd/platform-factory-packager --env $envDir --out $archive
+          if ($LASTEXITCODE -ne 0) { throw "Distribution packaging failed" }
           if ($target.OS -eq "windows") {
             Expand-Archive -LiteralPath $archive -DestinationPath verify
+            go run ./cmd/platform-factory-packager --verify verify
+            if ($LASTEXITCODE -ne 0) { throw "Distribution integrity verification failed" }
             & ./verify/bin/pf.exe version
+            if ($LASTEXITCODE -ne 0) { throw "CLI smoke test failed" }
           } else {
             New-Item -ItemType Directory verify | Out-Null
             tar -xzf $archive -C verify
-            & ./verify/bin/pf version
+            if ($LASTEXITCODE -ne 0) { throw "Archive extraction failed" }
+            go run ./cmd/platform-factory-packager --verify verify
+            if ($LASTEXITCODE -ne 0) { throw "Distribution integrity verification failed" }
+            if ($target.Arch -eq (& go env GOHOSTARCH).Trim()) {
+              & ./verify/bin/pf version
+              if ($LASTEXITCODE -ne 0) { throw "CLI smoke test failed" }
+            }
           }
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content -LiteralPath "$archive.sha256" -Encoding ascii
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: package-${{ matrix.os }}
+          name: package-${{ matrix.os }}-${{ matrix.arch }}
           path: |
             platform-factory-*.tar.gz
             platform-factory-*.zip
@@ -103,7 +119,7 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: validate
+    needs: [validate, packages]
     environment: release
     permissions: {contents: read, packages: write}
     runs-on: ubuntu-24.04

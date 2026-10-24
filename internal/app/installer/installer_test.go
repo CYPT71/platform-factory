@@ -3,6 +3,7 @@ package installer
 import (
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -62,14 +63,15 @@ func TestBuildStepsFlattensBinariesForEachSelectedComponent(t *testing.T) {
 	var names []string
 	for _, s := range steps {
 		names = append(names, s.Name)
-		if s.Pkg != "./cmd/"+s.Name {
+		if !strings.HasPrefix(s.Name, "platform-factory-lang-") && s.Pkg != "./cmd/"+s.Name {
 			t.Errorf("step %q pkg=%q", s.Name, s.Pkg)
 		}
 		if s.CGO {
 			t.Errorf("step %q should not require cgo on linux", s.Name)
 		}
 	}
-	want := []string{"platform-factory", "microvm-init", "microvm-initramfs", "platform-factory-runtime"}
+	want := append([]string{"platform-factory"}, LanguageBinaries()...)
+	want = append(want, "microvm-init", "microvm-initramfs", "platform-factory-runtime")
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("names=%v want=%v", names, want)
 	}
@@ -81,7 +83,7 @@ func TestBuildStepsEnablesCGOOnlyOnTheMatchingNativeMacHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	steps := BuildSteps(selected, "darwin", "arm64")
-	if len(steps) != 1 || steps[0].Name != "platform-factory" {
+	if len(steps) != 9 || steps[0].Name != "platform-factory" {
 		t.Fatalf("steps=%+v", steps)
 	}
 	wantCGO := runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"
@@ -103,5 +105,36 @@ func TestBinSuffix(t *testing.T) {
 	}
 	if got := BinSuffix("linux"); got != "" {
 		t.Fatalf("BinSuffix(linux)=%q", got)
+	}
+}
+
+func TestAllProfileIncludesEveryIntegrationAndFiltersLinuxOnlyBinaries(t *testing.T) {
+	selected, err := ResolveComponents([]string{"all", "integrations", "all"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != len(Components) {
+		t.Fatalf("components=%v", selected)
+	}
+	for _, target := range []struct{ os, arch string }{{"linux", "amd64"}, {"linux", "arm64"}, {"darwin", "arm64"}, {"windows", "amd64"}} {
+		seen := map[string]bool{}
+		for _, step := range BuildSteps(selected, target.os, target.arch) {
+			if seen[step.Name] {
+				t.Fatalf("duplicate %s", step.Name)
+			}
+			seen[step.Name] = true
+			if strings.Contains(step.Name, "kubernetes") && step.Pkg != "./plugins/kubernetes/cmd/platform-factory-kubernetes" {
+				t.Fatal(step)
+			}
+		}
+		for _, name := range []string{"platform-factory-kubernetes", "platform-factory-kubevirt", "platform-factory-containerd", "platform-factory-lang-go", "platform-factory-lang-python", "platform-factory-packager"} {
+			if !seen[name] {
+				t.Fatalf("%s/%s missing %s", target.os, target.arch, name)
+			}
+		}
+		nativeRuntime := target.os == "linux" && target.arch == "amd64"
+		if seen["platform-factory-runtime"] != nativeRuntime || seen["containerd-shim-platform-factory-v1"] != nativeRuntime {
+			t.Fatalf("unsupported runtime selection: %v", seen)
+		}
 	}
 }

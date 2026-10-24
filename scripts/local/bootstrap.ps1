@@ -39,8 +39,8 @@ New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 $Suffix = if ($TargetOS -eq "windows") { ".exe" } else { "" }
 $Version = (& git -C $RepoRoot describe --tags --always --dirty 2>$null)
 if (-not $Version) { $Version = "dev" }
-$Commands = @("platform-factory", "oci-builder", "example-service", "microvm-init", "microvm-initramfs", "platform-factory-control-plane", "platform-factory-worker")
-if ($TargetOS -eq "linux" -and $TargetArch -eq "amd64") { $Commands += "platform-factory-runtime" }
+$Commands = @("platform-factory", "platform-factory-packager", "oci-builder", "example-service", "microvm-init", "microvm-initramfs", "platform-factory-control-plane", "platform-factory-worker", "platform-factory-kubernetes", "platform-factory-kubevirt", "platform-factory-containerd")
+if ($TargetOS -eq "linux" -and $TargetArch -eq "amd64") { $Commands += @("platform-factory-runtime", "containerd-shim-platform-factory-v1") }
 else { Write-Host "platform-factory-runtime skipped: OCI runtime integration requires linux/amd64 (target is $TargetOS/$TargetArch)" }
 $Languages = @("go", "python", "node", "java", "dotnet", "rust", "ruby", "php")
 $NativeVMM = $TargetOS -eq "darwin" -and $HostOS -eq $TargetOS -and $HostArch -eq $TargetArch
@@ -64,10 +64,24 @@ try {
     $env:GOARCH = $TargetArch
     $Ldflags = "-s -w"
     if ($CommandName -eq "platform-factory") { $Ldflags += " -X main.version=$Version" }
-    & go build -trimpath "-ldflags=$Ldflags" `
-      -o (Join-Path $BinDir "$CommandName$Suffix") `
-      (Join-Path $RepoRoot "cmd/$CommandName")
-    if ($LASTEXITCODE -ne 0) { throw "Build failed for $CommandName." }
+    $ModuleDir = $RepoRoot
+    $Package = "./cmd/$CommandName"
+    switch ($CommandName) {
+      "platform-factory-kubernetes" { $ModuleDir = Join-Path $RepoRoot "plugins/kubernetes" }
+      "platform-factory-kubevirt" { $ModuleDir = Join-Path $RepoRoot "plugins/kubevirt" }
+      "platform-factory-containerd" { $ModuleDir = Join-Path $RepoRoot "plugins/containerd" }
+      "containerd-shim-platform-factory-v1" { $ModuleDir = Join-Path $RepoRoot "plugins/containerd"; $Package = "./cmd/platform-factory-shim" }
+    }
+    Push-Location $ModuleDir
+    try {
+      & go build -trimpath "-ldflags=$Ldflags" -o (Join-Path $BinDir "$CommandName$Suffix") $Package
+      if ($LASTEXITCODE -ne 0) { throw "Build failed for $CommandName." }
+    }
+    finally { Pop-Location }
+    if ($CommandName -eq "platform-factory" -and $NativeVMM) {
+      & codesign --force --sign - --entitlements (Join-Path $RepoRoot "scripts/microvm/hvf.entitlements") (Join-Path $BinDir "$CommandName$Suffix")
+      if ($LASTEXITCODE -ne 0) { throw "Native Apple VM entitlement signing failed" }
+    }
   }
   foreach ($Language in $Languages) {
     $PluginName = "platform-factory-lang-$Language"
