@@ -51,3 +51,18 @@ item is not converted to done merely because a lower-level primitive exists.
 
 Terraform and Ansible remain intentionally deferred plugins and are not MVP
 blockers.
+
+## Verified delivery milestone — 2026-10-24
+
+A real Linux/arm64 kind node inside the macOS AppleHV VM now passes the signed
+compiled-service lifecycle: reproducible build, SBOM/provenance/signature
+publication to a private registry, digest deployment, HTTP/logs/events checks,
+scaling, explicit idempotent retry, conflict refusal, redeployment after
+rollback and repeated rollback. Registry associations are checked through the
+OCI 1.1 referrers API or fallback tag index, including blob digests.
+
+This closes that concrete compiled-service acceptance gap, not the entire
+Python/runtime-provider roadmap or customer production acceptance. The scenario
+is automated in `tests/kind/test-kind-signed-lifecycle.sh` and the dedicated
+`ci-kind-multinode.yml` job. See `docs/local-kubernetes-acceptance.md` for scope,
+sandbox conditions, operation keys and temporary-resource ownership.

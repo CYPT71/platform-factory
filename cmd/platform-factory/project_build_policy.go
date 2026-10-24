@@ -162,9 +162,6 @@ func preflightDirectBuildPolicy(filename, distDir, reportsDir, signKeyDir, signK
 	if rules.RequireReproducible && (rebuilds < 2 || !requireIdentical) {
 		return directBuildPolicy{}, errors.New("build policy requires reproducibility; use --rebuild 2 or greater with --require-identical")
 	}
-	if rebuilds > 1 && (rules.RequireSBOM || rules.RequireProvenance || rules.RequireSignature) {
-		return directBuildPolicy{}, errors.New("rebuild mode does not yet emit signed release evidence; split reproducibility verification and release build")
-	}
 	return directBuildPolicy{configured: true, rules: rules}, nil
 }
 

@@ -27,7 +27,7 @@ import (
 
 const (
 	indexMediaType    = "application/vnd.oci.image.index.v1+json"
-	artifactMediaType = "application/vnd.oci.artifact.manifest.v1+json"
+	artifactMediaType = "application/vnd.oci.image.manifest.v1+json"
 	maxResponseBody   = 1 << 20
 	uploadChunkSize   = 4 << 20
 	// maxFetchedBlobSize keeps GetBlob limited to verification artifacts.
@@ -74,8 +74,9 @@ type Client struct {
 	// neither needs nor should opt into.
 	FollowBlobRedirects bool
 
-	mu    sync.RWMutex
-	token string
+	referrersMu sync.Mutex
+	mu          sync.RWMutex
+	token       string
 }
 
 // Result identifies the immutable object installed before the requested tag.
@@ -276,25 +277,38 @@ func (c *Client) PushArtifact(ctx context.Context, target Reference, subjectDige
 	if artifactType == "" || payloadMediaType == "" {
 		return ArtifactResult{}, errors.New("registry: artifact and payload media types are required")
 	}
+	// OCI 1.1 artifacts use the standard image manifest. The former draft
+	// artifact.manifest media type is rejected by real Distribution registries.
+	emptyConfig := []byte("{}")
+	configSum := sha256.Sum256(emptyConfig)
+	configDigest := "sha256:" + hex.EncodeToString(configSum[:])
 	sum := sha256.Sum256(payload)
 	payloadDigest := "sha256:" + hex.EncodeToString(sum[:])
-	exists, err := c.blobExists(ctx, target, payloadDigest)
-	if err != nil {
-		return ArtifactResult{}, err
-	}
-	if !exists {
-		if err := c.uploadBlob(ctx, target, payloadDigest, int64(len(payload)), bytes.NewReader(payload)); err != nil {
+	for _, blob := range []struct {
+		digest string
+		data   []byte
+	}{{payloadDigest, payload}, {configDigest, emptyConfig}} {
+		exists, err := c.blobExists(ctx, target, blob.digest)
+		if err != nil {
 			return ArtifactResult{}, err
+		}
+		if !exists {
+			if err := c.uploadBlob(ctx, target, blob.digest, int64(len(blob.data)), bytes.NewReader(blob.data)); err != nil {
+				return ArtifactResult{}, err
+			}
 		}
 	}
 	manifest := struct {
-		MediaType    string       `json:"mediaType"`
-		ArtifactType string       `json:"artifactType"`
-		Blobs        []descriptor `json:"blobs"`
-		Subject      descriptor   `json:"subject"`
+		SchemaVersion int          `json:"schemaVersion"`
+		MediaType     string       `json:"mediaType"`
+		ArtifactType  string       `json:"artifactType"`
+		Config        descriptor   `json:"config"`
+		Layers        []descriptor `json:"layers"`
+		Subject       descriptor   `json:"subject"`
 	}{
-		MediaType: artifactMediaType, ArtifactType: artifactType,
-		Blobs:   []descriptor{{MediaType: payloadMediaType, Digest: payloadDigest, Size: int64(len(payload))}},
+		SchemaVersion: 2, MediaType: artifactMediaType, ArtifactType: artifactType,
+		Config:  descriptor{MediaType: "application/vnd.oci.empty.v1+json", Digest: configDigest, Size: int64(len(emptyConfig))},
+		Layers:  []descriptor{{MediaType: payloadMediaType, Digest: payloadDigest, Size: int64(len(payload))}},
 		Subject: descriptor{MediaType: subjectMediaType, Digest: subjectDigest, Size: subjectSize},
 	}
 	encoded, err := json.Marshal(manifest)
@@ -303,8 +317,17 @@ func (c *Client) PushArtifact(ctx context.Context, target Reference, subjectDige
 	}
 	manifestSum := sha256.Sum256(encoded)
 	digest := "sha256:" + hex.EncodeToString(manifestSum[:])
-	if err := c.putManifest(ctx, target, digest, artifactMediaType, encoded); err != nil {
+	acknowledged, err := c.putManifestSubject(ctx, target, digest, artifactMediaType, encoded)
+	if err != nil {
 		return ArtifactResult{}, fmt.Errorf("registry: publish artifact: %w", err)
+	}
+	if acknowledged != "" && acknowledged != subjectDigest {
+		return ArtifactResult{}, errors.New("registry: OCI-Subject response does not match artifact subject")
+	}
+	if acknowledged == "" {
+		if err := c.updateReferrersFallback(ctx, target, subjectDigest, digest, int64(len(encoded)), artifactType); err != nil {
+			return ArtifactResult{}, err
+		}
 	}
 	return ArtifactResult{Digest: digest, Size: int64(len(encoded))}, nil
 }
@@ -724,19 +747,24 @@ func (c *Client) uploadOffset(ctx context.Context, uploadURL *url.URL) (int64, e
 }
 
 func (c *Client) putManifest(ctx context.Context, target Reference, reference, mediaType string, data []byte) error {
+	_, err := c.putManifestSubject(ctx, target, reference, mediaType, data)
+	return err
+}
+
+func (c *Client) putManifestSubject(ctx context.Context, target Reference, reference, mediaType string, data []byte) (string, error) {
 	if mediaType == "" {
 		mediaType = indexMediaType
 	}
 	response, err := c.do(ctx, http.MethodPut, target, "/manifests/"+url.PathEscape(reference),
 		bytes.NewReader(data), mediaType, int64(len(data)))
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusAccepted {
-		return responseError("put manifest", response)
+		return "", responseError("put manifest", response)
 	}
-	return nil
+	return response.Header.Get("OCI-Subject"), nil
 }
 
 func (c *Client) do(ctx context.Context, method string, target Reference, suffix string, body io.Reader, contentType string, size int64) (*http.Response, error) {

@@ -350,7 +350,15 @@ func TestPushLayoutUploadsBlobsBeforeDigestAndTag(t *testing.T) {
 			reference, _ := url.PathUnescape(path[strings.LastIndex(path, "/")+1:])
 			manifests[reference], _ = io.ReadAll(r.Body)
 			events = append(events, "manifest:"+reference)
-			return response(http.StatusCreated, "", nil)
+			result := response(http.StatusCreated, "", nil)
+			var attached struct {
+				Subject descriptor `json:"subject"`
+			}
+			_ = json.Unmarshal(manifests[reference], &attached)
+			if attached.Subject.Digest != "" {
+				result.Header.Set("OCI-Subject", attached.Subject.Digest)
+			}
+			return result
 		case r.Method == http.MethodGet && strings.Contains(path, "/manifests/"):
 			reference, _ := url.PathUnescape(path[strings.LastIndex(path, "/")+1:])
 			manifest, ok := manifests[reference]
@@ -416,6 +424,30 @@ func TestPushLayoutUploadsBlobsBeforeDigestAndTag(t *testing.T) {
 	}
 	if artifact.Digest == "" || events[len(events)-1] != "manifest:"+artifact.Digest {
 		t.Fatalf("artifact=%+v events=%v", artifact, events)
+	}
+	var attached struct {
+		SchemaVersion int          `json:"schemaVersion"`
+		MediaType     string       `json:"mediaType"`
+		ArtifactType  string       `json:"artifactType"`
+		Config        descriptor   `json:"config"`
+		Layers        []descriptor `json:"layers"`
+		Subject       descriptor   `json:"subject"`
+	}
+	if err := json.Unmarshal(manifests[artifact.Digest], &attached); err != nil {
+		t.Fatal(err)
+	}
+	if attached.SchemaVersion != 2 || attached.MediaType != "application/vnd.oci.image.manifest.v1+json" || attached.ArtifactType == "" || len(attached.Layers) != 1 || attached.Subject.Digest != result.Digest {
+		t.Fatalf("not an OCI 1.1 attached image manifest: %+v", attached)
+	}
+	if attached.Config.MediaType != "application/vnd.oci.empty.v1+json" || string(blobs[attached.Config.Digest]) != "{}" || attached.Config.Size != 2 {
+		t.Fatalf("invalid empty config: %+v", attached.Config)
+	}
+	for _, descriptor := range []descriptor{attached.Config, attached.Layers[0]} {
+		data := blobs[descriptor.Digest]
+		hash := sha256.Sum256(data)
+		if "sha256:"+hex.EncodeToString(hash[:]) != descriptor.Digest || int64(len(data)) != descriptor.Size {
+			t.Fatalf("unbound artifact blob %+v", descriptor)
+		}
 	}
 }
 

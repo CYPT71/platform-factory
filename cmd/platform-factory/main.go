@@ -1088,7 +1088,7 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 			fmt.Fprintln(stderr, "platform-factory build: --rebuild verifies a single target; run one --platform at a time")
 			return 2
 		}
-		code := runReproducibleBuildWithPolicy(targets[0], output, settings, *rebuild, *requireIdentical, *outputFormat, *distDir, *reportsDir, buildPolicy, stdout, stderr)
+		code := runReproducibleBuildWithPolicy(targets[0], output, settings, *rebuild, *requireIdentical, *outputFormat, *distDir, *reportsDir, *signKeyDir, *signKeyName, buildPolicy, stdout, stderr)
 		if code == 0 && len(references) > 1 {
 			if _, err := layout.SetReferences(output, references); err != nil {
 				fmt.Fprintf(stderr, "platform-factory build: add image references: %v\n", err)
@@ -1208,10 +1208,10 @@ func runBuild(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 // runReproducibleBuild compares isolated builds and installs only identical output.
 func runReproducibleBuild(target buildapp.Target, output string, settings buildapp.Settings, rebuilds int, requireIdentical bool, outputFormat, distDir, reportsDir string, stdout, stderr io.Writer) int {
-	return runReproducibleBuildWithPolicy(target, output, settings, rebuilds, requireIdentical, outputFormat, distDir, reportsDir, directBuildPolicy{}, stdout, stderr)
+	return runReproducibleBuildWithPolicy(target, output, settings, rebuilds, requireIdentical, outputFormat, distDir, reportsDir, "", "release", directBuildPolicy{}, stdout, stderr)
 }
 
-func runReproducibleBuildWithPolicy(target buildapp.Target, output string, settings buildapp.Settings, rebuilds int, requireIdentical bool, outputFormat, distDir, reportsDir string, buildPolicy directBuildPolicy, stdout, stderr io.Writer) int {
+func runReproducibleBuildWithPolicy(target buildapp.Target, output string, settings buildapp.Settings, rebuilds int, requireIdentical bool, outputFormat, distDir, reportsDir, signKeyDir, signKeyName string, buildPolicy directBuildPolicy, stdout, stderr io.Writer) int {
 	if _, err := os.Stat(output); err == nil {
 		fmt.Fprintf(stderr, "platform-factory build: output already exists: %s\n", output)
 		return 1
@@ -1265,8 +1265,16 @@ func runReproducibleBuildWithPolicy(target buildapp.Target, output string, setti
 				return 1
 			}
 		}
+		if distDir != "" || reportsDir != "" {
+			result := map[string]any{"digest": digests[0], "reproducible": true, "rebuilds": rebuilds, "layout": output}
+			if err := buildapp.WriteBuildEvidence(distDir, reportsDir, signKeyDir, signKeyName, version, result, target, settings); err != nil {
+				fmt.Fprintf(stderr, "platform-factory build: write reproducible release evidence: %v\n", err)
+				return 1
+			}
+		}
 	}
 	return emitRebuildResultWithPolicy(rebuildOutcome{
+		distDir:   distDir,
 		reference: settings.Image + ":" + settings.Tag,
 		platform:  target.OS + "/" + target.Architecture,
 		rebuilds:  rebuilds, digest: digests[0], output: output,
@@ -1275,10 +1283,10 @@ func runReproducibleBuildWithPolicy(target buildapp.Target, output string, setti
 }
 
 type rebuildOutcome struct {
-	reference, platform, digest, output string
-	rebuilds                            int
-	divergences                         []layout.DiffReport
-	requireIdentical                    bool
+	reference, platform, digest, output, distDir string
+	rebuilds                                     int
+	divergences                                  []layout.DiffReport
+	requireIdentical                             bool
 }
 
 // emitRebuildResult reports divergence and enforces requireIdentical.
@@ -1305,7 +1313,7 @@ func emitRebuildResultWithPolicy(outcome rebuildOutcome, outputFormat, reportsDi
 			return 1
 		}
 	}
-	if err := persistDirectBuildPolicy(buildPolicy, "", reportsDir, outcome.digest, reproducible); err != nil {
+	if err := persistDirectBuildPolicy(buildPolicy, outcome.distDir, reportsDir, outcome.digest, reproducible); err != nil {
 		fmt.Fprintf(stderr, "platform-factory build: enforce configured build policy: %v\n", err)
 		return 1
 	}

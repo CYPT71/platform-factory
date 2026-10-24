@@ -1671,7 +1671,7 @@ func TestDeployToClusterAppliesThenObservesPerWorkload(t *testing.T) {
 		}
 		host := &pluginHost{clients: []pluginClient{stub}}
 		manifest := []byte(`{"kind":"Deployment"}`)
-		output, err := deployToCluster(context.Background(), host, manifest, test.workload, "api", "prod", "ghcr.io/example/api@sha256:"+strings.Repeat("b", 64), "2m")
+		output, err := deployToCluster(context.Background(), host, manifest, test.workload, "api", "prod", "ghcr.io/example/api@sha256:"+strings.Repeat("b", 64), "2m", "acceptance-deploy")
 		if err != nil {
 			t.Fatalf("workload=%s err=%v", test.workload, err)
 		}
@@ -1679,7 +1679,7 @@ func TestDeployToClusterAppliesThenObservesPerWorkload(t *testing.T) {
 			t.Fatalf("workload=%s output=%q", test.workload, output)
 		}
 		wantCalls := []string{
-			"idempotent:v1." + api.CapabilityDeploymentApply + ":deploy-apply-" + string(cliOperationID("deploy-apply", "prod", "api", "ghcr.io/example/api@sha256:"+strings.Repeat("b", 64))[len("deploy-apply-"):]),
+			"idempotent:v1." + api.CapabilityDeploymentApply + ":acceptance-deploy",
 			"call:v1." + api.CapabilityDeploymentObserve,
 		}
 		if !reflect.DeepEqual(stub.calls, wantCalls) {
@@ -1704,19 +1704,19 @@ func TestDeployToClusterAppliesThenObservesPerWorkload(t *testing.T) {
 
 func TestDeployToClusterSurfacesMissingCapabilitiesAndErrors(t *testing.T) {
 	empty := &pluginHost{}
-	if _, err := deployToCluster(context.Background(), empty, nil, "service", "api", "prod", "image@sha256:x", "2m"); err == nil ||
+	if _, err := deployToCluster(context.Background(), empty, nil, "service", "api", "prod", "image@sha256:x", "2m", "acceptance-deploy"); err == nil ||
 		!strings.Contains(err.Error(), api.CapabilityDeploymentApply) {
 		t.Fatalf("err=%v", err)
 	}
 
 	applyOnly := &pluginHost{clients: []pluginClient{&stubDeploymentPlugin{capabilities: []string{api.CapabilityDeploymentApply}}}}
-	if _, err := deployToCluster(context.Background(), applyOnly, nil, "service", "api", "prod", "image@sha256:x", "2m"); err == nil ||
+	if _, err := deployToCluster(context.Background(), applyOnly, nil, "service", "api", "prod", "image@sha256:x", "2m", "acceptance-deploy"); err == nil ||
 		!strings.Contains(err.Error(), api.CapabilityDeploymentObserve) {
 		t.Fatalf("err=%v", err)
 	}
 
 	failingApply := &pluginHost{clients: []pluginClient{&stubDeploymentPlugin{capabilities: allDeploymentCapabilities(), err: errors.New("apply refused")}}}
-	if _, err := deployToCluster(context.Background(), failingApply, nil, "service", "api", "prod", "image@sha256:x", "2m"); err == nil ||
+	if _, err := deployToCluster(context.Background(), failingApply, nil, "service", "api", "prod", "image@sha256:x", "2m", "acceptance-deploy"); err == nil ||
 		!strings.Contains(err.Error(), "apply refused") {
 		t.Fatalf("err=%v", err)
 	}
@@ -1734,14 +1734,14 @@ func TestRollbackClusterUndoesThenObservesRolloutStatus(t *testing.T) {
 		observeResult: api.DeploymentObserveResult{Output: "deployment \"api\" successfully rolled out", Ready: true},
 	}
 	host := &pluginHost{clients: []pluginClient{stub}}
-	output, err := rollbackCluster(context.Background(), host, "prod", "api", 2, "2m")
+	output, err := rollbackCluster(context.Background(), host, "prod", "api", 2, "2m", "acceptance-rollback")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if output != "deployment \"api\" successfully rolled out" {
 		t.Fatalf("output=%q", output)
 	}
-	wantOperationID := cliOperationID("rollback", "prod", "api", "2")
+	wantOperationID := "acceptance-rollback"
 	wantCalls := []string{
 		"idempotent:v1." + api.CapabilityDeploymentRollback + ":" + string(wantOperationID),
 		"call:v1." + api.CapabilityDeploymentObserve,
@@ -1767,17 +1767,17 @@ func TestRollbackClusterUndoesThenObservesRolloutStatus(t *testing.T) {
 
 func TestRollbackClusterSurfacesMissingCapabilitiesAndErrors(t *testing.T) {
 	empty := &pluginHost{}
-	if _, err := rollbackCluster(context.Background(), empty, "prod", "api", 0, "2m"); err == nil ||
+	if _, err := rollbackCluster(context.Background(), empty, "prod", "api", 0, "2m", "acceptance-rollback"); err == nil ||
 		!strings.Contains(err.Error(), api.CapabilityDeploymentRollback) {
 		t.Fatalf("err=%v", err)
 	}
 	rollbackOnly := &pluginHost{clients: []pluginClient{&stubDeploymentPlugin{capabilities: []string{api.CapabilityDeploymentRollback}}}}
-	if _, err := rollbackCluster(context.Background(), rollbackOnly, "prod", "api", 0, "2m"); err == nil ||
+	if _, err := rollbackCluster(context.Background(), rollbackOnly, "prod", "api", 0, "2m", "acceptance-rollback"); err == nil ||
 		!strings.Contains(err.Error(), api.CapabilityDeploymentObserve) {
 		t.Fatalf("err=%v", err)
 	}
 	failing := &pluginHost{clients: []pluginClient{&stubDeploymentPlugin{capabilities: allDeploymentCapabilities(), err: errors.New("rollback refused")}}}
-	if _, err := rollbackCluster(context.Background(), failing, "prod", "api", 0, "2m"); err == nil ||
+	if _, err := rollbackCluster(context.Background(), failing, "prod", "api", 0, "2m", "acceptance-rollback"); err == nil ||
 		!strings.Contains(err.Error(), "rollback refused") {
 		t.Fatalf("err=%v", err)
 	}

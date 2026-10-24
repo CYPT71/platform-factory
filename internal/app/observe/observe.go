@@ -19,11 +19,12 @@ import (
 // DeployedProject is the persisted identity of a project's most recent
 // `pf deploy`.
 type DeployedProject struct {
-	APIVersion string `json:"api_version"`
-	Image      string `json:"image"`
-	Name       string `json:"name"`
-	Namespace  string `json:"namespace"`
-	Workload   string `json:"workload"`
+	APIVersion   string `json:"api_version"`
+	Image        string `json:"image"`
+	Name         string `json:"name"`
+	Namespace    string `json:"namespace"`
+	Workload     string `json:"workload"`
+	RuntimeClass string `json:"runtime_class,omitempty"`
 }
 
 // LoadDeployedProject discovers the project rooted at ".", decodes its
@@ -41,8 +42,17 @@ func LoadDeployedProject() (DeployedProject, error) {
 	}
 	if state.APIVersion != "platform-factory.dev/deployment/v1" ||
 		!publicationtarget.ValidKubernetesName(state.Name) || !publicationtarget.ValidKubernetesName(state.Namespace) ||
-		(state.Workload != "job" && state.Workload != "service") || !publicationtarget.ValidDigestReference(state.Image) {
+		!validWorkload(state.Workload) || (state.RuntimeClass != "" && !publicationtarget.ValidKubernetesName(state.RuntimeClass)) || !publicationtarget.ValidDigestReference(state.Image) {
 		return DeployedProject{}, errors.New("persisted deployment identity is invalid")
 	}
 	return state, nil
+}
+
+func validWorkload(workload string) bool {
+	switch workload {
+	case "service", "job", "statefulset", "daemonset", "cronjob":
+		return true
+	default:
+		return false
+	}
 }

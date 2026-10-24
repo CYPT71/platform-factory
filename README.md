@@ -104,6 +104,8 @@ for the target platform. See [distribution and verification](docs/commercial-dis
 for relocatable releases, integrity checks and remaining commercial scope.
 [Signed plugin bundles](docs/plugin-bundles.md) activate Kubernetes/KubeVirt
 through offline verification and managed installation.
+[Real Kubernetes acceptance](docs/local-kubernetes-acceptance.md) covers signed
+publication, HTTP readiness, scaling, retries and repeated rollback.
 
 ## Documentation
 

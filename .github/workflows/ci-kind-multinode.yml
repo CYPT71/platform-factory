@@ -66,3 +66,55 @@ jobs:
         run: |
           set -euo pipefail
           "$(go env GOPATH)/bin/kind" delete cluster --name platform-factory-distributed
+
+  signed-plugin-lifecycle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
+      KIND_EXPERIMENTAL_PROVIDER: docker
+      KUBECONFIG: ${{ runner.temp }}/pf-acceptance/kubeconfig
+      PLATFORM_FACTORY_KIND_CONTEXT: kind-platform-factory-lifecycle
+      PLATFORM_FACTORY_ACCEPTANCE_REGISTRY: localhost:5000
+      # Explicit opt-out for this functional acceptance job only. Namespace
+      # isolation/security gates remain in their dedicated workflows.
+      PLATFORM_FACTORY_ACCEPTANCE_ALLOW_UNSANDBOXED: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the pinned Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version-file: go.mod, cache: true}
+      - name: Create an isolated kind cluster and OCI 1.1 registry
+        run: |
+          set -euo pipefail
+          scripts/ci/install-tools.sh kind
+          mkdir -p "$(dirname "$KUBECONFIG")"
+          "$(go env GOPATH)/bin/kind" create cluster --name platform-factory-lifecycle \
+            --kubeconfig "$KUBECONFIG" --wait 120s \
+            --image kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+          docker run -d --name platform-factory-lifecycle-registry --network kind \
+            -p 127.0.0.1:5000:5000 \
+            registry:3@sha256:01cd312e67026f06f5d89c3e133a4a9adc7cb9eeb9b1194e0b2954dfd770efd2
+          docker exec platform-factory-lifecycle-control-plane mkdir -p /etc/containerd/certs.d/localhost:5000
+          docker exec -i platform-factory-lifecycle-control-plane sh -c \
+            'cat > /etc/containerd/certs.d/localhost:5000/hosts.toml' <<'HOSTS'
+          [host."http://platform-factory-lifecycle-registry:5000"]
+            capabilities = ["pull", "resolve"]
+          HOSTS
+      - name: Prove signed publication deployment scaling and repeated rollback
+        run: |
+          set -euo pipefail
+          tests/kind/test-kind-signed-lifecycle.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: signed-plugin-lifecycle-evidence
+          path: dist/kind-signed-lifecycle/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Remove the disposable cluster and registry
+        if: always()
+        run: |
+          set -euo pipefail
+          "$(go env GOPATH)/bin/kind" delete cluster --name platform-factory-lifecycle || true
+          docker rm -f platform-factory-lifecycle-registry || true

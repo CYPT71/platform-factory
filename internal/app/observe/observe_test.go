@@ -68,3 +68,32 @@ func TestLoadDeployedProjectRejectsInvalidIdentity(t *testing.T) {
 		t.Fatal("expected error for invalid digest reference")
 	}
 }
+
+func TestLoadDeployReceiptSupportsEveryRenderedWorkloadAndRuntimeClass(t *testing.T) {
+	for _, workload := range []string{"service", "job", "statefulset", "daemonset", "cronjob"} {
+		t.Run(workload, func(t *testing.T) {
+			root := t.TempDir()
+			writeProject(t, root, map[string]any{"api_version": "platform-factory.dev/deployment/v1", "image": "registry.example/app@sha256:" + strings.Repeat("b", 64), "name": "hello", "namespace": "acceptance", "workload": workload, "runtime_class": "platform-factory"})
+			t.Chdir(root)
+			state, err := LoadDeployedProject()
+			if err != nil || state.Workload != workload || state.RuntimeClass != "platform-factory" {
+				t.Fatalf("state=%+v err=%v", state, err)
+			}
+		})
+	}
+}
+
+func TestLoadDeployReceiptRejectsInvalidRuntimeClassAndUnknownFields(t *testing.T) {
+	for _, invalid := range []string{"runtime_class", "unknown_field", "workload"} {
+		t.Run(invalid, func(t *testing.T) {
+			receipt := map[string]any{"api_version": "platform-factory.dev/deployment/v1", "image": "registry.example/app@sha256:" + strings.Repeat("c", 64), "name": "hello", "namespace": "acceptance", "workload": "service", "runtime_class": ""}
+			receipt[invalid] = "invalid/value"
+			root := t.TempDir()
+			writeProject(t, root, receipt)
+			t.Chdir(root)
+			if _, err := LoadDeployedProject(); err == nil {
+				t.Fatal("accepted invalid receipt", invalid)
+			}
+		})
+	}
+}

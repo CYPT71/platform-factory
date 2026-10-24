@@ -67,8 +67,9 @@ and native Apple virtualization behavior are preserved.
 This is a distributable product foundation, not a claim of production or
 commercial completion. Remaining commercial decisions include pricing,
 licensing/support terms, release signing ownership and customer acceptance.
-Technical work still includes the interpreted-language runtime supply chain,
-full project-level publish/deploy/recovery workflows and real customer/cluster
-acceptance. [TODO review](../TODO-REVIEW.md) tracks those gaps. No external
+The compiled-service path now has [real cluster acceptance](local-kubernetes-acceptance.md)
+for signed reproducible publication, scaling, logs, redeployment and repeated
+rollback. Technical work still includes the interpreted-language runtime supply
+chain and real customer acceptance beyond this controlled cluster scenario. [TODO review](../TODO-REVIEW.md) tracks those gaps. No external
 release, paid service, cluster deployment or publication is performed by these
 local build commands.

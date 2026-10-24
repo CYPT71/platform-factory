@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -76,6 +78,23 @@ func defaultLifecycleRoot(environment, name string) string {
 // cliOperationID deterministically identifies one logical mutation.
 func cliOperationID(domain string, parts ...string) core.OperationID {
 	return core.OperationID(domain + "-" + core.DeriveID("platform-factory/"+domain+"/v1", parts...))
+}
+
+// mutationOperationID separates a new operator request from a retry. Explicit
+// keys can be reused verbatim; the journal rejects a changed
+// request under the same key. Without a key, generate a fresh invocation.
+func mutationOperationID(domain, key string) (core.OperationID, error) {
+	if key != "" && (len(key) > 64 || !core.ValidOperationID(core.OperationID(key))) {
+		return "", errors.New("operation-id must be a safe identifier of at most 64 characters")
+	}
+	if key == "" {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return "", err
+		}
+		key = domain + "-" + hex.EncodeToString(random[:])
+	}
+	return core.OperationID(key), nil
 }
 
 // cliWorkloadID deterministically identifies one workload with a safe filename.
@@ -601,6 +620,7 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 	dryRun := flags.Bool("dry-run", false, "print the manifest without applying it")
 	yes := flags.Bool("yes", false, "confirm cluster deployment")
 	outputFormat := flags.String("format", "text", "result format: text or json")
+	operationKey := flags.String("operation-id", "", "explicit retry key; omit for a new deployment request")
 	pluginFlags := registerPluginFlags(flags)
 	if containsHelpFlag(args) {
 		printDeployUsage(stdout, flags)
@@ -612,7 +632,7 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 		}
 		return 2
 	}
-	if flags.NArg() > 1 || !validOutputFormat(*outputFormat) || !validKubernetesName(*name) || !validKubernetesName(*namespace) ||
+	if (*operationKey != "" && (len(*operationKey) > 64 || !core.ValidOperationID(core.OperationID(*operationKey)))) || flags.NArg() > 1 || !validOutputFormat(*outputFormat) || !validKubernetesName(*name) || !validKubernetesName(*namespace) ||
 		*replicas < 1 || *port < 1 || *port > 65535 {
 		fmt.Fprintln(stderr, "usage: platform-factory deploy [--workload auto|service|job] [--name NAME] [--namespace NS] [--policy FILE --evidence FILE] [--dry-run] [--yes] [IMAGE]")
 		return 2
@@ -758,7 +778,13 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 		return 1
 	}
 	defer host.Close()
-	observeOutput, deployErr := deployToCluster(ctx, host, manifest, selectedWorkload, *name, *namespace, image, *timeout)
+	operationID, err := mutationOperationID("deploy-apply", *operationKey)
+	if err != nil {
+		fmt.Fprintln(stderr, "platform-factory deploy:", err)
+		return 1
+	}
+	fmt.Fprintf(stderr, "platform-factory deploy: operation-id=%s\n", operationID)
+	observeOutput, deployErr := deployToCluster(ctx, host, manifest, selectedWorkload, *name, *namespace, image, *timeout, operationID)
 	code := 0
 	if deployErr != nil {
 		fmt.Fprintf(stderr, "platform-factory deploy: %v\n", deployErr)
@@ -799,7 +825,7 @@ func runDeploy(ctx context.Context, args []string, stdout, stderr io.Writer, exe
 		return writeDeployJSON(stdout, stderr, map[string]any{
 			"api_version": cliOutputAPIVersion, "operation": "deploy", "status": "deployed",
 			"image": image, "name": *name, "namespace": *namespace, "workload": selectedWorkload,
-			"runtime_class": *runtimeClass, "observation": observeOutput, "operations": deployOperationCount,
+			"runtime_class": *runtimeClass, "operation_id": string(operationID), "observation": observeOutput, "operations": deployOperationCount,
 			"deployment_receipt": deploymentReceipt, "metrics_receipt": metricsReceipt,
 		})
 	}
@@ -828,12 +854,11 @@ func writeDeployJSON(stdout, stderr io.Writer, result map[string]any) int {
 // own rollout to finish. Returns the observation's own human-readable
 // output for the caller to print - equivalent to what the kubectl
 // wait/get/rollout-status subcommand this replaces would have printed.
-func deployToCluster(ctx context.Context, host *pluginHost, manifest []byte, selectedWorkload, name, namespace, image, timeout string) (string, error) {
+func deployToCluster(ctx context.Context, host *pluginHost, manifest []byte, selectedWorkload, name, namespace, image, timeout string, applyOperationID core.OperationID) (string, error) {
 	applyClient, found := host.findCapability(api.CapabilityDeploymentApply)
 	if !found {
 		return "", fmt.Errorf("no installed plugin provides %s; pass --plugin-dir pointing at a directory containing the kubernetes plugin (see docs/containerd-kubernetes.md)", api.CapabilityDeploymentApply)
 	}
-	applyOperationID := cliOperationID("deploy-apply", namespace, name, image)
 	if err := applyClient.CallWithIdempotency(ctx, applyOperationID, "v1."+api.CapabilityDeploymentApply,
 		api.DeploymentApplyParams{Manifest: manifest}, nil); err != nil {
 		return "", fmt.Errorf("apply: %w", err)
@@ -868,6 +893,7 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer, e
 	timeout := flags.String("timeout", "2m", "rollout timeout")
 	dryRun := flags.Bool("dry-run", false, "print operations without executing them")
 	yes := flags.Bool("yes", false, "confirm rollback")
+	operationKey := flags.String("operation-id", "", "explicit retry key; omit for a new rollback request")
 	pluginFlags := registerPluginFlags(flags)
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -875,7 +901,7 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer, e
 		}
 		return 2
 	}
-	if flags.NArg() > 1 || !validKubernetesName(*namespace) || *revision < 0 {
+	if (*operationKey != "" && (len(*operationKey) > 64 || !core.ValidOperationID(core.OperationID(*operationKey)))) || flags.NArg() > 1 || !validKubernetesName(*namespace) || *revision < 0 {
 		fmt.Fprintln(stderr, "usage: platform-factory rollback [OPTIONS] [DEPLOYMENT]")
 		return 2
 	}
@@ -889,7 +915,11 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer, e
 			return 1
 		}
 		if state.Workload != "service" {
-			fmt.Fprintln(stderr, "platform-factory rollback: Kubernetes Jobs have no rollout history; rebuild and publish a new immutable digest")
+			if state.Workload == "job" {
+				fmt.Fprintln(stderr, "platform-factory rollback: Kubernetes Jobs have no rollout history; rebuild and publish a new immutable digest")
+			} else {
+				fmt.Fprintln(stderr, "platform-factory rollback: only service Deployments support rollback; selected workload is", state.Workload)
+			}
 			return 1
 		}
 		deploymentName = state.Name
@@ -930,7 +960,13 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer, e
 		return 1
 	}
 	defer host.Close()
-	output, err := rollbackCluster(ctx, host, *namespace, deploymentName, *revision, *timeout)
+	operationID, err := mutationOperationID("rollback", *operationKey)
+	if err != nil {
+		fmt.Fprintln(stderr, "platform-factory rollback:", err)
+		return 1
+	}
+	fmt.Fprintf(stderr, "platform-factory rollback: operation-id=%s\n", operationID)
+	output, err := rollbackCluster(ctx, host, *namespace, deploymentName, *revision, *timeout, operationID)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory rollback: %v\n", err)
 		return 1
@@ -949,12 +985,11 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer, e
 // capability so the caller gets the same "did it actually finish rolling
 // out" signal `kubectl rollout undo` followed by `kubectl rollout
 // status` used to give.
-func rollbackCluster(ctx context.Context, host *pluginHost, namespace, name string, toRevision int, timeout string) (string, error) {
+func rollbackCluster(ctx context.Context, host *pluginHost, namespace, name string, toRevision int, timeout string, operationID core.OperationID) (string, error) {
 	rollbackClient, found := host.findCapability(api.CapabilityDeploymentRollback)
 	if !found {
 		return "", fmt.Errorf("no installed plugin provides %s; pass --plugin-dir pointing at a directory containing the kubernetes plugin (see docs/containerd-kubernetes.md)", api.CapabilityDeploymentRollback)
 	}
-	operationID := cliOperationID("rollback", namespace, name, strconv.Itoa(toRevision))
 	if err := rollbackClient.CallWithIdempotency(ctx, operationID, "v1."+api.CapabilityDeploymentRollback,
 		api.DeploymentRollbackParams{Namespace: namespace, Name: name, ToRevision: toRevision}, nil); err != nil {
 		return "", fmt.Errorf("rollback: %w", err)
