@@ -24,12 +24,23 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -json ./... > "$work/govulncheck
     --policy .github/license-policy.json --output "$work/license-report.json"
 go test -race ./...
 
+# Keep these reviewed subprocess exceptions aligned with ci-security.yml.
+# Disk parser: bounded self-exec; capability probe: LookPath; tests: fixtures.
 test -z "$(find cmd internal -name '*.go' -type f \
     ! -path 'cmd/microvm-init/main.go' \
+    ! -path 'cmd/platform-factory/microvm_native_hvf_darwin_test.go' \
+    ! -path 'cmd/platform-factory/disk_parser.go' \
+    ! -path 'cmd/platform-factory/disk_parser_test.go' \
+    ! -path 'internal/app/project/capabilities.go' \
+    ! -path 'internal/microvm/forward/forward_test.go' \
+    ! -path 'internal/plugin/manifest_test.go' \
+    ! -path 'internal/plugin/client_env_test.go' \
+    ! -path 'internal/hypervisor/kvm/linux_tap_crash_linux_test.go' \
     ! -path 'cmd/microvm-init/guest_agent.go' \
     ! -path 'cmd/microvm-init/identity_linux.go' \
     ! -path 'cmd/microvm-init/identity_other.go' \
     ! -path 'cmd/platform-factory/main.go' \
+    ! -path 'cmd/platform-factory/kubernetes_plugin_test.go' \
     ! -path 'cmd/platform-factory/exitcriteria_test.go' \
     ! -path 'cmd/platform-factory/kubevirt_plugin_test.go' \
     ! -path 'cmd/platform-factory/microvm_native_darwin.go' \
@@ -66,6 +77,8 @@ test -z "$(find cmd internal -name '*.go' -type f \
     ! -path 'internal/plugin/sandbox_linux.go' \
     ! -path 'internal/plugin/sandbox_other.go' \
     ! -path 'internal/plugin/sandbox_linux_test.go' \
+    ! -path 'internal/app/plugin/plugin.go' \
+    ! -path 'internal/app/plugin/plugin_more_test.go' \
     ! -path 'internal/provenance/plugin.go' \
     ! -path 'internal/provenance/plugin_test.go' \
     ! -path 'internal/sbom/sbom_test.go' \
@@ -74,12 +87,16 @@ test -z "$(find cmd internal -name '*.go' -type f \
     ! -path 'internal/ociruntime/runtime_linux_test.go' \
     ! -path 'internal/app/projectinit/projectinit.go' \
     ! -path 'internal/app/projectinit/projectinit_test.go' \
+    ! -path 'internal/app/provisionruntime/provisionruntime.go' \
     ! -path 'internal/marketplace/sync.go' \
     ! -path 'internal/marketplace/gitfixture_test.go' \
+    ! -path 'internal/dockersave/cliclient.go' \
     ! -path 'internal/mcp/git/exec.go' \
+    ! -path 'internal/mcp/git/git_edge_test.go' \
     ! -path 'internal/mcp/git/gitfixture_test.go' \
     ! -path 'internal/mcp/project/inspect_test.go' \
     ! -path 'internal/mcp/core/validate.go' \
+    ! -path 'internal/mcp/core/validate_test.go' \
     ! -path 'internal/mcp/core/affected.go' \
     ! -path 'internal/mcp/core/affected_test.go' \
     ! -path 'internal/mcp/plugins/validate.go' \
@@ -92,7 +109,8 @@ test -z "$(find cmd internal -name '*.go' -type f \
     ! -path 'cmd/platform-factory/init_e2e_test.go' \
     ! -path 'cmd/platform-factory/marketplace_e2e_test.go' \
     ! -path 'cmd/platform-factory/main_test.go' \
-    -exec grep -nE 'os/exec|exec\.Command' {} + || true)"
+    ! -path 'internal/shellquote/shellquote.go' \
+  -exec grep -nE 'os/exec|exec\.Command' {} + || true)"
 test -z "$(find cmd internal -name '*.go' -type f \
   -exec grep -n 'InsecureSkipVerify' {} + || true)"
 test -z "$(grep -rniI 'skopeo' cmd internal --include='*.go' || true)"

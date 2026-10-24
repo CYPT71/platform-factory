@@ -121,9 +121,13 @@ func runNativeKVM(ctx context.Context, layoutDir string, memoryMiB int, forwards
 	commandLine := "console=hvc0 earlycon=hvc0 ignore_loglevel panic=0 rdinit=/sbin/init ip=dhcp"
 
 	relayCtx, cancelRelays := context.WithCancel(ctx)
-	defer cancelRelays()
 	var relayGroup sync.WaitGroup
-	defer relayGroup.Wait()
+	defer func() {
+		// Relays exit on cancellation; cancel before waiting even when boot
+		// fails or the guest shuts down without cancelling the parent context.
+		cancelRelays()
+		relayGroup.Wait()
+	}()
 	liveWriter := &ipWatchingWriter{
 		passthrough: stdout,
 		onGuestIP: func(guestIP string) {

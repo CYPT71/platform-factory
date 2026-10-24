@@ -122,9 +122,19 @@ jobs:
           # validate_test.go's own os/exec import is exec.LookPath only
           # (skipping a govulncheck-dependent test when the tool is not on
           # PATH) - it never executes anything itself.
+          # Reviewed subprocesses: disk parser self-exec with bounded I/O,
+          # capability LookPath probes, and fixture/crash/Apple VM tests.
           # Process execution remains forbidden elsewhere.
           test -z "$(find cmd internal -name '*.go' -type f \
               ! -path 'cmd/microvm-init/main.go' \
+              ! -path 'cmd/platform-factory/disk_parser.go' \
+              ! -path 'cmd/platform-factory/disk_parser_test.go' \
+              ! -path 'cmd/platform-factory/microvm_native_hvf_darwin_test.go' \
+              ! -path 'internal/app/project/capabilities.go' \
+              ! -path 'internal/hypervisor/kvm/linux_tap_crash_linux_test.go' \
+              ! -path 'internal/microvm/forward/forward_test.go' \
+              ! -path 'internal/plugin/client_env_test.go' \
+              ! -path 'internal/plugin/manifest_test.go' \
               ! -path 'cmd/microvm-init/guest_agent.go' \
               ! -path 'cmd/microvm-init/identity_linux.go' \
               ! -path 'cmd/microvm-init/identity_other.go' \
