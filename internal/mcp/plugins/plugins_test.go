@@ -33,12 +33,12 @@ func fixtureRepo(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	mustWrite("go.mod", "module github.com/CYPT71/platform-factory\n\ngo 1.25.12\n")
+	mustWrite("go.mod", "module github.com/CYPT71/platform-factory\n\ngo 1.26.10\n")
 	// addPluginToGoWork appends every newly scaffolded plugin's module
 	// path into this file's "use (...)" block, so a minimal one - just
 	// the open/close markers, no entries yet - must exist for Create to
 	// succeed, matching the real repository's own go.work shape.
-	mustWrite("go.work", "go 1.25.12\n\nuse (\n\t.\n)\n")
+	mustWrite("go.work", "go 1.26.10\n\nuse (\n\t.\n)\n")
 	mustWrite("plugins/.keep", "")
 
 	realSDKPluginDir := findRealSDKPluginDir(t)
@@ -145,7 +145,7 @@ func TestModuleKind(t *testing.T) {
 	})
 	t.Run("standalone go.mod with no replace directive", func(t *testing.T) {
 		dir := t.TempDir()
-		mustWriteFile(t, filepath.Join(dir, "go.mod"), "module example.com/standalone\n\ngo 1.25.12\n")
+		mustWriteFile(t, filepath.Join(dir, "go.mod"), "module example.com/standalone\n\ngo 1.26.10\n")
 		if got := moduleKind(dir); got != "standalone" {
 			t.Fatalf("got=%q", got)
 		}
@@ -153,7 +153,7 @@ func TestModuleKind(t *testing.T) {
 	t.Run("go.mod that replaces the main module locally", func(t *testing.T) {
 		dir := t.TempDir()
 		mustWriteFile(t, filepath.Join(dir, "go.mod"),
-			"module github.com/CYPT71/platform-factory/plugins/widget\n\ngo 1.25.12\n\nrequire github.com/CYPT71/platform-factory v0.0.2\n\nreplace github.com/CYPT71/platform-factory => ../..\n")
+			"module github.com/CYPT71/platform-factory/plugins/widget\n\ngo 1.26.10\n\nrequire github.com/CYPT71/platform-factory v0.0.2\n\nreplace github.com/CYPT71/platform-factory => ../..\n")
 		if got := moduleKind(dir); got != "depends-on-main" {
 			t.Fatalf("got=%q", got)
 		}

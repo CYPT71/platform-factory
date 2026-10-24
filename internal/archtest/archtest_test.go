@@ -96,16 +96,16 @@ func TestForbiddenReason(t *testing.T) {
 
 func TestInspectWorkspaceFindsViolationsAcrossModules(t *testing.T) {
 	root := t.TempDir()
-	writeFixture(t, root, "go.work", "go 1.25.12\n\nuse (\n .\n ./plugins/a\n ./plugins/b\n)\n")
-	writeFixture(t, root, "go.mod", "module "+repositoryModule+"\n\ngo 1.25.12\n")
+	writeFixture(t, root, "go.work", "go 1.26.10\n\nuse (\n .\n ./plugins/a\n ./plugins/b\n)\n")
+	writeFixture(t, root, "go.mod", "module "+repositoryModule+"\n\ngo 1.26.10\n")
 	writeFixture(t, root, "sdk/bad/bad.go", "package bad\nimport _ \""+repositoryModule+"/internal/brandnew\"\n")
 	writeFixture(t, root, "internal/scheduler/bad.go", "package scheduler\nimport _ \""+repositoryModule+"/internal/cache\"\n")
 	writeFixture(t, root, "internal/app/migration/bad.go", "package migration\nimport _ \""+repositoryModule+"/internal/plugin\"\n")
 	writeFixture(t, root, "internal/plugin/boundary_test.go", "package plugin\nimport _ \""+repositoryModule+"/sdk/plugin\"\n")
 	writeFixture(t, root, "cmd/platform-factory/bad.go", "package main\nimport _ \""+repositoryModule+"/plugins/a\"\n")
-	writeFixture(t, root, "plugins/a/go.mod", "module "+repositoryModule+"/plugins/a\n\ngo 1.25.12\n")
+	writeFixture(t, root, "plugins/a/go.mod", "module "+repositoryModule+"/plugins/a\n\ngo 1.26.10\n")
 	writeFixture(t, root, "plugins/a/a.go", "package a\nimport _ \""+repositoryModule+"/plugins/b\"\n")
-	writeFixture(t, root, "plugins/b/go.mod", "module "+repositoryModule+"/plugins/b\n\ngo 1.25.12\n")
+	writeFixture(t, root, "plugins/b/go.mod", "module "+repositoryModule+"/plugins/b\n\ngo 1.26.10\n")
 	writeFixture(t, root, "plugins/b/b_test.go", "package b\nimport _ \""+repositoryModule+"/internal/plugin\"\n")
 
 	violations, err := inspectWorkspace(root)
@@ -122,8 +122,8 @@ func TestInspectWorkspaceFindsViolationsAcrossModules(t *testing.T) {
 
 func TestInspectWorkspaceFailsClosedOnMalformedSource(t *testing.T) {
 	root := t.TempDir()
-	writeFixture(t, root, "go.work", "go 1.25.12\nuse .\n")
-	writeFixture(t, root, "go.mod", "module "+repositoryModule+"\n\ngo 1.25.12\n")
+	writeFixture(t, root, "go.work", "go 1.26.10\nuse .\n")
+	writeFixture(t, root, "go.mod", "module "+repositoryModule+"\n\ngo 1.26.10\n")
 	writeFixture(t, root, "sdk/broken.go", "package sdk\nimport (\n")
 
 	_, err := inspectWorkspace(root)
@@ -140,9 +140,9 @@ func TestInspectWorkspaceFailsClosedOnModuleMetadata(t *testing.T) {
 		wantErr string
 	}{
 		{name: "malformed workspace", goWork: "not a go workspace\n", wantErr: "read go.work"},
-		{name: "empty workspace", goWork: "go 1.25.12\n", wantErr: "declares no modules"},
-		{name: "missing go.mod", goWork: "go 1.25.12\nuse .\n", wantErr: "go.mod"},
-		{name: "missing module directive", goWork: "go 1.25.12\nuse .\n", goMod: stringPointer("go 1.25.12\n"), wantErr: "has no module directive"},
+		{name: "empty workspace", goWork: "go 1.26.10\n", wantErr: "declares no modules"},
+		{name: "missing go.mod", goWork: "go 1.26.10\nuse .\n", wantErr: "go.mod"},
+		{name: "missing module directive", goWork: "go 1.26.10\nuse .\n", goMod: stringPointer("go 1.26.10\n"), wantErr: "has no module directive"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -162,7 +162,7 @@ func TestInspectWorkspaceFailsClosedOnModuleMetadata(t *testing.T) {
 func TestWorkspaceModulesResolvesAndSortsPaths(t *testing.T) {
 	root := t.TempDir()
 	abs := t.TempDir()
-	writeFixture(t, root, "go.work", "go 1.25.12\nuse (\n ./z\n ./a\n "+filepath.ToSlash(abs)+"\n)\n")
+	writeFixture(t, root, "go.work", "go 1.26.10\nuse (\n ./z\n ./a\n "+filepath.ToSlash(abs)+"\n)\n")
 
 	modules, err := workspaceModules(root)
 	if err != nil {
@@ -185,7 +185,7 @@ func TestWorkspaceModulesResolvesAndSortsPaths(t *testing.T) {
 
 func TestReadModulePathSupportsQuotedDirective(t *testing.T) {
 	root := t.TempDir()
-	writeFixture(t, root, "go.mod", "module \"example.com/quoted\"\n\ngo 1.25.12\n")
+	writeFixture(t, root, "go.mod", "module \"example.com/quoted\"\n\ngo 1.26.10\n")
 	got, err := readModulePath(filepath.Join(root, "go.mod"))
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func TestReadModuleImportsFailsClosedOnBrokenNestedModuleMetadata(t *testing.T) 
 
 func TestFindWorkspaceRootWalksParentsAndFailsAtFilesystemRoot(t *testing.T) {
 	root := t.TempDir()
-	writeFixture(t, root, "go.work", "go 1.25.12\n")
+	writeFixture(t, root, "go.work", "go 1.26.10\n")
 	nested := filepath.Join(root, "a", "b")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)

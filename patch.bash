@@ -10,7 +10,7 @@ set -Eeuo pipefail
 #   ./ci-microvm-local.sh sign
 #
 # Environment overrides:
-#   GOTOOLCHAIN_VERSION=1.25.12
+#   GOTOOLCHAIN_VERSION=1.26.10
 #   CACHE_DIR=.cache/microvm
 #   ARTIFACT_DIR=.artifacts/ci-microvm
 #   SKIP_APT=1
@@ -30,7 +30,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 MODE="${1:-all}"
-GOTOOLCHAIN_VERSION="${GOTOOLCHAIN_VERSION:-1.25.12}"
+GOTOOLCHAIN_VERSION="${GOTOOLCHAIN_VERSION:-1.26.10}"
 CACHE_DIR="${CACHE_DIR:-$ROOT/.cache/microvm}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$ROOT/.artifacts/ci-microvm}"
 TMP_DIR="${TMP_DIR:-$(mktemp -d -t platform-factory-microvm.XXXXXX)}"

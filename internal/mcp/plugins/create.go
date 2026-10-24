@@ -261,7 +261,7 @@ func renderGoMod(name string) string {
 // in-repo plugin module already uses for their own sdk dependencies.
 module github.com/CYPT71/platform-factory/plugins/%s
 
-go 1.25.12
+go 1.26.10
 
 require github.com/CYPT71/platform-factory v0.0.2
 
@@ -346,7 +346,7 @@ func renderLangGoMod(name string) string {
 // plugins/lang-node and every other language plugin already uses.
 module github.com/CYPT71/platform-factory/plugins/%s
 
-go 1.25.12
+go 1.26.10
 
 require github.com/CYPT71/platform-factory v0.0.2
 

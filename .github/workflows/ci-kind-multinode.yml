@@ -73,7 +73,7 @@ jobs:
     env:
       GOTOOLCHAIN: local
       KIND_EXPERIMENTAL_PROVIDER: docker
-      KUBECONFIG: ${{ runner.temp }}/pf-acceptance/kubeconfig
+      KUBECONFIG: /tmp/platform-factory-lifecycle/kubeconfig
       PLATFORM_FACTORY_KIND_CONTEXT: kind-platform-factory-lifecycle
       PLATFORM_FACTORY_ACCEPTANCE_REGISTRY: localhost:5000
       # Explicit opt-out for this functional acceptance job only. Namespace

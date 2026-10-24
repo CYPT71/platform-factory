@@ -16,7 +16,7 @@ func validPluginInputs() PluginBuildInputs {
 		ArtifactDigest: "sha256:" + strings.Repeat("a", 64),
 		SourceCommit:   strings.Repeat("b", 40),
 		ModulePath:     "github.com/CYPT71/platform-factory/plugins/kubevirt",
-		GoVersion:      "go1.25.12", BuilderID: "https://platform-factory.dev/builder/v1",
+		GoVersion:      "go1.26.10", BuilderID: "https://platform-factory.dev/builder/v1",
 	}
 }
 

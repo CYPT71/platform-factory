@@ -31,7 +31,7 @@ correction.
 ### 1. Baseline and toolchain
 - [x] Clean Git tree
 - [x] Create stabilization baseline
-- [x] Lock Go to 1.25.12 - `go.mod`/`go.work` both declare `go 1.25.12`
+- [x] Lock Go to 1.26.10 - `go.mod`/`go.work` both declare `go 1.26.10`
 - [x] Provide make bootstrap - `Makefile:26`
 - [x] Provide make verify - `Makefile:29`
 - [x] Provide make release-check - `Makefile:42`

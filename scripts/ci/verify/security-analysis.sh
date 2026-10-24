@@ -15,7 +15,10 @@ echo "--- Static analysis and security regression tests ---"
 go vet ./...
 work=$(mktemp -d "${TMPDIR:-/tmp}/pf-verify-security.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
-go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -json ./... > "$work/govulncheck.json"
+go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -json ./... > "$work/govulncheck.json"
+for module in containerd kubernetes kubevirt; do
+  GOWORK=off go -C "plugins/$module" run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -json ./... > "$work/govulncheck-$module.json"
+done
 { go list -deps -test -json ./...
   (cd cmd/platform-factory-installer && GOWORK=off go list -deps -test -json ./...)
   (cd plugins/containerd && GOWORK=off go list -deps -test -json ./...)

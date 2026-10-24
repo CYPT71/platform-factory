@@ -14,12 +14,12 @@
 #     bash -c "scripts/bootstrap-dev.sh && make verify"
 #
 # The pinned digest below is the multi-arch manifest-list digest for
-# docker.io/library/golang:1.25.12-bookworm (not a single-platform image
+# docker.io/library/golang:1.26.10-bookworm (not a single-platform image
 # digest - verified via `skopeo inspect --raw`, which resolves correctly on
 # both amd64 and arm64 CI runners), captured at the time this file was
 # written. Bump both the tag and the digest together when tools/go-version
 # changes, never one without the other.
-FROM docker.io/library/golang@sha256:908f8ff2ec296df2f349563072c7925775cd28b50361a52ed834a8a37399b9bf
+FROM docker.io/library/golang@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af
 
 ENV GOTOOLCHAIN=local \
     DEBIAN_FRONTEND=noninteractive
@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-RUN go version | grep -q "go1.25.12" || { echo "error: base image Go version drifted from tools/go-version" >&2; exit 1; }
+RUN go version | grep -q "go1.26.10" || { echo "error: base image Go version drifted from tools/go-version" >&2; exit 1; }
 
 # Known gap, not introduced by this image: internal/hypervisor/sandbox's
 # seccomp syscall table (syscalls_linux.go) hardcodes x86_64 syscall

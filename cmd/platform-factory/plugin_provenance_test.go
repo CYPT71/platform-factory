@@ -34,7 +34,7 @@ func provenanceTestModule(t *testing.T) (sourceDir, executable string) {
 		}
 	}
 	run("init", "-q")
-	if err := os.WriteFile(filepath.Join(sourceDir, "go.mod"), []byte("module github.com/CYPT71/platform-factory/plugins/example\n\ngo 1.25.12\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sourceDir, "go.mod"), []byte("module github.com/CYPT71/platform-factory/plugins/example\n\ngo 1.26.10\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	run("add", "go.mod")

@@ -17,12 +17,19 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/ci/verify-workflows.py
+      - name: Scan the separately versioned runtime and deployment modules
+        env: {GOTOOLCHAIN: local, GOWORK: 'off'}
+        run: |
+          set -euo pipefail
+          for module in containerd kubernetes kubevirt; do
+            go -C "plugins/$module" run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -json ./... > "govulncheck-$module.json"
+          done
       - name: Static analysis and security regression tests
         env: {GOTOOLCHAIN: local}
         run: |
           set -euo pipefail
           go vet ./...
-          go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -json ./... > govulncheck.json
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -json ./... > govulncheck.json
           { go list -deps -test -json ./...; \
             (cd cmd/platform-factory-installer && GOWORK=off go list -deps -test -json ./...); \
             (cd plugins/containerd && GOWORK=off go list -deps -test -json ./...); \
@@ -232,7 +239,7 @@ jobs:
         with:
           name: security-analysis-reports
           path: |
-            govulncheck.json
+            govulncheck*.json
             license-report.json
           if-no-files-found: warn
           retention-days: 30

@@ -30,13 +30,13 @@ func fixtureRepo(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	write("go.mod", "module github.com/CYPT71/platform-factory\n\ngo 1.25.12\n")
+	write("go.mod", "module github.com/CYPT71/platform-factory\n\ngo 1.26.10\n")
 	// plugins.Create's own addPluginToGoWork appends every newly
 	// scaffolded plugin's module path into this file's "use (...)"
 	// block, so a minimal one must exist here too - see
 	// internal/mcp/plugins/plugins_test.go's fixtureRepo for the same
 	// fix, needed for the identical reason.
-	write("go.work", "go 1.25.12\n\nuse (\n\t.\n)\n")
+	write("go.work", "go 1.26.10\n\nuse (\n\t.\n)\n")
 	write(".github/workflows/ci-security.yml", "steps:\n  - run: |\n      find cmd internal -name '*.go' -type f \\\n        -exec grep -nE 'os/exec|exec\\.Command' {} + || true\n")
 
 	sdkPluginDir := findRealSDKPluginDir(t)
@@ -105,7 +105,7 @@ func createFixturePlugin(t *testing.T, repoRoot, name string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(repoRoot, "plugins", name, "go.mod"),
-		[]byte("module github.com/CYPT71/platform-factory/plugins/"+name+"\n\ngo 1.25.12\n\nrequire github.com/CYPT71/platform-factory v0.0.2\n\nreplace github.com/CYPT71/platform-factory => ../..\n"),
+		[]byte("module github.com/CYPT71/platform-factory/plugins/"+name+"\n\ngo 1.26.10\n\nrequire github.com/CYPT71/platform-factory v0.0.2\n\nreplace github.com/CYPT71/platform-factory => ../..\n"),
 		0o644); err != nil {
 		t.Fatal(err)
 	}

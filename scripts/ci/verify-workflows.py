@@ -104,6 +104,10 @@ for workflow in sorted(pathlib.Path(".github/workflows").glob("*.y*ml")):
         if not isinstance(job.get("timeout-minutes"), int):
             errors.append(f"{workflow}: job {job_name} must declare integer timeout")
         job_env = job.get("env") if isinstance(job.get("env"), dict) else {}
+        # runner values exist at step execution time, not in job-level env.
+        for env_name, env_value in job_env.items():
+            if isinstance(env_value, str) and re.search(r"\$\{\{\s*runner\.", env_value):
+                errors.append(f"{workflow}: job {job_name} env {env_name} uses runner context before a step")
         for step in job.get("steps", []):
             if not isinstance(step, dict):
                 errors.append(f"{workflow}: job {job_name} contains invalid step")

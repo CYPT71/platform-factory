@@ -1,6 +1,6 @@
 module github.com/CYPT71/platform-factory/cmd/tui
 
-go 1.25.12
+go 1.26.10
 
 require (
 	github.com/CYPT71/platform-factory v0.0.0-00010101000000-000000000000

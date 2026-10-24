@@ -73,3 +73,6 @@ rollback. Technical work still includes the interpreted-language runtime supply
 chain and real customer acceptance beyond this controlled cluster scenario. [TODO review](../TODO-REVIEW.md) tracks those gaps. No external
 release, paid service, cluster deployment or publication is performed by these
 local build commands.
+
+The [security maintenance record](security-maintenance.md) documents the corrected
+Go toolchain, runtime dependencies and Linux-specific vulnerability scans.
