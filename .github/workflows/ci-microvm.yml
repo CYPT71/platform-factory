@@ -21,6 +21,7 @@ jobs:
       # cancelled, and a cancelled job's post-job steps are not
       # guaranteed to get the time they need to finish uploading a cache.
       - name: Restore the ARM64 HVF guest cache
+        id: restore-hvf-build
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .cache/microvm/arm64
@@ -84,6 +85,12 @@ jobs:
           /tmp/microvm-initramfs -layout /tmp/oci-image -platform linux/arm64 \
             -init /tmp/microvm-init -output .cache/microvm/arm64/initramfs.cpio.gz
           test -s .cache/microvm/arm64/initramfs.cpio.gz
+      - name: Cache the successfully built ARM64 guest
+        if: steps.restore-hvf-build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/microvm/arm64
+          key: microvm-hvf-arm64-${{ hashFiles('scripts/microvm/build-kernel.sh', 'scripts/microvm/kernel-common.config', 'scripts/microvm/kernel-arm64.config', 'cmd/microvm-init/**', 'cmd/microvm-initramfs/**', 'cmd/example-service/**', 'internal/rootfs/**', 'oci/**') }}
       # Artifacts transfer files within this run; caches are only an optimization.
       - name: Transfer the built ARM64 guest to the HVF job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

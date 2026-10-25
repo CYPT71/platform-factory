@@ -78,8 +78,9 @@ jobs:
         run: |
           set -euo pipefail
           cat benchmark-sequential.txt benchmark-parallel.txt > benchmark.txt
-          export BENCHMARK_NUM_CPU="$(nproc)"
-          export BENCHMARK_GOMAXPROCS="$(nproc)"
+          BENCHMARK_NUM_CPU="$(nproc)"
+          BENCHMARK_GOMAXPROCS="$BENCHMARK_NUM_CPU"
+          export BENCHMARK_NUM_CPU BENCHMARK_GOMAXPROCS
           export BENCHMARK_CPU_FIXED="1 for BenchmarkBuild/MakeLayer/NaiveTarGzip; default ($BENCHMARK_NUM_CPU) for BenchmarkBuildParallel"
           export BENCHMARK_COMMAND="go test ./oci -bench '(BenchmarkBuild|BenchmarkMakeLayer|BenchmarkNaiveTarGzip)' -benchmem -benchtime=1x -count=5 -cpu=1; go test ./oci -bench BenchmarkBuildParallel -benchmem -benchtime=32x -count=5"
           python3 scripts/ci/benchmark-report.py benchmark.txt benchmark-environment.txt benchmark.json benchmark.md

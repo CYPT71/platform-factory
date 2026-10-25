@@ -83,7 +83,7 @@ jobs:
           port=$(docker port "$container" 8080/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')
           test -n "$port"
           ready=false
-          for attempt in $(seq 1 20); do
+          for _ in $(seq 1 20); do
             if test "$(curl --fail --silent --show-error "http://127.0.0.1:$port/healthz" 2>/dev/null || true)" = PONG; then
               ready=true
               break
@@ -108,7 +108,7 @@ jobs:
             platform-factory:functional)
           port=$(docker port "$container" 8080/tcp | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')
           ready=false
-          for attempt in $(seq 1 20); do
+          for _ in $(seq 1 20); do
             if curl --fail --silent --show-error "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; then
               ready=true
               break
