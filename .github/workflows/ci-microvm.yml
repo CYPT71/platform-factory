@@ -91,6 +91,13 @@ jobs:
         with:
           path: .cache/microvm/arm64
           key: microvm-hvf-arm64-${{ hashFiles('scripts/microvm/build-kernel.sh', 'scripts/microvm/kernel-common.config', 'scripts/microvm/kernel-arm64.config', 'cmd/microvm-init/**', 'cmd/microvm-initramfs/**', 'cmd/example-service/**', 'internal/rootfs/**', 'oci/**') }}
+      # Rosetta fixtures are rebuilt from this checkout, independently of the
+      # immutable regular-guest cache and its kernel build key.
+      - name: Build the cross-architecture Rosetta proof initramfs
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          scripts/microvm/build-rosetta-initramfs.sh .cache/microvm/arm64/rosetta-initramfs.cpio.gz
       # Artifacts transfer files within this run; caches are only an optimization.
       - name: Transfer the built ARM64 guest to the HVF job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -118,6 +125,7 @@ jobs:
           set -euo pipefail
           test -s .cache/microvm/arm64/kernel
           test -s .cache/microvm/arm64/initramfs.cpio.gz
+          test -s .cache/microvm/arm64/rosetta-initramfs.cpio.gz
       - name: Boot Linux with the native macOS HVF stack
         env:
           GOTOOLCHAIN: local
