@@ -85,10 +85,14 @@ func InspectBtrfsFilesystem(diskPath string, format Format, volume Volume) (File
 }
 
 func (r *btrfsReader) raw(relative, length uint64) ([]byte, error) {
-	if relative > r.volume.SizeBytes || length > r.volume.SizeBytes-relative || length > maxMappedRegionSize || r.bytesRead > r.bytesLimit-length {
+	if relative > r.volume.SizeBytes || length > r.volume.SizeBytes-relative || length > maxMappedRegionSize || length > r.bytesLimit || r.bytesRead > r.bytesLimit-length {
 		return nil, fmt.Errorf("%w: Btrfs read outside volume or budget", ErrCorruptFilesystem)
 	}
-	b, err := r.ld.ReadLogical(int64(r.volume.StartBytes+relative), int64(length))
+	absolute := r.volume.StartBytes + relative
+	if absolute < r.volume.StartBytes || absolute > uint64(^uint64(0)>>1) {
+		return nil, fmt.Errorf("%w: Btrfs offset overflows", ErrCorruptFilesystem)
+	}
+	b, err := r.ld.ReadLogical(int64(absolute), int64(length))
 	if err == nil {
 		r.bytesRead += length
 	}

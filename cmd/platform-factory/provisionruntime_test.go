@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/CYPT71/platform-factory/internal/app/provisionruntime"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,5 +177,62 @@ func TestAutoProvisionRuntimeWarnsWhenTheLanguagePluginIsNotInstalled(t *testing
 	}
 	if loaded.Config.Runtime != "" {
 		t.Fatalf("expected no runtime field to be written, got %q", loaded.Config.Runtime)
+	}
+}
+
+type provisioningBoundaryFake struct {
+	pullError, provisionError error
+	image, arch, root         string
+}
+
+func (f *provisioningBoundaryFake) ResolveHostCandidate(string, string) string { return "" }
+func (f *provisioningBoundaryFake) ResolveLanguagePlugin(string) (string, error) {
+	return "python", nil
+}
+func (f *provisioningBoundaryFake) PullImageRootfs(ctx context.Context, image, arch, dest string) (string, error) {
+	f.image, f.arch = image, arch
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		return "", fmt.Errorf("pull output already exists")
+	}
+	f.root = dest
+	return "sha256:" + strings.Repeat("a", 64), f.pullError
+}
+func (f *provisioningBoundaryFake) ProvisionFromRoot(loaded project.Loaded, language, root string, stderr io.Writer) (provisionruntime.Manifest, error) {
+	if root != f.root || language != "python" {
+		return provisionruntime.Manifest{}, fmt.Errorf("unexpected provisioning context")
+	}
+	return provisionruntime.Manifest{Runtime: "/usr/bin/python3"}, f.provisionError
+}
+func TestProvisionRuntimeCommandUsesExplicitPullAndReportsFailures(t *testing.T) {
+	for _, test := range []struct {
+		name, format    string
+		pull, provision error
+		code            int
+	}{
+		{"success-json", "json", nil, nil, 0}, {"success-text", "text", nil, nil, 0},
+		{"pull-failure", "json", fmt.Errorf("pull failed"), nil, 1}, {"plugin-failure", "json", nil, fmt.Errorf("plugin failed"), 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			loaded := loadRuntimeTestProject(t)
+			fake := &provisioningBoundaryFake{pullError: test.pull, provisionError: test.provision}
+			var out, diagnostics bytes.Buffer
+			image := "registry.example/base@sha256:" + strings.Repeat("a", 64)
+			code := runPluginProvisionRuntimeWithService(context.Background(), []string{"--language", "python", "--image", image, "--arch", "arm64", "--dir", loaded.Root, "--format", test.format}, &out, &diagnostics, fake)
+			if code != test.code {
+				t.Fatalf("code=%d want %d: %s", code, test.code, &diagnostics)
+			}
+			if fake.image != image || fake.arch != "arm64" {
+				t.Fatal("pull lost pinned inputs")
+			}
+			if _, err := os.Stat(filepath.Dir(fake.root)); !os.IsNotExist(err) {
+				t.Fatal("temporary rootfs was not cleaned up")
+			}
+			if code == 0 && test.format == "json" {
+				var result map[string]any
+				if err := json.Unmarshal(out.Bytes(), &result); err != nil || result["status"] != "provisioned" || result["image_digest"] != "sha256:"+strings.Repeat("a", 64) {
+					t.Fatalf("incorrect machine output %s", &out)
+				}
+			}
+		})
 	}
 }

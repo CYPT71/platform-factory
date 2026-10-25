@@ -41,6 +41,10 @@ func newProvisionRuntimeService() provisionruntime.Runtime {
 // Never runs implicitly during a build - a build must never reach out
 // to a registry on its own.
 func runPluginProvisionRuntime(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return runPluginProvisionRuntimeWithService(ctx, args, stdout, stderr, newProvisionRuntimeService())
+}
+
+func runPluginProvisionRuntimeWithService(ctx context.Context, args []string, stdout, stderr io.Writer, svc provisionruntime.Runtime) int {
 	flags := flag.NewFlagSet("plugin provision-runtime", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	language := flags.String("language", "", "language whose already-loaded plugin will provision the runtime")
@@ -81,7 +85,6 @@ func runPluginProvisionRuntime(ctx context.Context, args []string, stdout, stder
 	// instead.
 	imageRootDir := filepath.Join(scratchDir, "rootfs")
 
-	svc := newProvisionRuntimeService()
 	fmt.Fprintf(stderr, "platform-factory plugin provision-runtime: pulling %s (linux/%s)\n", *image, *architecture)
 	digest, err := svc.PullImageRootfs(ctx, *image, *architecture, imageRootDir)
 	if err != nil {

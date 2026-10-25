@@ -199,8 +199,11 @@ func (r *ntfsReader) mftRuns(record []byte) ([]ntfsRun, uint64, error) {
 		if binary.LittleEndian.Uint32(attribute[0:4]) != 0x80 || attribute[8] == 0 {
 			continue
 		}
+		if len(attribute) < 56 {
+			return nil, 0, fmt.Errorf("%w: truncated NTFS $MFT data attribute", ErrCorruptFilesystem)
+		}
 		runOffset := int(binary.LittleEndian.Uint16(attribute[32:34]))
-		if len(attribute) < 56 || runOffset < 0 || runOffset >= len(attribute) {
+		if runOffset < 0 || runOffset >= len(attribute) {
 			return nil, 0, fmt.Errorf("%w: invalid NTFS $MFT data attribute", ErrCorruptFilesystem)
 		}
 		runs, err := parseNTFSRunlist(attribute[runOffset:], r.clusterSize, r.totalClusters)
@@ -322,6 +325,9 @@ func ntfsAttributes(record []byte) ([][]byte, error) {
 }
 
 func (r *ntfsReader) parseRecord(raw []byte, fallback uint64) (ntfsRecord, bool, error) {
+	if len(raw) < 28 {
+		return ntfsRecord{}, false, fmt.Errorf("%w: truncated NTFS FILE record", ErrCorruptFilesystem)
+	}
 	if binary.LittleEndian.Uint16(raw[22:24])&1 == 0 {
 		return ntfsRecord{}, false, nil
 	}
@@ -340,6 +346,9 @@ func (r *ntfsReader) parseRecord(raw []byte, fallback uint64) (ntfsRecord, bool,
 	for _, attribute := range attributes {
 		typeCode := binary.LittleEndian.Uint32(attribute[0:4])
 		if typeCode == 0x30 && attribute[8] == 0 {
+			if len(attribute) < 24 {
+				return ntfsRecord{}, false, fmt.Errorf("%w: truncated NTFS FILE_NAME attribute", ErrCorruptFilesystem)
+			}
 			valueLength := int(binary.LittleEndian.Uint32(attribute[16:20]))
 			valueOffset := int(binary.LittleEndian.Uint16(attribute[20:22]))
 			if valueOffset < 24 || valueLength < 66 || valueOffset+valueLength > len(attribute) {

@@ -62,6 +62,9 @@ func nativeKVMAvailableForTest(t *testing.T) bool {
 // helper re-exec itself or the re-exec would run the test suite recursively
 // instead of the real sandboxed target.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "__disk-parser" {
+		os.Exit(runDiskParserWorker(os.Stdin, os.Stdout, os.Stderr))
+	}
 	executor.MaybeApplyRlimitHelper()
 	executor.MaybeApplySandboxHelper(networking.ServeDNSRelay)
 	plugin.MaybeApplyPluginSandboxHelper()
