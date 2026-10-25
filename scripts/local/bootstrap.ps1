@@ -39,7 +39,7 @@ New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
 $Suffix = if ($TargetOS -eq "windows") { ".exe" } else { "" }
 $Version = (& git -C $RepoRoot describe --tags --always --dirty 2>$null)
 if (-not $Version) { $Version = "dev" }
-$Commands = @("platform-factory", "platform-factory-packager", "oci-builder", "example-service", "microvm-init", "microvm-initramfs", "platform-factory-control-plane", "platform-factory-worker", "platform-factory-kubernetes", "platform-factory-kubevirt", "platform-factory-containerd")
+$Commands = @("platform-factory", "platform-factory-packager", "platform-factory-toolkit", "oci-builder", "example-service", "microvm-init", "microvm-initramfs", "platform-factory-control-plane", "platform-factory-worker", "platform-factory-kubernetes", "platform-factory-kubevirt", "platform-factory-containerd")
 if ($TargetOS -eq "linux" -and $TargetArch -eq "amd64") { $Commands += @("platform-factory-runtime", "containerd-shim-platform-factory-v1") }
 else { Write-Host "platform-factory-runtime skipped: OCI runtime integration requires linux/amd64 (target is $TargetOS/$TargetArch)" }
 $Languages = @("go", "python", "node", "java", "dotnet", "rust", "ruby", "php")

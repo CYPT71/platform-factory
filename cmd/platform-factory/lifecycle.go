@@ -1129,18 +1129,18 @@ func runCompletion(args []string, stdout, stderr io.Writer) int {
 
 var completionScripts = map[string]string{
 	"bash": `_platform_factory() {
-  local commands="build compose diff sbom evidence pipeline status explain logs events inspect verify publish detect run deploy rollback launch project plan freeze microvm completion version"
+  local commands="build compose diff sbom evidence pipeline status explain logs events inspect verify publish detect run deploy rollback launch project plan freeze microvm extensions hooks plugin marketplace doctor completion version"
   COMPREPLY=($(compgen -W "$commands" -- "${COMP_WORDS[COMP_CWORD]}"))
 }
 complete -F _platform_factory platform-factory
 `,
 	"zsh": `#compdef platform-factory
-_arguments '1:command:(build compose diff sbom evidence pipeline status explain logs events inspect verify publish detect run deploy rollback launch project plan freeze microvm completion version)'
+_arguments '1:command:(build compose diff sbom evidence pipeline status explain logs events inspect verify publish detect run deploy rollback launch project plan freeze microvm extensions hooks plugin marketplace doctor completion version)'
 `,
-	"fish": `complete -c platform-factory -f -n '__fish_use_subcommand' -a 'build compose diff sbom evidence pipeline status explain logs events inspect verify publish detect run deploy rollback launch project plan freeze microvm completion version'
+	"fish": `complete -c platform-factory -f -n '__fish_use_subcommand' -a 'build compose diff sbom evidence pipeline status explain logs events inspect verify publish detect run deploy rollback launch project plan freeze microvm extensions hooks plugin marketplace doctor completion version'
 `,
 	"powershell": `Register-ArgumentCompleter -Native -CommandName platform-factory -ScriptBlock {
-  param($wordToComplete) 'build','compose','diff','sbom','evidence','pipeline','status','explain','logs','events','inspect','verify','publish','detect','run','deploy','rollback','launch','project','plan','freeze','microvm','completion','version' |
+  param($wordToComplete) 'build','compose','diff','sbom','evidence','pipeline','status','explain','logs','events','inspect','verify','publish','detect','run','deploy','rollback','launch','project','plan','freeze','microvm','extensions','hooks','plugin','marketplace','doctor','completion','version' |
     Where-Object { $_ -like "$wordToComplete*" }
 }
 `,

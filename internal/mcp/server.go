@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"time"
 
 	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 )
@@ -27,6 +28,8 @@ const maxLineBytes = 16 << 20 // 16 MiB
 type Server struct {
 	Name    string
 	Version string
+	// HookRepository pins lifecycle events to the server checkout.
+	HookRepository string
 
 	tools     *toolRegistry
 	resources *resourceRegistry
@@ -55,6 +58,11 @@ func (s *Server) AddResource(r Resource) { s.resources.Add(r) }
 // server's own file/git operations from racing each other.
 func (s *Server) Serve(ctx context.Context, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 	logger := log.New(stderr, "pf-mcp: ", log.LstdFlags)
+	var hookErr error
+	ctx, hookErr = toolHookContext(ctx, s.HookRepository)
+	if hookErr != nil {
+		return fmt.Errorf("mcp: hook configuration rejected")
+	}
 
 	scanner := bufio.NewScanner(stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineBytes)
@@ -166,7 +174,14 @@ func (s *Server) handleToolsCall(ctx context.Context, logger *log.Logger, req re
 		args = json.RawMessage("{}")
 	}
 
+	emitToolHook(ctx, logger, "tool.started", tool.Name, 0, 0)
+	start := time.Now()
 	text, err := tool.Handler(ctx, args)
+	kind, code := "tool.succeeded", 0
+	if err != nil {
+		kind, code = "tool.failed", 1
+	}
+	emitToolHook(ctx, logger, kind, tool.Name, code, time.Since(start))
 	if err != nil {
 		var te *toolerror.ToolError
 		if errors.As(err, &te) {

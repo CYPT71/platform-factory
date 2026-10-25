@@ -1,0 +1,11 @@
+{
+  "api_version": "platform-factory.dev/plugin-manifest/v1",
+  "name": "ai-tool-allowlist",
+  "version": "1.0.0",
+  "family": "analyzer",
+  "capabilities": [
+    "analyzer.scan"
+  ],
+  "executable": "platform-factory-ai-tool-allowlist",
+  "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

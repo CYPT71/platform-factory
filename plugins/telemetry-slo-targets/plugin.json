@@ -1,0 +1,11 @@
+{
+  "api_version": "platform-factory.dev/plugin-manifest/v1",
+  "name": "telemetry-slo-targets",
+  "version": "1.0.0",
+  "family": "analyzer",
+  "capabilities": [
+    "analyzer.scan"
+  ],
+  "executable": "platform-factory-telemetry-slo-targets",
+  "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

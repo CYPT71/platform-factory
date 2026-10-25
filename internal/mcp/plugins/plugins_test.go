@@ -657,3 +657,24 @@ func writeManifest(t *testing.T, repoRoot, name string, manifest hostplugin.Mani
 	}
 	mustWriteFile(t, filepath.Join(dir, hostplugin.ManifestFileName), string(encoded))
 }
+
+func TestToolkitProfilesValidateTheirSharedExecutableAndTests(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := InspectPlugin(root, "ai-token-budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Module != "shared-toolkit" || detail.SharedImplementation == "" || len(detail.TestFiles) == 0 {
+		t.Fatalf("missing shared implementation: %+v", detail)
+	}
+	report, err := Validate(context.Background(), root, "ai-token-budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Valid || report.Build != "ok" || report.Tests != "ok" {
+		t.Fatalf("shared plugin failed validation: %+v", report)
+	}
+}

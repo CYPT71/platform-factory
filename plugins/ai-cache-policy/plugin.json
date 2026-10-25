@@ -1,0 +1,11 @@
+{
+  "api_version": "platform-factory.dev/plugin-manifest/v1",
+  "name": "ai-cache-policy",
+  "version": "1.0.0",
+  "family": "analyzer",
+  "capabilities": [
+    "analyzer.scan"
+  ],
+  "executable": "platform-factory-ai-cache-policy",
+  "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

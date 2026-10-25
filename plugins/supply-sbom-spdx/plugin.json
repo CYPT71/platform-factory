@@ -1,0 +1,11 @@
+{
+  "api_version": "platform-factory.dev/plugin-manifest/v1",
+  "name": "supply-sbom-spdx",
+  "version": "1.0.0",
+  "family": "analyzer",
+  "capabilities": [
+    "analyzer.scan"
+  ],
+  "executable": "platform-factory-supply-sbom-spdx",
+  "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

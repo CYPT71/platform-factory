@@ -43,6 +43,8 @@ type cliHandler func([]string, io.Writer, io.Writer) int
 
 var directCommands = map[string]cliHandler{
 	"compose":           runCompose,
+	"extensions":        runExtensions,
+	"hooks":             runHooks,
 	"diff":              runDiff,
 	"sbom":              runSBOM,
 	"evidence":          runEvidence,
@@ -72,7 +74,7 @@ func commandContext(ctx context.Context, command string) context.Context {
 	return observability.ContextWithTraceID(ctx, traceID)
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
+func runCommand(args []string, stdout, stderr io.Writer) int {
 	filtered, quiet, verbose, globalErr := extractGlobalOutputFlags(args)
 	if globalErr != "" {
 		fmt.Fprintln(stderr, "platform-factory:", globalErr)
@@ -452,6 +454,8 @@ Common commands:
   platform-factory deploy IMAGE            apply a digest-pinned image to Kubernetes
   platform-factory status [DIRECTORY]      build/publish/deploy state and the next safe command
   platform-factory doctor                  check local tools, runtimes and hardware support
+  platform-factory extensions              fifty offline policy analyzers and signed bundles
+  platform-factory hooks                   AI lifecycle hooks and isolated autofix PRs
   platform-factory help --all              show every command, including advanced/low-level ones
 
 Run "platform-factory COMMAND --help" for a command's own options and examples.`)
@@ -489,6 +493,8 @@ Usage:
   platform-factory launch [--dry-run] [--config FILE] [DIRECTORY]
   platform-factory launch --isolation=<container|microvm> [RUNTIME OPTIONS]
   platform-factory microvm <build-legacy-oci|probe|create|extract-legacy-app|inspect-legacy-disk|run-legacy-disk|start|run|status|logs|restart|stop|delete|rbac|package> [OPTIONS]
+  platform-factory extensions <list|inspect|analyze|bundle>
+  platform-factory hooks <validate|emit|autofix>
   platform-factory completion <bash|zsh|fish|powershell>
   platform-factory doctor [--json]
   platform-factory plugin <load|unload|list> [OPTIONS]

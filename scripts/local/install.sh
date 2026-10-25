@@ -43,13 +43,14 @@ repo_root=$(cd "$(dirname "$script_path")/../.." && pwd)
 command -v go >/dev/null 2>&1 || { echo "error: Go is required on PATH" >&2; exit 1; }
 
 # --- component catalog -------------------------------------------------
-component_keys=(core builder microvm distributed integrations)
+component_keys=(core builder microvm distributed integrations toolkit)
 component_labels=(
   "Core CLI"
   "OCI Builder"
   "MicroVM support"
   "Distributed platform"
   "Deployment integrations"
+  "AI and cloud analyzers"
 )
 component_descriptions=(
   "platform-factory (pf alias) + official language plugins: ready for init, launch, build, pipeline, sbom and diff"
@@ -57,6 +58,7 @@ component_descriptions=(
   "microvm-init + microvm-initramfs; platform-factory-runtime on linux/amd64 only: isolated microVM execution (KVM/HVF)"
   "platform-factory-control-plane + platform-factory-worker: multi-node orchestration"
   "Kubernetes, KubeVirt, containerd and Linux/amd64 shim"
+  "50 offline JSON analyzers with signed plugin bundles"
 )
 component_binaries=(
   "platform-factory"
@@ -64,8 +66,9 @@ component_binaries=(
   "microvm-init microvm-initramfs platform-factory-runtime"
   "platform-factory-control-plane platform-factory-worker"
   "platform-factory-kubernetes platform-factory-kubevirt platform-factory-containerd containerd-shim-platform-factory-v1"
+  "platform-factory-toolkit"
 )
-component_mandatory=(1 0 0 0 0)
+component_mandatory=(1 0 0 0 0 0)
 
 component_index() {
   local key=$1 i

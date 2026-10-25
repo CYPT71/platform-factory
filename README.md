@@ -126,3 +126,9 @@ publication, HTTP readiness, scaling, retries and repeated rollback.
 - [Examples](examples/README.md) — runnable, indexed by capability.
 
 Production documentation lives in the [project wiki](https://github.com/CYPT71/platform-factory/wiki): start with the [production adoption guide](https://github.com/CYPT71/platform-factory/wiki/Production-Adoption-Guide), then review the [architecture decisions](https://github.com/CYPT71/platform-factory/wiki/Architecture-Decision-Records), [threat model](https://github.com/CYPT71/platform-factory/wiki/Threat-Model-and-Residual-Risks), [GHCR/Cosign/Kubernetes demonstration](https://github.com/CYPT71/platform-factory/wiki/GHCR-Cosign-Kubernetes-E2E), [benchmarks](https://github.com/CYPT71/platform-factory/wiki/Benchmarks), and [OCI compatibility matrix](https://github.com/CYPT71/platform-factory/wiki/OCI-Compatibility).
+
+### Plugins IA, cloud et autofix
+
+Le [toolkit de 50 analyseurs hors ligne](docs/technology-toolkit.md) est disponible via
+`pf extensions`. Les [hooks CLI/MCP et corrections testées en PR brouillon](docs/ai-hooks-and-autofix.md)
+s’activent par configuration locale explicite. Aucun appel IA payant n’est activé par défaut.

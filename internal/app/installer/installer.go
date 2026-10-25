@@ -65,6 +65,12 @@ var Components = []Component{
 		Description: "Kubernetes, KubeVirt, containerd et shim Linux",
 		Binaries:    []string{"platform-factory-kubernetes", "platform-factory-kubevirt", "platform-factory-containerd", "containerd-shim-platform-factory-v1"},
 	},
+	{
+		Key:         "toolkit",
+		Label:       "Analyseurs IA et cloud",
+		Description: "50 plugins d’analyse hors ligne, bundles signés et contrôles MCP/RAG/Kubernetes",
+		Binaries:    []string{"platform-factory-toolkit"},
+	},
 }
 
 // ParseComponents splits a comma-separated -components flag value into

@@ -448,7 +448,9 @@ func verifiedExecutableSnapshot(dir string, manifest Manifest) (string, func(), 
 		return "", nil, fmt.Errorf("plugin executable: create verified snapshot: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(snapshotDir) }
-	snapshot := filepath.Join(snapshotDir, "plugin")
+	// Preserve the signed executable basename for multi-call plugin binaries.
+	// The private directory, regular-file check and digest pin remain unchanged.
+	snapshot := filepath.Join(snapshotDir, filepath.Base(filepath.FromSlash(manifest.Executable)))
 	target, err := os.OpenFile(snapshot, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o500)
 	if err != nil {
 		cleanup()

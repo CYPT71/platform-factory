@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CYPT71/platform-factory/internal/extensions"
 	"github.com/CYPT71/platform-factory/internal/marketplace"
 	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 	hostplugin "github.com/CYPT71/platform-factory/internal/plugin"
@@ -87,17 +88,25 @@ func Validate(ctx context.Context, repoRoot, name string) (ValidationReport, err
 		}
 	}
 
-	report.Build = runGoBuild(ctx, dir)
+	buildDir, testsDir := dir, dir
+	if _, err := extensions.Lookup(name); err == nil {
+		buildDir = filepath.Join(repoRoot, "cmd", "platform-factory-toolkit")
+		testsDir = filepath.Join(repoRoot, "internal", "extensions")
+	}
+	report.Build = runGoBuild(ctx, buildDir)
 	if strings.HasPrefix(report.Build, "error:") {
 		report.Valid = false
 		report.Issues = append(report.Issues, "build: "+report.Build)
 	}
 
-	if len(testFiles(dir)) == 0 {
+	if len(testFiles(testsDir)) == 0 {
 		report.Tests = "no _test.go files found"
 		report.Issues = append(report.Issues, "tests: no _test.go files found")
 	} else {
-		report.Tests = runGoTests(ctx, dir)
+		report.Tests = runGoTests(ctx, testsDir)
+		if buildDir != dir && report.Tests == "ok" {
+			report.Tests = runGoTests(ctx, buildDir)
+		}
 		if strings.HasPrefix(report.Tests, "error:") {
 			report.Valid = false
 			report.Issues = append(report.Issues, "tests: "+report.Tests)
@@ -165,7 +174,7 @@ func compatibilityCheck(manifest hostplugin.Manifest) string {
 func runGoBuild(ctx context.Context, dir string) string {
 	buildCtx, cancel := context.WithTimeout(ctx, buildTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(buildCtx, "go", "build", "./...")
+	cmd := exec.CommandContext(buildCtx, "go", "build", "-o", os.DevNull, "./...")
 	cmd.Dir = dir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

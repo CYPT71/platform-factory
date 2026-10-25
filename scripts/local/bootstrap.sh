@@ -120,7 +120,7 @@ if [ "$goos" = darwin ]; then
   fi
 fi
 
-commands="platform-factory platform-factory-packager oci-builder example-service microvm-init microvm-initramfs platform-factory-control-plane platform-factory-worker platform-factory-kubernetes platform-factory-kubevirt platform-factory-containerd"
+commands="platform-factory platform-factory-packager platform-factory-toolkit oci-builder example-service microvm-init microvm-initramfs platform-factory-control-plane platform-factory-worker platform-factory-kubernetes platform-factory-kubevirt platform-factory-containerd"
 if [ "$goos/$goarch" = linux/amd64 ]; then
   commands="$commands platform-factory-runtime containerd-shim-platform-factory-v1"
 else

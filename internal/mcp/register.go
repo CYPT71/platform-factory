@@ -21,6 +21,8 @@ import (
 // which is what keeps the dependency graph acyclic.
 func NewPlatformFactoryServer(repoRoot, version string, langPlugins plugins.LanguagePluginBackend) *Server {
 	s := NewServer("platform-factory", version)
+	s.HookRepository = repoRoot
+	registerExtensions(s)
 
 	s.AddTool(Tool{
 		Name: "pf_project_inspect",

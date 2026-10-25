@@ -1,0 +1,11 @@
+{
+  "api_version": "platform-factory.dev/plugin-manifest/v1",
+  "name": "k8s-health-probes",
+  "version": "1.0.0",
+  "family": "analyzer",
+  "capabilities": [
+    "analyzer.scan"
+  ],
+  "executable": "platform-factory-k8s-health-probes",
+  "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

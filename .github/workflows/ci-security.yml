@@ -28,6 +28,9 @@ jobs:
         env: {GOTOOLCHAIN: local}
         run: |
           set -euo pipefail
+          # Hooks execute only absolute argv from explicit trusted local config.
+          # Autofix uses an embedded Python runner; no repository auto-discovery.
+          python3 -m unittest discover -s internal/hooks -p 'test_*.py'
           go vet ./...
           go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -json ./... > govulncheck.json
           { go list -deps -test -json ./...; \
@@ -134,6 +137,11 @@ jobs:
           # Process execution remains forbidden elsewhere.
           test -z "$(find cmd internal -name '*.go' -type f \
               ! -path 'cmd/microvm-init/main.go' \
+              ! -path 'cmd/platform-factory/hooks.go' \
+              ! -path 'cmd/platform-factory/extensions_test.go' \
+              ! -path 'internal/hooks/hooks.go' \
+              ! -path 'internal/hooks/process_unix.go' \
+              ! -path 'internal/hooks/process_windows.go' \
               ! -path 'cmd/platform-factory/disk_parser.go' \
               ! -path 'cmd/platform-factory/disk_parser_test.go' \
               ! -path 'cmd/platform-factory/microvm_native_hvf_darwin_test.go' \

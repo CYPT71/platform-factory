@@ -1,0 +1,43 @@
+name: incident-autofix
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 */6 * * *'
+permissions: {contents: read}
+concurrency:
+  group: incident-autofix
+  cancel-in-progress: false
+jobs:
+  propose-tested-fix:
+    if: vars.PF_AUTOFIX_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    steps:
+      # Always use the default branch. No workflow_run/pull_request_target,
+      # failure artifact downloads, PR checkout or model-controlled commands.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version-file: go.mod, cache: true}
+      - name: Build hook runner
+        env: {GOTOOLCHAIN: local}
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/pf" ./cmd/platform-factory
+      - name: Reproduce failure and propose one tested draft PR
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PF_AUTOFIX_PROVIDER_KEY: '${{ secrets.PF_AUTOFIX_PROVIDER_KEY }}'
+          PF_AUTOFIX_CONFIG: '${{ vars.PF_AUTOFIX_CONFIG }}'
+          PF_DEFAULT_BRANCH: '${{ github.event.repository.default_branch }}'
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          python3 scripts/automation/poll-ci.py

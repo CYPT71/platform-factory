@@ -1,0 +1,1867 @@
+[
+  {
+    "name": "mcp-tool-schema",
+    "category": "mcp",
+    "description": "Require bounded object schemas for MCP tools",
+    "source": "https://blog.modelcontextprotocol.io/posts/mcp-roadmap/",
+    "checks": [
+      {
+        "path": "/tools/*/inputSchema/type",
+        "op": "eq",
+        "value": "object",
+        "message": "Tool input must be an object"
+      },
+      {
+        "path": "/tools/*/inputSchema/additionalProperties",
+        "op": "eq",
+        "value": false,
+        "message": "Reject undeclared tool arguments"
+      }
+    ],
+    "example": {
+      "tools": [
+        {
+          "inputSchema": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    "rejected_example": {
+      "tools": [
+        {
+          "inputSchema": {
+            "type": "string"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "mcp-readonly-hints",
+    "category": "mcp",
+    "description": "Validate explicitly declared read-only tool annotations",
+    "source": "https://blog.modelcontextprotocol.io/posts/mcp-roadmap/",
+    "checks": [
+      {
+        "path": "/tools/*/annotations/readOnlyHint",
+        "op": "eq",
+        "value": true,
+        "message": "Read-only toolset must declare readOnlyHint"
+      },
+      {
+        "path": "/tools/*/annotations/destructiveHint",
+        "op": "eq",
+        "value": false,
+        "message": "Read-only toolset must disable destructiveHint"
+      }
+    ],
+    "example": {
+      "tools": [
+        {
+          "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false
+          }
+        }
+      ]
+    },
+    "rejected_example": {
+      "tools": [
+        {
+          "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": true
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "mcp-remote-tls",
+    "category": "mcp",
+    "description": "Require HTTPS endpoints in remote MCP inventories",
+    "source": "https://blog.modelcontextprotocol.io/posts/mcp-roadmap/",
+    "checks": [
+      {
+        "path": "/servers/*/url",
+        "op": "pattern",
+        "value": "^https://[^/@\\s]+(?:/|$)",
+        "message": "Remote MCP must use HTTPS without embedded credentials"
+      }
+    ],
+    "example": {
+      "servers": [
+        {
+          "url": "https://mcp.example.com/rpc"
+        }
+      ]
+    },
+    "rejected_example": {
+      "servers": [
+        {
+          "url": "http://mcp.example.com"
+        }
+      ]
+    }
+  },
+  {
+    "name": "mcp-command-pins",
+    "category": "mcp",
+    "description": "Reject unpinned npx MCP package launchers",
+    "source": "https://blog.modelcontextprotocol.io/posts/mcp-roadmap/",
+    "checks": [
+      {
+        "path": "/servers/*/package",
+        "op": "pattern",
+        "value": "^(@[a-z0-9-]+/)?[a-z0-9-]+@[0-9]+\\.[0-9]+\\.[0-9]+$",
+        "message": "Pin each launcher package to an exact version"
+      }
+    ],
+    "example": {
+      "servers": [
+        {
+          "package": "@acme/mcp@1.2.3"
+        }
+      ]
+    },
+    "rejected_example": {
+      "servers": [
+        {
+          "package": "@acme/mcp@latest"
+        }
+      ]
+    }
+  },
+  {
+    "name": "mcp-tool-budget",
+    "category": "mcp",
+    "description": "Bound exposed toolset size to reduce context cost",
+    "source": "https://blog.modelcontextprotocol.io/posts/mcp-roadmap/",
+    "checks": [
+      {
+        "path": "/tools",
+        "op": "length-max",
+        "value": 64,
+        "message": "Expose at most 64 tools per routing group"
+      },
+      {
+        "path": "/tools",
+        "op": "length-min",
+        "value": 1,
+        "message": "Tool inventory must not be empty"
+      }
+    ],
+    "example": {
+      "tools": [
+        {
+          "name": "inspect"
+        }
+      ]
+    },
+    "rejected_example": {
+      "tools": []
+    }
+  },
+  {
+    "name": "rag-chunk-budget",
+    "category": "rag",
+    "description": "Bound RAG chunks and overlap before ingestion",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/chunk_tokens",
+        "op": "range",
+        "value": [
+          64,
+          2048
+        ],
+        "message": "Chunk size must be between 64 and 2048 tokens"
+      },
+      {
+        "path": "/overlap_tokens",
+        "op": "range",
+        "value": [
+          0,
+          256
+        ],
+        "message": "Overlap must be at most 256 tokens"
+      }
+    ],
+    "example": {
+      "chunk_tokens": 512,
+      "overlap_tokens": 64
+    },
+    "rejected_example": {
+      "chunk_tokens": 16000,
+      "overlap_tokens": 4000
+    }
+  },
+  {
+    "name": "rag-retrieval-bounds",
+    "category": "rag",
+    "description": "Bound retrieval top-k and minimum score",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/top_k",
+        "op": "range",
+        "value": [
+          1,
+          20
+        ],
+        "message": "Retrieve 1 to 20 chunks"
+      },
+      {
+        "path": "/min_score",
+        "op": "range",
+        "value": [
+          0.1,
+          1
+        ],
+        "message": "Require a normalized relevance threshold"
+      }
+    ],
+    "example": {
+      "top_k": 5,
+      "min_score": 0.7
+    },
+    "rejected_example": {
+      "top_k": 100,
+      "min_score": 0
+    }
+  },
+  {
+    "name": "rag-tenant-filter",
+    "category": "rag",
+    "description": "Require tenant isolation in normalized retrieval policies",
+    "source": "https://www.postgresql.org/docs/current/ddl-rowsecurity.html",
+    "checks": [
+      {
+        "path": "/tenant_filter/enforced",
+        "op": "eq",
+        "value": true,
+        "message": "Enforce tenant filtering"
+      },
+      {
+        "path": "/tenant_filter/field",
+        "op": "pattern",
+        "value": "^[a-zA-Z_][a-zA-Z0-9_]*$",
+        "message": "Name a tenant metadata field"
+      }
+    ],
+    "example": {
+      "tenant_filter": {
+        "enforced": true,
+        "field": "tenant_id"
+      }
+    },
+    "rejected_example": {
+      "tenant_filter": {
+        "enforced": false,
+        "field": ""
+      }
+    }
+  },
+  {
+    "name": "rag-citation-evidence",
+    "category": "rag",
+    "description": "Require source identifiers and chunk hashes in retrieved evidence",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/chunks/*/source",
+        "op": "nonempty",
+        "value": null,
+        "message": "Each chunk must identify its source"
+      },
+      {
+        "path": "/chunks/*/sha256",
+        "op": "pattern",
+        "value": "^[a-f0-9]{64}$",
+        "message": "Each chunk must pin its content hash"
+      }
+    ],
+    "example": {
+      "chunks": [
+        {
+          "source": "manual.md#2",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ]
+    },
+    "rejected_example": {
+      "chunks": [
+        {
+          "source": "",
+          "sha256": "unknown"
+        }
+      ]
+    }
+  },
+  {
+    "name": "rag-embedding-dimensions",
+    "category": "rag",
+    "description": "Validate dimension agreement between model and index",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/model_dimensions",
+        "op": "range",
+        "value": [
+          1,
+          65536
+        ],
+        "message": "Model dimensions must be bounded"
+      },
+      {
+        "path": "/index_dimensions",
+        "op": "same",
+        "value": "/model_dimensions",
+        "message": "Index and embedding dimensions must match"
+      }
+    ],
+    "example": {
+      "model_dimensions": 384,
+      "index_dimensions": 384
+    },
+    "rejected_example": {
+      "model_dimensions": 384,
+      "index_dimensions": 768
+    }
+  },
+  {
+    "name": "ai-token-budget",
+    "category": "ai",
+    "description": "Enforce input and output token budgets",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/max_input_tokens",
+        "op": "range",
+        "value": [
+          1,
+          32768
+        ],
+        "message": "Input budget must be capped at 32768 tokens"
+      },
+      {
+        "path": "/max_output_tokens",
+        "op": "range",
+        "value": [
+          1,
+          8192
+        ],
+        "message": "Output budget must be capped at 8192 tokens"
+      }
+    ],
+    "example": {
+      "max_input_tokens": 8000,
+      "max_output_tokens": 2000
+    },
+    "rejected_example": {
+      "max_input_tokens": 200000,
+      "max_output_tokens": 100000
+    }
+  },
+  {
+    "name": "ai-retry-policy",
+    "category": "ai",
+    "description": "Prevent unbounded LLM retries and missing backoff",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/max_attempts",
+        "op": "range",
+        "value": [
+          1,
+          3
+        ],
+        "message": "Allow at most three attempts"
+      },
+      {
+        "path": "/backoff_ms",
+        "op": "range",
+        "value": [
+          100,
+          60000
+        ],
+        "message": "Use bounded nonzero retry backoff"
+      }
+    ],
+    "example": {
+      "max_attempts": 3,
+      "backoff_ms": 1000
+    },
+    "rejected_example": {
+      "max_attempts": 100,
+      "backoff_ms": 0
+    }
+  },
+  {
+    "name": "ai-cache-policy",
+    "category": "ai",
+    "description": "Require tenant-scoped bounded prompt cache policies",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/scope",
+        "op": "eq",
+        "value": "tenant",
+        "message": "Cache must be tenant scoped"
+      },
+      {
+        "path": "/ttl_seconds",
+        "op": "range",
+        "value": [
+          1,
+          86400
+        ],
+        "message": "Cache TTL must not exceed one day"
+      }
+    ],
+    "example": {
+      "scope": "tenant",
+      "ttl_seconds": 3600
+    },
+    "rejected_example": {
+      "scope": "global",
+      "ttl_seconds": 0
+    }
+  },
+  {
+    "name": "ai-tool-allowlist",
+    "category": "ai",
+    "description": "Reject wildcard tool execution permissions",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/allowed_tools",
+        "op": "length-min",
+        "value": 1,
+        "message": "Declare explicit allowed tools"
+      },
+      {
+        "path": "/allowed_tools/*",
+        "op": "pattern",
+        "value": "^[a-z][a-z0-9_.-]{0,127}$",
+        "message": "Tool names must be explicit, without wildcards"
+      }
+    ],
+    "example": {
+      "allowed_tools": [
+        "pf_project_inspect"
+      ]
+    },
+    "rejected_example": {
+      "allowed_tools": [
+        "*"
+      ]
+    }
+  },
+  {
+    "name": "ai-output-schema",
+    "category": "ai",
+    "description": "Require strict structured model output contracts",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/type",
+        "op": "eq",
+        "value": "object",
+        "message": "Output schema must be an object"
+      },
+      {
+        "path": "/additionalProperties",
+        "op": "eq",
+        "value": false,
+        "message": "Output schema must reject undeclared properties"
+      },
+      {
+        "path": "/required",
+        "op": "length-min",
+        "value": 1,
+        "message": "Declare required output properties"
+      }
+    ],
+    "example": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "answer"
+      ]
+    },
+    "rejected_example": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": []
+    }
+  },
+  {
+    "name": "k8s-image-digests",
+    "category": "kubernetes",
+    "description": "Require digest-pinned images in Deployment containers",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/spec/template/spec/containers/*/image",
+        "op": "pattern",
+        "value": "^[^\\s]+@sha256:[a-f0-9]{64}$",
+        "message": "Pin workload images by SHA-256 digest"
+      }
+    ],
+    "example": {
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [
+              {
+                "image": "acme/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "rejected_example": {
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [
+              {
+                "image": "acme/app:latest"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "k8s-resource-bounds",
+    "category": "kubernetes",
+    "description": "Require CPU and memory requests and limits",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/spec/template/spec/containers/*/resources/requests/cpu",
+        "op": "nonempty",
+        "value": null,
+        "message": "Declare CPU request"
+      },
+      {
+        "path": "/spec/template/spec/containers/*/resources/requests/memory",
+        "op": "nonempty",
+        "value": null,
+        "message": "Declare memory request"
+      },
+      {
+        "path": "/spec/template/spec/containers/*/resources/limits/memory",
+        "op": "nonempty",
+        "value": null,
+        "message": "Declare memory limit"
+      }
+    ],
+    "example": {
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [
+              {
+                "resources": {
+                  "requests": {
+                    "cpu": "100m",
+                    "memory": "64Mi"
+                  },
+                  "limits": {
+                    "memory": "128Mi"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "rejected_example": {
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [
+              {
+                "resources": {}
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "k8s-pod-security",
+    "category": "kubernetes",
+    "description": "Check restricted container security settings",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/spec/template/spec/containers/*/securityContext/allowPrivilegeEscalation",
+        "op": "eq",
+        "value": false,
+        "message": "Disable privilege escalation"
+      },
+      {
+        "path": "/spec/template/spec/containers/*/securityContext/runAsNonRoot",
+        "op": "eq",
+        "value": true,
+        "message": "Run containers as non-root"
+      },
+      {
+        "path": "/spec/template/spec/containers/*/securityContext/capabilities/drop",
+        "op": "contains",
+        "value": "ALL",
+        "message": "Drop all Linux capabilities"
+      }
+    ],
+    "example": {
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [
+              {
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "runAsNonRoot": true,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "rejected_example": {
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [
+              {
+                "securityContext": {
+                  "allowPrivilegeEscalation": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "k8s-health-probes",
+    "category": "kubernetes",
+    "description": "Require startup and readiness probes on service containers",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/spec/template/spec/containers/*/readinessProbe",
+        "op": "nonempty",
+        "value": null,
+        "message": "Declare readiness probe"
+      },
+      {
+        "path": "/spec/template/spec/containers/*/startupProbe",
+        "op": "nonempty",
+        "value": null,
+        "message": "Declare startup probe"
+      }
+    ],
+    "example": {
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [
+              {
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/ready",
+                    "port": 8080
+                  }
+                },
+                "startupProbe": {
+                  "tcpSocket": {
+                    "port": 8080
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "rejected_example": {
+      "spec": {
+        "template": {
+          "spec": {
+            "containers": [
+              {}
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "k8s-disruption-budget",
+    "category": "kubernetes",
+    "description": "Require a protective PodDisruptionBudget minimum",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/kind",
+        "op": "eq",
+        "value": "PodDisruptionBudget",
+        "message": "Supply a PodDisruptionBudget"
+      },
+      {
+        "path": "/spec/minAvailable",
+        "op": "range",
+        "value": [
+          1,
+          100000
+        ],
+        "message": "Protect at least one available replica"
+      }
+    ],
+    "example": {
+      "kind": "PodDisruptionBudget",
+      "spec": {
+        "minAvailable": 1
+      }
+    },
+    "rejected_example": {
+      "kind": "PodDisruptionBudget",
+      "spec": {
+        "minAvailable": 0
+      }
+    }
+  },
+  {
+    "name": "gateway-backend-tls",
+    "category": "gateway",
+    "description": "Require TLS verification for inference gateway backends",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/backends/*/tls/verify",
+        "op": "eq",
+        "value": true,
+        "message": "Verify backend TLS certificates"
+      },
+      {
+        "path": "/backends/*/url",
+        "op": "pattern",
+        "value": "^https://[^/@\\s]+(?:/|$)",
+        "message": "Use HTTPS backends without userinfo"
+      }
+    ],
+    "example": {
+      "backends": [
+        {
+          "url": "https://infer.example.com/",
+          "tls": {
+            "verify": true
+          }
+        }
+      ]
+    },
+    "rejected_example": {
+      "backends": [
+        {
+          "url": "http://infer",
+          "tls": {
+            "verify": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "gateway-route-timeouts",
+    "category": "gateway",
+    "description": "Bound inference gateway request and connection deadlines",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/request_timeout_seconds",
+        "op": "range",
+        "value": [
+          1,
+          300
+        ],
+        "message": "Bound request deadlines at 300 seconds"
+      },
+      {
+        "path": "/connect_timeout_seconds",
+        "op": "range",
+        "value": [
+          1,
+          30
+        ],
+        "message": "Bound connection deadlines at 30 seconds"
+      }
+    ],
+    "example": {
+      "request_timeout_seconds": 60,
+      "connect_timeout_seconds": 5
+    },
+    "rejected_example": {
+      "request_timeout_seconds": 0,
+      "connect_timeout_seconds": 300
+    }
+  },
+  {
+    "name": "gateway-retry-budget",
+    "category": "gateway",
+    "description": "Prevent multiplicative gateway retry storms",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/max_retries",
+        "op": "range",
+        "value": [
+          0,
+          2
+        ],
+        "message": "Use at most two gateway retries"
+      },
+      {
+        "path": "/retry_budget_percent",
+        "op": "range",
+        "value": [
+          0,
+          10
+        ],
+        "message": "Retries may consume at most 10 percent of traffic"
+      }
+    ],
+    "example": {
+      "max_retries": 1,
+      "retry_budget_percent": 5
+    },
+    "rejected_example": {
+      "max_retries": 20,
+      "retry_budget_percent": 100
+    }
+  },
+  {
+    "name": "gateway-traffic-weights",
+    "category": "gateway",
+    "description": "Validate canary backend weights sum to 100",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/backends/*/weight",
+        "op": "range",
+        "value": [
+          0,
+          100
+        ],
+        "message": "Backend weight must be a percentage"
+      },
+      {
+        "path": "/backends",
+        "op": "sum-field",
+        "value": [
+          "weight",
+          100
+        ],
+        "message": "Backend weights must total 100"
+      }
+    ],
+    "example": {
+      "backends": [
+        {
+          "weight": 90
+        },
+        {
+          "weight": 10
+        }
+      ]
+    },
+    "rejected_example": {
+      "backends": [
+        {
+          "weight": 90
+        },
+        {
+          "weight": 90
+        }
+      ]
+    }
+  },
+  {
+    "name": "gateway-auth-policy",
+    "category": "gateway",
+    "description": "Require audience validation and disabled anonymous inference",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/authentication/anonymous",
+        "op": "eq",
+        "value": false,
+        "message": "Disable anonymous inference"
+      },
+      {
+        "path": "/authentication/audiences",
+        "op": "length-min",
+        "value": 1,
+        "message": "Declare accepted token audiences"
+      }
+    ],
+    "example": {
+      "authentication": {
+        "anonymous": false,
+        "audiences": [
+          "inference"
+        ]
+      }
+    },
+    "rejected_example": {
+      "authentication": {
+        "anonymous": true,
+        "audiences": []
+      }
+    }
+  },
+  {
+    "name": "supply-sbom-spdx",
+    "category": "supply-chain",
+    "description": "Check SPDX document identity and package inventory",
+    "source": "https://github.com/opencontainers/distribution-spec/blob/main/spec.md",
+    "checks": [
+      {
+        "path": "/spdxVersion",
+        "op": "pattern",
+        "value": "^SPDX-2\\.[23]$",
+        "message": "Use SPDX 2.2 or 2.3 JSON"
+      },
+      {
+        "path": "/SPDXID",
+        "op": "eq",
+        "value": "SPDXRef-DOCUMENT",
+        "message": "Declare SPDX document identity"
+      },
+      {
+        "path": "/packages",
+        "op": "length-min",
+        "value": 1,
+        "message": "SBOM must contain a package inventory"
+      }
+    ],
+    "example": {
+      "spdxVersion": "SPDX-2.3",
+      "SPDXID": "SPDXRef-DOCUMENT",
+      "packages": [
+        {
+          "name": "app"
+        }
+      ]
+    },
+    "rejected_example": {
+      "spdxVersion": "SPDX-1.0",
+      "SPDXID": "document",
+      "packages": []
+    }
+  },
+  {
+    "name": "supply-provenance-slsa",
+    "category": "supply-chain",
+    "description": "Check SLSA provenance predicate and SHA-256 subjects",
+    "source": "https://slsa.dev/spec/v1.2/provenance",
+    "checks": [
+      {
+        "path": "/predicateType",
+        "op": "eq",
+        "value": "https://slsa.dev/provenance/v1",
+        "message": "Use SLSA provenance v1"
+      },
+      {
+        "path": "/subject/*/digest/sha256",
+        "op": "pattern",
+        "value": "^[a-f0-9]{64}$",
+        "message": "Pin each provenance subject"
+      },
+      {
+        "path": "/predicate/buildDefinition/buildType",
+        "op": "nonempty",
+        "value": null,
+        "message": "Declare the build type"
+      }
+    ],
+    "example": {
+      "predicateType": "https://slsa.dev/provenance/v1",
+      "subject": [
+        {
+          "digest": {
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ],
+      "predicate": {
+        "buildDefinition": {
+          "buildType": "https://example.com/build/v1"
+        }
+      }
+    },
+    "rejected_example": {
+      "predicateType": "unknown",
+      "subject": [],
+      "predicate": {}
+    }
+  },
+  {
+    "name": "supply-artifact-digests",
+    "category": "supply-chain",
+    "description": "Verify OCI descriptor digest shape and nonnegative size",
+    "source": "https://github.com/opencontainers/distribution-spec/blob/main/spec.md",
+    "checks": [
+      {
+        "path": "/layers/*/digest",
+        "op": "pattern",
+        "value": "^sha256:[a-f0-9]{64}$",
+        "message": "Use SHA-256 OCI descriptors"
+      },
+      {
+        "path": "/layers/*/size",
+        "op": "range",
+        "value": [
+          0,
+          1099511627776
+        ],
+        "message": "Layer size must be nonnegative and bounded"
+      }
+    ],
+    "example": {
+      "layers": [
+        {
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "size": 100
+        }
+      ]
+    },
+    "rejected_example": {
+      "layers": [
+        {
+          "digest": "latest",
+          "size": -1
+        }
+      ]
+    }
+  },
+  {
+    "name": "supply-dependency-licenses",
+    "category": "supply-chain",
+    "description": "Enforce an explicit dependency license allowlist",
+    "source": "https://spdx.org/licenses/",
+    "checks": [
+      {
+        "path": "/packages/*/license",
+        "op": "one-of",
+        "value": [
+          "MIT",
+          "Apache-2.0",
+          "BSD-2-Clause",
+          "BSD-3-Clause",
+          "ISC",
+          "MPL-2.0"
+        ],
+        "message": "License requires explicit review outside this policy"
+      }
+    ],
+    "example": {
+      "packages": [
+        {
+          "license": "Apache-2.0"
+        }
+      ]
+    },
+    "rejected_example": {
+      "packages": [
+        {
+          "license": "UNKNOWN"
+        }
+      ]
+    }
+  },
+  {
+    "name": "supply-signature-policy",
+    "category": "supply-chain",
+    "description": "Reject unsigned artifacts and unconstrained signers",
+    "source": "https://github.com/opencontainers/distribution-spec/blob/main/spec.md",
+    "checks": [
+      {
+        "path": "/allow_unsigned",
+        "op": "eq",
+        "value": false,
+        "message": "Reject unsigned artifacts"
+      },
+      {
+        "path": "/trusted_key_ids",
+        "op": "length-min",
+        "value": 1,
+        "message": "Configure trusted signing keys"
+      },
+      {
+        "path": "/trusted_key_ids/*",
+        "op": "pattern",
+        "value": "^[a-zA-Z0-9_.:-]{1,128}$",
+        "message": "Trust explicit key identifiers"
+      }
+    ],
+    "example": {
+      "allow_unsigned": false,
+      "trusted_key_ids": [
+        "release-2026"
+      ]
+    },
+    "rejected_example": {
+      "allow_unsigned": true,
+      "trusted_key_ids": [
+        "*"
+      ]
+    }
+  },
+  {
+    "name": "telemetry-genai-usage",
+    "category": "telemetry",
+    "description": "Validate normalized GenAI token usage attributes",
+    "source": "https://opentelemetry.io/docs/specs/semconv/gen-ai/",
+    "checks": [
+      {
+        "path": "/gen_ai.usage.input_tokens",
+        "op": "range",
+        "value": [
+          0,
+          10000000
+        ],
+        "message": "Input token count must be nonnegative"
+      },
+      {
+        "path": "/gen_ai.usage.output_tokens",
+        "op": "range",
+        "value": [
+          0,
+          10000000
+        ],
+        "message": "Output token count must be nonnegative"
+      },
+      {
+        "path": "/gen_ai.request.model",
+        "op": "nonempty",
+        "value": null,
+        "message": "Record the requested model"
+      }
+    ],
+    "example": {
+      "gen_ai.usage.input_tokens": 200,
+      "gen_ai.usage.output_tokens": 50,
+      "gen_ai.request.model": "local-model"
+    },
+    "rejected_example": {
+      "gen_ai.usage.input_tokens": -1,
+      "gen_ai.usage.output_tokens": -1
+    }
+  },
+  {
+    "name": "telemetry-genai-privacy",
+    "category": "telemetry",
+    "description": "Keep prompt and response content collection explicitly disabled",
+    "source": "https://opentelemetry.io/docs/specs/semconv/gen-ai/",
+    "checks": [
+      {
+        "path": "/capture_prompts",
+        "op": "eq",
+        "value": false,
+        "message": "Disable prompt body capture"
+      },
+      {
+        "path": "/capture_completions",
+        "op": "eq",
+        "value": false,
+        "message": "Disable completion body capture"
+      }
+    ],
+    "example": {
+      "capture_prompts": false,
+      "capture_completions": false
+    },
+    "rejected_example": {
+      "capture_prompts": true,
+      "capture_completions": true
+    }
+  },
+  {
+    "name": "telemetry-otlp-tls",
+    "category": "telemetry",
+    "description": "Require encrypted verified OTLP export",
+    "source": "https://opentelemetry.io/docs/specs/semconv/gen-ai/",
+    "checks": [
+      {
+        "path": "/endpoint",
+        "op": "pattern",
+        "value": "^https://[^/@\\s]+(?:/|$)",
+        "message": "Use HTTPS OTLP endpoint"
+      },
+      {
+        "path": "/insecure_skip_verify",
+        "op": "eq",
+        "value": false,
+        "message": "Verify OTLP server certificates"
+      }
+    ],
+    "example": {
+      "endpoint": "https://otel.example.com/",
+      "insecure_skip_verify": false
+    },
+    "rejected_example": {
+      "endpoint": "http://otel",
+      "insecure_skip_verify": true
+    }
+  },
+  {
+    "name": "telemetry-sampling-budget",
+    "category": "telemetry",
+    "description": "Bound head sampling and preserve error traces",
+    "source": "https://opentelemetry.io/docs/specs/semconv/gen-ai/",
+    "checks": [
+      {
+        "path": "/head_sample_ratio",
+        "op": "range",
+        "value": [
+          0,
+          0.25
+        ],
+        "message": "Sample at most 25 percent by default"
+      },
+      {
+        "path": "/always_sample_errors",
+        "op": "eq",
+        "value": true,
+        "message": "Preserve error traces"
+      }
+    ],
+    "example": {
+      "head_sample_ratio": 0.1,
+      "always_sample_errors": true
+    },
+    "rejected_example": {
+      "head_sample_ratio": 1,
+      "always_sample_errors": false
+    }
+  },
+  {
+    "name": "telemetry-slo-targets",
+    "category": "telemetry",
+    "description": "Require measurable availability and latency SLOs",
+    "source": "https://opentelemetry.io/docs/specs/semconv/gen-ai/",
+    "checks": [
+      {
+        "path": "/availability_percent",
+        "op": "range",
+        "value": [
+          90,
+          100
+        ],
+        "message": "Specify an availability target"
+      },
+      {
+        "path": "/p95_latency_ms",
+        "op": "range",
+        "value": [
+          1,
+          300000
+        ],
+        "message": "Specify bounded p95 latency"
+      },
+      {
+        "path": "/window_days",
+        "op": "range",
+        "value": [
+          1,
+          90
+        ],
+        "message": "Specify SLO evaluation window"
+      }
+    ],
+    "example": {
+      "availability_percent": 99.9,
+      "p95_latency_ms": 1000,
+      "window_days": 30
+    },
+    "rejected_example": {
+      "availability_percent": 0,
+      "p95_latency_ms": 0,
+      "window_days": 3650
+    }
+  },
+  {
+    "name": "data-postgres-tls",
+    "category": "data",
+    "description": "Require PostgreSQL certificate hostname verification",
+    "source": "https://www.postgresql.org/docs/current/libpq-ssl.html",
+    "checks": [
+      {
+        "path": "/sslmode",
+        "op": "eq",
+        "value": "verify-full",
+        "message": "Use PostgreSQL verify-full TLS"
+      },
+      {
+        "path": "/sslrootcert",
+        "op": "nonempty",
+        "value": null,
+        "message": "Provide a trusted CA certificate reference"
+      }
+    ],
+    "example": {
+      "sslmode": "verify-full",
+      "sslrootcert": "/etc/ca/postgres.pem"
+    },
+    "rejected_example": {
+      "sslmode": "disable",
+      "sslrootcert": ""
+    }
+  },
+  {
+    "name": "data-redis-security",
+    "category": "data",
+    "description": "Require Redis TLS and named ACL users",
+    "source": "https://redis.io/docs/latest/operate/oss_and_stack/management/security/",
+    "checks": [
+      {
+        "path": "/tls",
+        "op": "eq",
+        "value": true,
+        "message": "Enable Redis TLS"
+      },
+      {
+        "path": "/acl_user",
+        "op": "pattern",
+        "value": "^[a-z][a-z0-9_-]{1,63}$",
+        "message": "Use a named ACL user"
+      },
+      {
+        "path": "/acl_user",
+        "op": "not-eq",
+        "value": "default",
+        "message": "Disable the default Redis account"
+      }
+    ],
+    "example": {
+      "tls": true,
+      "acl_user": "rag-reader"
+    },
+    "rejected_example": {
+      "tls": false,
+      "acl_user": "default"
+    }
+  },
+  {
+    "name": "data-vector-index",
+    "category": "data",
+    "description": "Validate bounded HNSW construction parameters",
+    "source": "https://github.com/pgvector/pgvector#hnsw",
+    "checks": [
+      {
+        "path": "/m",
+        "op": "range",
+        "value": [
+          4,
+          64
+        ],
+        "message": "HNSW M must be between 4 and 64"
+      },
+      {
+        "path": "/ef_construction",
+        "op": "range",
+        "value": [
+          32,
+          1024
+        ],
+        "message": "Bound index construction effort"
+      },
+      {
+        "path": "/distance",
+        "op": "one-of",
+        "value": [
+          "cosine",
+          "l2",
+          "ip"
+        ],
+        "message": "Use a declared distance metric"
+      }
+    ],
+    "example": {
+      "m": 16,
+      "ef_construction": 200,
+      "distance": "cosine"
+    },
+    "rejected_example": {
+      "m": 1,
+      "ef_construction": 0,
+      "distance": "unknown"
+    }
+  },
+  {
+    "name": "data-backup-policy",
+    "category": "data",
+    "description": "Require encrypted tested backups with a recovery objective",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/encrypted",
+        "op": "eq",
+        "value": true,
+        "message": "Encrypt backups"
+      },
+      {
+        "path": "/restore_test_days",
+        "op": "range",
+        "value": [
+          1,
+          30
+        ],
+        "message": "Test restoration at least monthly"
+      },
+      {
+        "path": "/rpo_minutes",
+        "op": "range",
+        "value": [
+          1,
+          1440
+        ],
+        "message": "Declare an RPO of at most one day"
+      }
+    ],
+    "example": {
+      "encrypted": true,
+      "restore_test_days": 7,
+      "rpo_minutes": 60
+    },
+    "rejected_example": {
+      "encrypted": false,
+      "restore_test_days": 365,
+      "rpo_minutes": 10080
+    }
+  },
+  {
+    "name": "data-retention-policy",
+    "category": "data",
+    "description": "Bound retention and require deletion propagation",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/retention_days",
+        "op": "range",
+        "value": [
+          1,
+          365
+        ],
+        "message": "Bound document retention to one year"
+      },
+      {
+        "path": "/propagate_deletions",
+        "op": "eq",
+        "value": true,
+        "message": "Delete indexed chunks when sources are removed"
+      }
+    ],
+    "example": {
+      "retention_days": 90,
+      "propagate_deletions": true
+    },
+    "rejected_example": {
+      "retention_days": 9999,
+      "propagate_deletions": false
+    }
+  },
+  {
+    "name": "platform-terraform-state",
+    "category": "platform",
+    "description": "Require locked encrypted remote Terraform state",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/remote",
+        "op": "eq",
+        "value": true,
+        "message": "Use remote state storage"
+      },
+      {
+        "path": "/encryption",
+        "op": "eq",
+        "value": true,
+        "message": "Encrypt state at rest"
+      },
+      {
+        "path": "/locking",
+        "op": "eq",
+        "value": true,
+        "message": "Enable state locking"
+      }
+    ],
+    "example": {
+      "remote": true,
+      "encryption": true,
+      "locking": true
+    },
+    "rejected_example": {
+      "remote": false,
+      "encryption": false,
+      "locking": false
+    }
+  },
+  {
+    "name": "platform-container-hardening",
+    "category": "platform",
+    "description": "Check normalized container runtime hardening policies",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/read_only_rootfs",
+        "op": "eq",
+        "value": true,
+        "message": "Use a read-only root filesystem"
+      },
+      {
+        "path": "/privileged",
+        "op": "eq",
+        "value": false,
+        "message": "Disable privileged mode"
+      },
+      {
+        "path": "/user",
+        "op": "pattern",
+        "value": "^[1-9][0-9]*(?::[0-9]+)?$",
+        "message": "Use a numeric non-root user"
+      }
+    ],
+    "example": {
+      "read_only_rootfs": true,
+      "privileged": false,
+      "user": "10001"
+    },
+    "rejected_example": {
+      "read_only_rootfs": false,
+      "privileged": true,
+      "user": "0"
+    }
+  },
+  {
+    "name": "platform-secret-references",
+    "category": "platform",
+    "description": "Allow secret references rather than inline secret values",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/secrets/*/reference",
+        "op": "pattern",
+        "value": "^(env|vault|kms|secret)://[^\\s]+$",
+        "message": "Use an explicit secret reference URI"
+      },
+      {
+        "path": "/secrets/*/value",
+        "op": "absent",
+        "value": null,
+        "message": "Do not embed secret values"
+      }
+    ],
+    "example": {
+      "secrets": [
+        {
+          "reference": "env://API_KEY"
+        }
+      ]
+    },
+    "rejected_example": {
+      "secrets": [
+        {
+          "reference": "plaintext",
+          "value": "do-not-log"
+        }
+      ]
+    }
+  },
+  {
+    "name": "platform-webhook-security",
+    "category": "platform",
+    "description": "Require webhook HMAC verification and replay protection",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/verify_hmac",
+        "op": "eq",
+        "value": true,
+        "message": "Verify webhook signatures"
+      },
+      {
+        "path": "/max_age_seconds",
+        "op": "range",
+        "value": [
+          1,
+          300
+        ],
+        "message": "Reject stale webhook deliveries"
+      },
+      {
+        "path": "/deduplicate",
+        "op": "eq",
+        "value": true,
+        "message": "Deduplicate webhook delivery IDs"
+      }
+    ],
+    "example": {
+      "verify_hmac": true,
+      "max_age_seconds": 60,
+      "deduplicate": true
+    },
+    "rejected_example": {
+      "verify_hmac": false,
+      "max_age_seconds": 0,
+      "deduplicate": false
+    }
+  },
+  {
+    "name": "platform-ci-permissions",
+    "category": "platform",
+    "description": "Keep GitHub workflow permissions read-only by default",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/permissions/contents",
+        "op": "eq",
+        "value": "read",
+        "message": "Default contents permission must be read-only"
+      },
+      {
+        "path": "/permissions/actions",
+        "op": "absent",
+        "value": null,
+        "message": "Do not grant workflow mutation globally"
+      }
+    ],
+    "example": {
+      "permissions": {
+        "contents": "read"
+      }
+    },
+    "rejected_example": {
+      "permissions": {
+        "contents": "write",
+        "actions": "write"
+      }
+    }
+  },
+  {
+    "name": "delivery-rollout-policy",
+    "category": "delivery",
+    "description": "Require health-gated bounded progressive delivery",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/canary_percent",
+        "op": "range",
+        "value": [
+          1,
+          25
+        ],
+        "message": "Start canary rollout at no more than 25 percent"
+      },
+      {
+        "path": "/health_gate",
+        "op": "eq",
+        "value": true,
+        "message": "Gate rollout on health"
+      },
+      {
+        "path": "/auto_rollback",
+        "op": "eq",
+        "value": true,
+        "message": "Enable rollback on health regression"
+      }
+    ],
+    "example": {
+      "canary_percent": 10,
+      "health_gate": true,
+      "auto_rollback": true
+    },
+    "rejected_example": {
+      "canary_percent": 100,
+      "health_gate": false,
+      "auto_rollback": false
+    }
+  },
+  {
+    "name": "delivery-autoscaling-bounds",
+    "category": "delivery",
+    "description": "Validate HPA replica bounds and CPU utilization target",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/spec/minReplicas",
+        "op": "range",
+        "value": [
+          1,
+          1000
+        ],
+        "message": "Require a nonzero replica floor"
+      },
+      {
+        "path": "/spec/maxReplicas",
+        "op": "range",
+        "value": [
+          1,
+          1000
+        ],
+        "message": "Bound replica ceiling"
+      },
+      {
+        "path": "/spec/maxReplicas",
+        "op": "gte-path",
+        "value": "/spec/minReplicas",
+        "message": "Maximum replicas must not be below minimum"
+      }
+    ],
+    "example": {
+      "spec": {
+        "minReplicas": 2,
+        "maxReplicas": 10
+      }
+    },
+    "rejected_example": {
+      "spec": {
+        "minReplicas": 10,
+        "maxReplicas": 2
+      }
+    }
+  },
+  {
+    "name": "delivery-gpu-requests",
+    "category": "delivery",
+    "description": "Require matching bounded GPU requests and limits",
+    "source": "https://kubernetes.io/blog/2026/04/22/kubernetes-v1-36-release/",
+    "checks": [
+      {
+        "path": "/requests/nvidia.com~1gpu",
+        "op": "range",
+        "value": [
+          1,
+          64
+        ],
+        "message": "Request between 1 and 64 GPUs"
+      },
+      {
+        "path": "/limits/nvidia.com~1gpu",
+        "op": "same",
+        "value": "/requests/nvidia.com~1gpu",
+        "message": "GPU requests and limits must match"
+      }
+    ],
+    "example": {
+      "requests": {
+        "nvidia.com/gpu": 1
+      },
+      "limits": {
+        "nvidia.com/gpu": 1
+      }
+    },
+    "rejected_example": {
+      "requests": {
+        "nvidia.com/gpu": 1
+      },
+      "limits": {
+        "nvidia.com/gpu": 8
+      }
+    }
+  },
+  {
+    "name": "delivery-sandbox-policy",
+    "category": "delivery",
+    "description": "Require isolated AI execution without ambient credentials",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/isolation",
+        "op": "one-of",
+        "value": [
+          "microvm",
+          "gvisor",
+          "kata"
+        ],
+        "message": "Use an isolated agent execution runtime"
+      },
+      {
+        "path": "/network_default",
+        "op": "eq",
+        "value": "deny",
+        "message": "Deny agent egress by default"
+      },
+      {
+        "path": "/inherit_host_env",
+        "op": "eq",
+        "value": false,
+        "message": "Do not inherit host credentials"
+      }
+    ],
+    "example": {
+      "isolation": "microvm",
+      "network_default": "deny",
+      "inherit_host_env": false
+    },
+    "rejected_example": {
+      "isolation": "host",
+      "network_default": "allow",
+      "inherit_host_env": true
+    }
+  },
+  {
+    "name": "delivery-incident-routing",
+    "category": "delivery",
+    "description": "Require deduplicated incident routing with an owner",
+    "source": "https://owasp.org/www-project-top-10-for-large-language-model-applications/",
+    "checks": [
+      {
+        "path": "/owner",
+        "op": "nonempty",
+        "value": null,
+        "message": "Assign an incident owner"
+      },
+      {
+        "path": "/deduplicate",
+        "op": "eq",
+        "value": true,
+        "message": "Deduplicate repeated incidents"
+      },
+      {
+        "path": "/automerge",
+        "op": "eq",
+        "value": false,
+        "message": "Require review before merging automatic fixes"
+      }
+    ],
+    "example": {
+      "owner": "platform",
+      "deduplicate": true,
+      "automerge": false
+    },
+    "rejected_example": {
+      "owner": "",
+      "deduplicate": false,
+      "automerge": true
+    }
+  }
+]

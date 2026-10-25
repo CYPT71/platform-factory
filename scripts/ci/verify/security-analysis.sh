@@ -12,6 +12,7 @@ echo "--- Validate workflow supply-chain controls ---"
 python3 scripts/ci/verify-workflows.py
 
 echo "--- Static analysis and security regression tests ---"
+python3 -m unittest discover -s internal/hooks -p 'test_*.py'
 go vet ./...
 work=$(mktemp -d "${TMPDIR:-/tmp}/pf-verify-security.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
@@ -32,6 +33,11 @@ go test -race ./...
 test -z "$(find cmd internal -name '*.go' -type f \
     ! -path 'cmd/microvm-init/main.go' \
     ! -path 'cmd/platform-factory/microvm_native_hvf_darwin_test.go' \
+    ! -path 'cmd/platform-factory/hooks.go' \
+    ! -path 'cmd/platform-factory/extensions_test.go' \
+    ! -path 'internal/hooks/hooks.go' \
+    ! -path 'internal/hooks/process_unix.go' \
+    ! -path 'internal/hooks/process_windows.go' \
     ! -path 'cmd/platform-factory/disk_parser.go' \
     ! -path 'cmd/platform-factory/disk_parser_test.go' \
     ! -path 'internal/app/project/capabilities.go' \

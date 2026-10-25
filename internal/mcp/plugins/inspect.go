@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/CYPT71/platform-factory/internal/extensions"
 	"github.com/CYPT71/platform-factory/internal/mcp/toolerror"
 	hostplugin "github.com/CYPT71/platform-factory/internal/plugin"
 )
@@ -35,9 +36,10 @@ type Summary struct {
 // caller needs before deciding to modify a plugin.
 type Detail struct {
 	Summary
-	Manifest  *hostplugin.Manifest `json:"manifest,omitempty"`
-	Module    string               `json:"module"` // "standalone", "depends-on-main", or "none"
-	TestFiles []string             `json:"test_files,omitempty"`
+	Manifest             *hostplugin.Manifest `json:"manifest,omitempty"`
+	Module               string               `json:"module"` // "standalone", "depends-on-main", or "none"
+	TestFiles            []string             `json:"test_files,omitempty"`
+	SharedImplementation string               `json:"shared_implementation,omitempty"`
 }
 
 func pluginsDir(repoRoot string) string { return filepath.Join(repoRoot, "plugins") }
@@ -128,6 +130,11 @@ func InspectPlugin(repoRoot, name string) (Detail, error) {
 		Summary:   summarize(repoRoot, name),
 		Module:    moduleKind(dir),
 		TestFiles: testFiles(dir),
+	}
+	if _, err := extensions.Lookup(name); err == nil {
+		detail.Module = "shared-toolkit"
+		detail.SharedImplementation = "cmd/platform-factory-toolkit + internal/extensions"
+		detail.TestFiles = testFiles(filepath.Join(repoRoot, "internal", "extensions"))
 	}
 	if detail.Kind == "rpc" {
 		manifest, err := hostplugin.LoadManifest(dir)
