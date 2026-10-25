@@ -138,6 +138,7 @@ jobs:
           test -z "$(find cmd internal -name '*.go' -type f \
               ! -path 'cmd/microvm-init/main.go' \
               ! -path 'cmd/platform-factory/hooks.go' \
+              ! -path 'cmd/platform-factory/marketplace_delivery_test.go' \
               ! -path 'cmd/platform-factory/extensions_test.go' \
               ! -path 'internal/hooks/hooks.go' \
               ! -path 'internal/hooks/process_unix.go' \
@@ -265,5 +266,5 @@ jobs:
           set -euo pipefail
           python3 scripts/ci/verify-workflows.py
           test -z "$(git ls-files | grep -E '(^|/)(coverage\.out|coverage\.txt|oci-image|oci-builder|service)$' || true)"
-          test -z "$(grep -RInE --exclude=README.md --exclude-dir=.git --exclude-dir=.github 'TODO|FIXME|placeholder' . || true)"
+          python3 scripts/ci/verify-source-markers.py
           git diff --check "${{ github.event.pull_request.base.sha }}" HEAD

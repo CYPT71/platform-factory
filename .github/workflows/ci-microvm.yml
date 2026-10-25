@@ -84,6 +84,14 @@ jobs:
           /tmp/microvm-initramfs -layout /tmp/oci-image -platform linux/arm64 \
             -init /tmp/microvm-init -output .cache/microvm/arm64/initramfs.cpio.gz
           test -s .cache/microvm/arm64/initramfs.cpio.gz
+      # Artifacts transfer files within this run; caches are only an optimization.
+      - name: Transfer the built ARM64 guest to the HVF job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hvf-guest-arm64
+          path: .cache/microvm/arm64
+          if-no-files-found: error
+          retention-days: 1
   boot-under-hvf:
     needs: prepare-hvf-guest
     runs-on: macos-15
@@ -93,19 +101,14 @@ jobs:
       - name: Install the pinned Go toolchain
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with: {go-version-file: go.mod, cache: true}
-      - name: Restore the ARM64 HVF guest from the GitHub cache
-        id: restore-hvf-guest
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Download the ARM64 guest built in this run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          name: hvf-guest-arm64
           path: .cache/microvm/arm64
-          key: microvm-hvf-arm64-${{ hashFiles('scripts/microvm/build-kernel.sh', 'scripts/microvm/kernel-common.config', 'scripts/microvm/kernel-arm64.config', 'cmd/microvm-init/**', 'cmd/microvm-initramfs/**', 'cmd/example-service/**', 'internal/rootfs/**', 'oci/**') }}
-          fail-on-cache-miss: true
-      - name: Validate the local ARM64 HVF guest cache
-        env:
-          HVF_CACHE_HIT: ${{ steps.restore-hvf-guest.outputs.cache-hit }}
+      - name: Validate the transferred ARM64 guest
         run: |
           set -euo pipefail
-          test "$HVF_CACHE_HIT" = true
           test -s .cache/microvm/arm64/kernel
           test -s .cache/microvm/arm64/initramfs.cpio.gz
       - name: Boot Linux with the native macOS HVF stack

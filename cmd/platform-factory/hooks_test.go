@@ -69,3 +69,18 @@ func TestHooksCLIValidationAndEmit(t *testing.T) {
 		}
 	}
 }
+
+func TestEmbeddedPythonRunnerTransportsInputAndPreservesExitStatus(t *testing.T) {
+	var out, diagnostics bytes.Buffer
+	script := []byte("import json,sys\nprint(json.dumps({'argument':sys.argv[1],'input':sys.stdin.read()}))\n")
+	code := runPythonHook(script, []string{"fixed-argument"}, strings.NewReader("bounded context"), &out, &diagnostics)
+	if code == 2 {
+		t.Skip("Python unavailable")
+	}
+	if code != 0 || !strings.Contains(out.String(), "fixed-argument") || !strings.Contains(out.String(), "bounded context") {
+		t.Fatalf("embedded runner=%d %s %s", code, &out, &diagnostics)
+	}
+	if code := runPythonHook([]byte("raise SystemExit(7)\n"), nil, strings.NewReader(""), &out, &diagnostics); code != 7 {
+		t.Fatalf("lost fixer exit code: %d", code)
+	}
+}

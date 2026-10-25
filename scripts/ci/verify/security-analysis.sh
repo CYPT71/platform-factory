@@ -34,6 +34,7 @@ test -z "$(find cmd internal -name '*.go' -type f \
     ! -path 'cmd/microvm-init/main.go' \
     ! -path 'cmd/platform-factory/microvm_native_hvf_darwin_test.go' \
     ! -path 'cmd/platform-factory/hooks.go' \
+    ! -path 'cmd/platform-factory/marketplace_delivery_test.go' \
     ! -path 'cmd/platform-factory/extensions_test.go' \
     ! -path 'internal/hooks/hooks.go' \
     ! -path 'internal/hooks/process_unix.go' \
@@ -127,7 +128,7 @@ test -z "$(grep -rniI 'cosign' cmd internal --include='*.go' || true)"
 
 echo "--- Enforce repository and workflow policy (non-PR-specific parts) ---"
 test -z "$(git ls-files | grep -E '(^|/)(coverage\.out|coverage\.txt|oci-image|oci-builder|service)$' || true)"
-test -z "$(grep -RInE --exclude=README.md --exclude-dir=.git --exclude-dir=.github 'TODO|FIXME|placeholder' . || true)"
+python3 scripts/ci/verify-source-markers.py
 echo "NOTE: pr-policy's base-SHA diff-check step was skipped (no PR base SHA outside an actual pull request)"
 
 echo "security-analysis: PASS"

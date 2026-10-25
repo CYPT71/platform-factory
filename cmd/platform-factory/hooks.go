@@ -52,8 +52,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 func runHooks(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" {
-		fmt.Fprintln(stdout, "usage: pf hooks validate --config FILE | emit --config FILE --event EVENT --command NAME --exit-code CODE | autofix --config FILE < incident.json")
+		fmt.Fprintln(stdout, "usage: pf hooks validate --config FILE | emit --config FILE --event EVENT --command NAME --exit-code CODE | autofix --config FILE < incident.json | codex-fixer < context.json")
 		return 0
+	}
+	if args[0] == "codex-fixer" && len(args) == 1 {
+		return runPythonHook(hooks.CodexFixerScript, nil, os.Stdin, stdout, stderr)
 	}
 	flags := flag.NewFlagSet("hooks "+args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -92,37 +95,41 @@ func runHooks(args []string, stdout, stderr io.Writer) int {
 		}
 		return extensionJSON(stdout, stderr, event)
 	case "autofix":
-		python, err := exec.LookPath("python3")
-		if err != nil {
-			fmt.Fprintln(stderr, "hooks autofix requires Python 3.11+")
-			return 2
-		}
-		script, err := os.CreateTemp("", "pf-autofix-*.py")
-		if err != nil {
-			return 1
-		}
-		defer os.Remove(script.Name())
-		if _, err := script.Write(hooks.AutofixScript); err != nil {
-			script.Close()
-			return 1
-		}
-		if err := script.Close(); err != nil {
-			return 1
-		}
-		cmd := exec.Command(python, "-I", script.Name(), "--config", *config)
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = stdout
-		cmd.Stderr = stderr
-		if err := cmd.Run(); err != nil {
-			if exit, ok := err.(*exec.ExitError); ok {
-				return exit.ExitCode()
-			}
-			fmt.Fprintln(stderr, "autofix could not start")
-			return 1
-		}
-		return 0
+		return runPythonHook(hooks.AutofixScript, []string{"--config", *config}, os.Stdin, stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, "unknown hooks action")
 		return 2
 	}
+}
+
+func runPythonHook(scriptBytes []byte, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		fmt.Fprintln(stderr, "hooks autofix requires Python 3.11+")
+		return 2
+	}
+	script, err := os.CreateTemp("", "pf-autofix-*.py")
+	if err != nil {
+		return 1
+	}
+	defer os.Remove(script.Name())
+	if _, err := script.Write(scriptBytes); err != nil {
+		script.Close()
+		return 1
+	}
+	if err := script.Close(); err != nil {
+		return 1
+	}
+	cmd := exec.Command(python, append([]string{"-I", script.Name()}, args...)...)
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		if exit, ok := err.(*exec.ExitError); ok {
+			return exit.ExitCode()
+		}
+		fmt.Fprintln(stderr, "autofix could not start")
+		return 1
+	}
+	return 0
 }

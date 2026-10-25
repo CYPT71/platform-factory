@@ -28,6 +28,9 @@ const Version = "platform-factory.dev/hook-event/v1"
 //go:embed autofix.py
 var AutofixScript []byte
 
+//go:embed codex_fixer.py
+var CodexFixerScript []byte
+
 type Event struct {
 	APIVersion string `json:"api_version"`
 	ID         string `json:"id"`

@@ -56,20 +56,31 @@ Exemple de configuration **à adapter** à vos chemins et à votre correcteur :
   "base": "main",
   "author_name": "CYPT71",
   "author_email": "cyprientaib1@gmail.com",
-  "fixer": ["/absolute/bin/my-sandboxed-ai-fixer"],
+  "fixer": ["/absolute/bin/pf", "hooks", "codex-fixer"],
   "reproduce": ["/absolute/bin/go", "test", "./internal/affected"],
   "checks": [["/absolute/bin/go", "test", "./..."], ["/absolute/bin/go", "vet", "./..."]],
   "allowed_paths": ["internal/affected/", "cmd/platform-factory/"],
   "timeout_seconds": 300,
   "max_patch_bytes": 262144,
   "pass_env": ["PATH", "GOCACHE", "GOMODCACHE", "GOTOOLCHAIN"],
-  "fixer_pass_env": [],
+  "fixer_pass_env": ["HOME", "PATH"],
   "publish_pr": false,
   "github_repository": "CYPT71/platform-factory"
 }
 ```
 
-Le correcteur est un programme local explicitement choisi, avec un contrat simple :
+L’adaptateur inclus `pf hooks codex-fixer` utilise un Codex CLI déjà installé et
+authentifié. Il lance une seule session éphémère, sans demandes d’approbation,
+avec sandbox `workspace-write`, réseau des commandes, recherche web, apps, plugins
+et sous-agents désactivés. Les serveurs MCP configurés sont explicitement désactivés
+pour cette invocation. Il ne commite ni
+ne publie lui-même. `PF_CODEX_BIN` peut fixer un exécutable absolu et
+`PF_CODEX_MODEL` sélectionner un modèle, via `fixer_pass_env`. Les diagnostics sont
+limités à 8192 caractères avant d’être transmis au modèle. Les options ont été
+vérifiées sur le CLI local 0.164.0 ; l’intégration au fournisseur reste optionnelle
+et n’est pas appelée par les tests.
+
+Un autre correcteur peut être choisi avec le même contrat :
 stdin contient l’incident et un diagnostic borné marqué comme **donnée non fiable** ;
 le cwd est le worktree temporaire ; le programme doit modifier les fichiers permis
 et sortir avec zéro. Aucun fournisseur, abonnement ni secret n’est supposé.
