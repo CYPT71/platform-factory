@@ -13,6 +13,7 @@ python3 scripts/ci/verify-workflows.py
 
 echo "--- Static analysis and security regression tests ---"
 python3 -m unittest discover -s internal/hooks -p 'test_*.py'
+python3 -m unittest discover -s tests/microvm -p 'test_*.py'
 go vet ./...
 work=$(mktemp -d "${TMPDIR:-/tmp}/pf-verify-security.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT

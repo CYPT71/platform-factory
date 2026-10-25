@@ -48,3 +48,5 @@ venv/
 # Local Python hook/automation test bytecode.
 /internal/hooks/__pycache__/
 /scripts/automation/__pycache__/
+
+/tests/microvm/__pycache__/

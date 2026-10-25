@@ -31,6 +31,7 @@ jobs:
           # Hooks execute only absolute argv from explicit trusted local config.
           # Autofix uses an embedded Python runner; no repository auto-discovery.
           python3 -m unittest discover -s internal/hooks -p 'test_*.py'
+          python3 -m unittest discover -s tests/microvm -p 'test_*.py'
           go vet ./...
           go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -json ./... > govulncheck.json
           { go list -deps -test -json ./...; \

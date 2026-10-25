@@ -53,8 +53,19 @@ scripts/microvm/install-podman-runtime.sh \
   | tee "$evidence_dir/podman-microvm-install.txt"
 podman info --format json >"$evidence_dir/podman-microvm-info.json"
 
+# conmon deletes runtime state as soon as the container exits. Preserve it
+# immediately before that real delete, using a test-only transparent proxy.
+runtime_wrapper=$(mktemp "${TMPDIR:-/tmp}/pf-runtime-proof.XXXXXX")
+python3 - "$runtime_wrapper" "${PLATFORM_FACTORY_RUNTIME_INSTALL_DIR:-$HOME/.local/bin}/platform-factory-runtime" "$evidence_dir" "$PWD/tests/microvm/capture-runtime-evidence.py" <<'PYPROXY'
+from pathlib import Path
+import shlex, sys
+wrapper, runtime, evidence, script = sys.argv[1:]
+Path(wrapper).write_text('#!/bin/sh\nexec ' + shlex.join([sys.executable, script, '--runtime', runtime, '--evidence', str(Path(evidence).resolve()), '--']) + ' "$@"\n')
+PYPROXY
+chmod 0700 "$runtime_wrapper"
+
 archive=$(mktemp "${TMPDIR:-/tmp}/platform-factory-podman-layout.XXXXXX.tar")
-trap 'rm -f "$archive"; cleanup' EXIT
+trap 'rm -f "$archive" "$runtime_wrapper"; cleanup' EXIT
 tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
   -C "$layout" -cf "$archive" .
 podman load --input "$archive" | tee "$evidence_dir/podman-microvm-load.txt"
@@ -63,7 +74,7 @@ podman image exists "$image"
 kernel_digest=sha256:$(sha256sum "$kernel" | awk '{print $1}')
 init_digest=sha256:$(sha256sum "$microvm_init" | awk '{print $1}')
 container_id=$(podman run --detach \
-  --runtime platform-factory-runtime \
+  --runtime "$runtime_wrapper" \
   --name "$container_name" \
   --network none \
   --cap-drop all \
@@ -119,7 +130,7 @@ grep -Fq '"component":"example-service"' "$supervisor_log"
 
 podman stop --time 20 "$container_name" | tee "$evidence_dir/podman-microvm-stop.txt"
 test "$(podman inspect --format '{{.State.Status}}' "$container_name")" = exited
-state_file=${supervisor_log%.supervisor.log}.json
+state_file="$evidence_dir/podman-microvm-terminal-state.json"
 test -s "$state_file"
 python3 - "$state_file" <<'PY'
 import json, sys
@@ -133,12 +144,11 @@ assert metrics.get("memory_mib") == 128, metrics
 assert metrics.get("vcpus") == 1, metrics
 assert metrics.get("exit_status") == state.get("exitStatus"), (metrics, state)
 PY
-cp "$state_file" "$evidence_dir/podman-microvm-terminal-state.json"
 podman rm "$container_name" | tee "$evidence_dir/podman-microvm-rm.txt"
 if podman container exists "$container_name"; then
   echo "error: Podman retained $container_name after rm" >&2
   exit 1
 fi
-trap 'rm -f "$archive"' EXIT
+trap 'rm -f "$archive" "$runtime_wrapper"' EXIT
 printf 'PODMAN_MICROVM_E2E_OK name=%s runtime=platform-factory-runtime vmm=kvm\n' "$container_name" \
   | tee "$evidence_dir/podman-microvm-result.txt"
