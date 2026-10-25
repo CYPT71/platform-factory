@@ -102,15 +102,11 @@ func TestConvertRejectsInvalidManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(testBlobPath(layout, idx.Manifests[0].Digest), manifestData, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	sum := sha256.Sum256(manifestData)
-	idx.Manifests[0].Digest = "sha256:" + hex.EncodeToString(sum[:])
-	idx.Manifests[0].Size = int64(len(manifestData))
+	updated := writeTestBlob(t, layout, idx.Manifests[0].MediaType, manifestData)
+	idx.Manifests[0].Digest, idx.Manifests[0].Size = updated.Digest, updated.Size
 	writeTestJSON(t, filepath.Join(layout, "index.json"), idx)
-	if _, err := Convert(Options{Layout: layout, Output: filepath.Join(t.TempDir(), "rootfs")}); err == nil {
-		t.Fatal("invalid manifest shape accepted")
+	if _, err := Convert(Options{Layout: layout, Output: filepath.Join(t.TempDir(), "rootfs")}); err == nil || !strings.Contains(err.Error(), "invalid manifest") {
+		t.Fatalf("expected manifest shape rejection, got %v", err)
 	}
 }
 
@@ -127,27 +123,18 @@ func TestConvertRejectsInvalidConfig(t *testing.T) {
 	// both descriptors at the new digests so the only thing under test
 	// is config *shape* validation, not a digest mismatch.
 	configData := []byte(`{"os":"linux","architecture":"amd64","rootfs":{"type":"not-layers","diff_ids":[]}}`)
-	if err := os.WriteFile(testBlobPath(layout, document.Config.Digest), configData, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	configSum := sha256.Sum256(configData)
-	document.Config.Digest = "sha256:" + hex.EncodeToString(configSum[:])
-	document.Config.Size = int64(len(configData))
+	document.Config = writeTestBlob(t, layout, document.Config.MediaType, configData)
 
 	manifestData, err := json.Marshal(document)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(testBlobPath(layout, idx.Manifests[0].Digest), manifestData, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	manifestSum := sha256.Sum256(manifestData)
-	idx.Manifests[0].Digest = "sha256:" + hex.EncodeToString(manifestSum[:])
-	idx.Manifests[0].Size = int64(len(manifestData))
+	updated := writeTestBlob(t, layout, idx.Manifests[0].MediaType, manifestData)
+	idx.Manifests[0].Digest, idx.Manifests[0].Size = updated.Digest, updated.Size
 	writeTestJSON(t, filepath.Join(layout, "index.json"), idx)
 
-	if _, err := Convert(Options{Layout: layout, Output: filepath.Join(t.TempDir(), "rootfs")}); err == nil {
-		t.Fatal("rootfs.type mismatch accepted")
+	if _, err := Convert(Options{Layout: layout, Output: filepath.Join(t.TempDir(), "rootfs")}); err == nil || !strings.Contains(err.Error(), "invalid image config") {
+		t.Fatalf("expected config shape rejection, got %v", err)
 	}
 }
 

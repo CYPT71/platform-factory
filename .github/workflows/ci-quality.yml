@@ -34,12 +34,12 @@ jobs:
         run: |
           set -euo pipefail
           test -z "$(find api cmd conformance examples internal sdk tests -type f -name '*.go' -print0 | xargs -0 gofmt -l)"
+          python3 -m unittest discover -s scripts/ci -p 'test_unit_coverage.py'
           go vet ./...
           go test ./...
-          # cmd/platform-factory-installer is its own Go module (go.work), so the
-          # root-module ./... above does not reach it - vet/test it
-          # explicitly, the same way plugins/containerd and plugins/kubevirt
-          # already need their own step elsewhere for the same reason.
+          # Exercise the installer from its public command directory too;
+          # it belongs to the root module. Deployment plugins have
+          # separate modules and are tested in their integration workflows.
           (cd cmd/platform-factory-installer && GOWORK=off go vet ./... && GOWORK=off go test ./...)
       - name: Execute a pipeline end to end through the shipped CLI
         if: matrix.target == 'amd64'
@@ -132,6 +132,8 @@ jobs:
           scripts/microvm/test-install-containerd-runtime.sh
           bash -c 'source "$1/activate"; command -v platform-factory; deactivate_platform_factory' \
             bash "$bootstrap_root/linux"
+          # PowerShell variables are intentionally literal to Bash.
+          # shellcheck disable=SC2016
           pwsh -NoProfile -Command \
             '$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile("scripts/local/bootstrap.ps1",[ref]$tokens,[ref]$errors) | Out-Null; if ($errors.Count) { exit 1 }'
       - name: Smoke-test both interactive installers non-interactively
@@ -172,17 +174,8 @@ jobs:
           # to this gate - go test only self-attributes coverage to the
           # package under test by default.
           go test ./... -coverpkg=./... -coverprofile=coverage.out
-          # cmd/platform-factory-installer is its own Go module (go.work) since
-          # its extraction, so the root-module run above cannot attribute
-          # its coverage - generate its profile separately and append it
-          # (skipping the repeated `mode:` header) so components.go's tests
-          # keep counting toward the gate below, matching this file's own
-          # documented intent for this package (see the exclusion comment
-          # further down, which only ever meant to exclude main.go, not the
-          # whole package).
-          (cd cmd/platform-factory-installer && GOWORK=off go test ./... -coverpkg=./... -coverprofile=coverage-installer.out)
-          tail -n +2 cmd/platform-factory-installer/coverage-installer.out >> coverage.out
-          # cmd/tui is likewise its own Go module (go.work): cmd/platform-factory
+          # Installer is part of the root module and is already measured.
+          # cmd/tui is a separate Go module (go.work): cmd/platform-factory
           # imports it, so the root-module run above still *instruments*
           # tui.go/view.go/confirm.go (their blocks show up with zero hits,
           # since coverage instrumentation follows the compiled binary's real
@@ -217,7 +210,14 @@ jobs:
           # covered directly, and the glue itself is exercised end to end
           # by the installer smoke-test step above.
           grep -v -E '(^|/)(api/(microvm|pipeline|plugin|vmm)|examples/sdk)/|internal/executor/(sandbox_linux|cgroup_linux|sandboxed)\.go:|internal/hypervisor/kvm/(kvm_vm_linux_amd64|kvm_run_linux_amd64|kvm_linux_boot_amd64)\.go:|internal/ociruntime/(runtime|rootfs_linux|supervisor_linux)\.go:|cmd/platform-factory-runtime/main\.go:|cmd/platform-factory-installer/main\.go:|internal/directboot/run_(linux_amd64|darwin|other)\.go:' coverage.out > coverage.filtered
-          go tool cover -func=coverage.filtered | tee coverage.txt
+          # Preserve the raw all-path measurement. PID-1 boot entrypoints,
+          # TAP ioctls and plugin helpers ending in syscall.Exec cannot be
+          # measured by this unit process; native boot and sandbox jobs verify
+          # them independently. AST filtering retains policy/configuration
+          # functions in the same files (and fails on missing source).
+          go tool cover -func=coverage.out > coverage-all-paths.txt
+          go run scripts/ci/unit-coverage.go -profile coverage.filtered > coverage.unit
+          go tool cover -func=coverage.unit | tee coverage.txt
           coverage=$(awk '/^total:/ {sub(/%/, "", $3); print $3}' coverage.txt)
           awk -v coverage="$coverage" 'BEGIN {exit !(coverage >= 87)}'
       - name: Cross-compile the selected supported target
@@ -248,6 +248,8 @@ jobs:
           name: regression-suite-evidence
           path: |
             coverage.out
+            coverage.unit
+            coverage-all-paths.txt
             coverage.txt
           if-no-files-found: warn
           retention-days: 14
