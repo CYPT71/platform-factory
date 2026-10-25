@@ -1,0 +1,11 @@
+version: 1
+language: go
+artifact: dist/app
+output: dist/oci
+platform: linux/amd64
+entrypoint: /app/service
+profile: static
+user: '65532'
+isolation: container
+include_project: false
+build_command: [go, build, -trimpath, '-ldflags=-buildid=', -o, dist/app, ./src]

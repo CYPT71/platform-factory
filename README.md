@@ -111,6 +111,8 @@ publication, HTTP readiness, scaling, retries and repeated rollback.
 
 - [CLI guide](docs/cli-guide.md) — full command reference, installation,
   testing, CI/CD, Dockerfile consumer, MicroVM support, debugging.
+- [GitLab CI and microVM packaging](docs/gitlab-ci-microvm.md) — recursive input locks,
+  static OCI candidates, native KVM/HVF boot and outbound lifecycle trigger.
 - [Architecture and OCI layout](docs/architecture/oci-layout.md)
 - [Security model](docs/security/model.md)
 - [API compatibility policy](docs/api-compatibility.md)

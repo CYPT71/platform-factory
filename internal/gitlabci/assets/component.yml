@@ -1,0 +1,55 @@
+spec:
+  inputs:
+    builder-image:
+      description: 'Trusted image containing pf, Python 3, compiler and pinned dependencies'
+      regex: '^.+@sha256:[a-f0-9]{64}$'
+    config:
+      default: 'pf.ci.json'
+      regex: '^[a-zA-Z0-9_./-]+$'
+    build-runner:
+      default: 'linux'
+    boot-runner:
+      description: 'Dedicated protected native KVM or macOS HVF runner matching the guest architecture'
+      default: 'pf-kvm'
+---
+# Vendor this component; include it locally. Boot jobs require a protected runner.
+stages: [build, package, boot]
+variables:
+  PF_CI_CONFIG: '$[[ inputs.config ]]'
+  GIT_STRATEGY: clone
+pf-build:
+  rules: [{when: on_success}]
+  stage: build
+  timeout: 20 minutes
+  image: '$[[ inputs.builder-image ]]'
+  tags: ['$[[ inputs.build-runner ]]']
+  script:
+    - pf ci run --config "$PF_CI_CONFIG" --phase build
+  artifacts:
+    paths: ['dist/']
+    expire_in: 7 days
+pf-package:
+  rules: [{when: on_success}]
+  stage: package
+  timeout: 20 minutes
+  image: '$[[ inputs.builder-image ]]'
+  tags: ['$[[ inputs.build-runner ]]']
+  needs: [{job: pf-build, artifacts: true}]
+  script:
+    - pf ci run --config "$PF_CI_CONFIG" --phase package
+  artifacts:
+    paths: ['dist/']
+    expire_in: 7 days
+pf-boot:
+  stage: boot
+  # Shell executor: pf is installed by the administrator, never from artifacts.
+  tags: ['$[[ inputs.boot-runner ]]']
+  needs: [{job: pf-package, artifacts: true}]
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_PIPELINE_SOURCE != "merge_request_event"'
+  timeout: 5 minutes
+  script:
+    - pf ci run --config "$PF_CI_CONFIG" --phase boot
+  artifacts:
+    paths: ['dist/microvm/boot.json']
+    expire_in: 7 days

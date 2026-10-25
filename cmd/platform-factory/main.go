@@ -45,6 +45,7 @@ var directCommands = map[string]cliHandler{
 	"compose":           runCompose,
 	"extensions":        runExtensions,
 	"hooks":             runHooks,
+	"ci":                runCI,
 	"diff":              runDiff,
 	"sbom":              runSBOM,
 	"evidence":          runEvidence,
@@ -456,6 +457,7 @@ Common commands:
   platform-factory doctor                  check local tools, runtimes and hardware support
   platform-factory extensions              fifty offline policy analyzers and signed bundles
   platform-factory hooks                   AI lifecycle hooks and isolated autofix PRs
+  platform-factory ci                      Locked GitLab builds and native microVM boot
   platform-factory help --all              show every command, including advanced/low-level ones
 
 Run "platform-factory COMMAND --help" for a command's own options and examples.`)

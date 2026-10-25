@@ -50,3 +50,6 @@ venv/
 /scripts/automation/__pycache__/
 
 /tests/microvm/__pycache__/
+
+/internal/gitlabci/**/__pycache__/
+/internal/gitlabci/__pycache__/

@@ -4,11 +4,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/CYPT71/platform-factory/internal/hooks"
 	"io"
 	"os"
 	"os/exec"
 	"time"
+
+	"github.com/CYPT71/platform-factory/internal/gitlabci"
+	"github.com/CYPT71/platform-factory/internal/hooks"
 )
 
 // run keeps lifecycle hooks around all existing commands. Disabled means no
@@ -30,7 +32,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	command := "unknown"
 	if len(args) > 0 {
 		switch args[0] {
-		case "build", "init", "run", "publish", "deploy", "project", "plan", "freeze", "logs", "events", "rollback", "import", "microvm", "launch", "inspect", "verify", "version", "plugin", "marketplace", "extensions", "pipeline", "doctor", "status", "diff", "sbom", "evidence", "registry", "mcp":
+		case "build", "init", "run", "publish", "deploy", "project", "plan", "freeze", "logs", "events", "rollback", "import", "microvm", "launch", "inspect", "verify", "version", "plugin", "marketplace", "extensions", "ci", "pipeline", "doctor", "status", "diff", "sbom", "evidence", "registry", "mcp":
 			command = args[0]
 		}
 	}
@@ -52,7 +54,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 func runHooks(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" {
-		fmt.Fprintln(stdout, "usage: pf hooks validate --config FILE | emit --config FILE --event EVENT --command NAME --exit-code CODE | autofix --config FILE < incident.json | codex-fixer < context.json")
+		fmt.Fprintln(stdout, "usage: pf hooks validate --config FILE | emit --config FILE --event EVENT --command NAME --exit-code CODE | autofix --config FILE < incident.json | gitlab --config FILE < event.json | codex-fixer < context.json")
 		return 0
 	}
 	if args[0] == "codex-fixer" && len(args) == 1 {
@@ -71,6 +73,12 @@ func runHooks(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
+	case "gitlab":
+		script, err := gitlabci.Assets.ReadFile("assets/trigger.py")
+		if err != nil {
+			return 1
+		}
+		return runPythonHook(script, []string{"--config", *config}, os.Stdin, stdout, stderr)
 	case "validate":
 		cfg, err := hooks.Load(*config)
 		if err != nil {

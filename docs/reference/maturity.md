@@ -58,8 +58,8 @@ summarized from.
 | Capability | Maturity | Notes |
 | --- | --- | --- |
 | KVM (Linux/amd64) | Stable | Boots a real kernel against real hardware in CI, exercised through Podman/Docker/containerd |
-| HVF (macOS/arm64) | Beta | Boots a real arm64 Linux kernel against native Apple virtualization in CI and separately executes a Linux/amd64 probe through Rosetta 2 inside that guest; it still has no multi-runtime exercise comparable to KVM |
-| KVM (Linux/arm64) | Alpha | Code exists (`internal/hypervisor/kvm` has amd64-specific boot files); not CI-tested |
+| HVF (macOS/arm64) | Beta | Real ARM64 boot and Rosetta guest execution verified on an entitled local Mac. Hosted macOS runners can exercise fallback contracts without exposing virtualization; a green hosted job alone is not native boot evidence. No multi-runtime exercise comparable to KVM |
+| KVM (Linux/arm64) | Unsupported direct boot | The shipped direct-boot backend is Linux/amd64; ARM64 guests need a macOS/arm64 HVF runner. |
 | WHPX (Windows) | Alpha | Code exists (`internal/hypervisor/whpx`); not CI-tested; tracked in the roadmap as "non-blocking" |
 | `internal/hypervisor/virtio` | Alpha | Configuration stubs, no real virtio protocol implementation yet (per the implementation roadmap's 2026-08-03 audit) |
 | `internal/hypervisor/sandbox` (seccomp/cgroups/privilege-drop for the VMM host process) | Beta | Wired into `cmd/platform-factory-runtime`: `no_new_privs` and strict classic-BPF seccomp are applied; PID/IPC/UTS namespaces, cgroup limits, and current plus bounding capability drops are probe-gated (skip cleanly on a host without the required privilege). Mount/network namespaces remain open while host rootfs/TAP resources are opened after confinement. Linux CI validates the namespaced lifecycle. See Threat Model T22. |

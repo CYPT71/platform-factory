@@ -35,6 +35,7 @@ jobs:
           set -euo pipefail
           test -z "$(find api cmd conformance examples internal sdk tests -type f -name '*.go' -print0 | xargs -0 gofmt -l)"
           python3 -m unittest discover -s scripts/ci -p 'test_unit_coverage.py'
+          python3 -m unittest discover -s internal/gitlabci -p 'test_*.py'
           go vet ./...
           go test ./...
           # Exercise the installer from its public command directory too;
