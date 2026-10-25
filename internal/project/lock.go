@@ -230,19 +230,35 @@ func (loaded Loaded) AdjacentLockPath() string {
 }
 
 func (loaded Loaded) verifyLocalPins(pins []LockedInput) error {
+	root, err := os.OpenRoot(loaded.Root)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	for _, pin := range pins {
 		localName := filepath.FromSlash(pin.Name)
 		if filepath.IsAbs(localName) || filepath.ToSlash(filepath.Clean(localName)) != pin.Name || pin.Name == "." || pin.Name == ".." || strings.HasPrefix(pin.Name, "../") {
 			return fmt.Errorf("locked input %q is not a confined relative path", pin.Name)
 		}
-		filename := filepath.Join(loaded.Root, localName)
-		info, err := os.Lstat(filename)
+		for i := range strings.Split(pin.Name, "/") {
+			ancestor := strings.Join(strings.Split(pin.Name, "/")[:i+1], "/")
+			info, err := root.Lstat(ancestor)
+			if err != nil || info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("locked input %q has an unsafe ancestor", pin.Name)
+			}
+		}
+		info, err := root.Lstat(localName)
 		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("locked input %q is missing or unsafe", pin.Name)
 		}
-		file, err := os.Open(filename)
+		file, err := root.Open(localName)
 		if err != nil {
 			return err
+		}
+		opened, err := file.Stat()
+		if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+			file.Close()
+			return fmt.Errorf("locked input %q changed during open", pin.Name)
 		}
 		hash := sha256.New()
 		_, copyErr := io.Copy(hash, file)

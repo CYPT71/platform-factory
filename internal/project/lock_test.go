@@ -113,3 +113,17 @@ func TestLoadLockRejectsUntrustedInput(t *testing.T) {
 		t.Fatal("expected symlink rejection")
 	}
 }
+
+func TestLockedInputRejectsEscapingAncestor(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "file"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	loaded := Loaded{Root: root}
+	if err := loaded.verifyLocalPins([]LockedInput{{Name: "link/file", Digest: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}}); err == nil {
+		t.Fatal("accepted input outside project through ancestor symlink")
+	}
+}
