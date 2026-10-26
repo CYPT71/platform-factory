@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { evaluate, render, isPfBuild } = require('../scripts/pf-freeze-guard.js');
+const { evaluate, render, isPfBuild, findProjectRoot } = require('../scripts/pf-freeze-guard.js');
 
 const SCRIPT = path.join(__dirname, '..', 'scripts', 'pf-freeze-guard.js');
 
@@ -41,8 +41,24 @@ test('no-op outside a Platform Factory project', () => {
 test('post-edit of a manifest reminds to freeze', () => {
   const { root, manifest } = project();
   const r = evaluate({ cwd: root, tool_name: 'Write', tool_input: { file_path: manifest } });
-  assert.match(r.context, /pf freeze/);
+  assert.match(r.context, /pf project freeze/);
   assert.equal(r.event, 'PostToolUse');
+});
+
+test('a freshly initialised project (pf.yaml, no .platform-factory yet) is recognised', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pf-init-'));
+  fs.writeFileSync(path.join(root, 'pf.yaml'), 'version: 1\n');
+  const manifest = path.join(root, 'package-lock.json');
+  fs.writeFileSync(manifest, '{}');
+  const r = evaluate({ cwd: root, tool_name: 'Edit', tool_input: { file_path: manifest } });
+  assert.match(r.context, /pf project freeze/);
+  // never frozen: a build is left to pf itself to report
+  assert.equal(evaluate({ cwd: root, tool_name: 'Bash', tool_input: { command: 'pf build' } }), null);
+});
+
+test('messages use forward slashes on every OS', () => {
+  const { root, manifest } = project();
+  assert.match(evaluate({ cwd: root, tool_name: 'Edit', tool_input: { file_path: manifest } }).context, /\.platform-factory\/freeze\.lock\.json/);
 });
 
 test('post-edit of a non-manifest is silent', () => {
@@ -54,7 +70,7 @@ test('pf build with a stale lock warns, or denies in strict mode', () => {
   const { root } = project({ manifestNewer: true });
   const input = { cwd: root, tool_name: 'Bash', tool_input: { command: 'pf build .' } };
   assert.match(evaluate(input, {}).context, /package-lock\.json/);
-  assert.match(evaluate(input, { PF_GUARD_STRICT: '1' }).deny, /pf freeze/);
+  assert.match(evaluate(input, { PF_GUARD_STRICT: '1' }).deny, /pf project freeze/);
 });
 
 test('pf build with a fresh or missing lock is silent', () => {
@@ -88,5 +104,21 @@ test('CLI end-to-end prints JSON for a manifest edit', () => {
   const input = JSON.stringify({ cwd: root, tool_name: 'Edit', tool_input: { file_path: manifest } });
   const r = spawnSync(process.execPath, [SCRIPT], { input, encoding: 'utf8' });
   assert.equal(r.status, 0);
-  assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, /pf freeze/);
+  assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, /pf project freeze/);
+});
+
+test('~/.platform-factory (pf user plugin dir) is not mistaken for a project', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pf-home-'));
+  fs.mkdirSync(path.join(home, '.platform-factory'));
+  fs.mkdirSync(path.join(home, 'work'));
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  try {
+    // The fake home holds only pf's per-user dir: it must not be reported as a project root.
+    const root = findProjectRoot(path.join(home, 'work'));
+    assert.notEqual(root && fs.realpathSync.native(root), fs.realpathSync.native(home));
+  } finally {
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  }
 });

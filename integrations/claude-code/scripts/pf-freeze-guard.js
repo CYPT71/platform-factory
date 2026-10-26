@@ -8,13 +8,13 @@
  * dependency manifests of a Platform Factory project while Claude Code edits it.
  *
  *   PostToolUse (Edit|Write|MultiEdit): a dependency manifest was changed ->
- *     remind Claude to run `pf freeze`.
+ *     remind Claude to run `pf project freeze`.
  *   PreToolUse  (Bash): `pf build|publish|launch|deploy` is about to run while
  *     a manifest is newer than the freeze lock -> warn (or deny in strict mode).
  *
  * The hook NEVER executes `pf` or any project code. It only reads file
  * metadata and prints a JSON decision on stdout. It is a no-op outside a
- * Platform Factory project (no `.platform-factory/` directory).
+ * Platform Factory project (no pf.yaml-style config and no `.platform-factory/`).
  *
  * Environment:
  *   PF_GUARD=off      disable the hook entirely
@@ -24,9 +24,11 @@
  */
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const LOCK_REL = path.join('.platform-factory', 'freeze.lock.json');
+const LOCK_DISPLAY = '.platform-factory/freeze.lock.json'; // same on every OS in messages
 
 // Manifests/lockfiles that feed `pf freeze` (see docs/cli-guide.md).
 const MANIFESTS = new Set([
@@ -39,10 +41,32 @@ const MANIFESTS = new Set([
 
 const BUILD_VERBS = new Set(['build', 'publish', 'launch', 'deploy']);
 
+// Project config names accepted by pf (internal/project/config.go ConfigNames).
+// `pf init` writes pf.yaml; .platform-factory/ only appears after the first freeze.
+const CONFIG_NAMES = [
+  'pf.yaml', 'pf.yml',
+  '.config_image.yaml', '.config_image.yml',
+  '.config_img.yaml', '.config_img.yml',
+  '.config_image.json', '.config_img.json',
+  'platform-factory.yaml', 'platform-factory.yml',
+];
+
+// Resolves Windows 8.3 short names and symlinks so paths compare reliably.
+function realPath(p) {
+  try { return fs.realpathSync.native(p); } catch { return path.resolve(p); }
+}
+
+function isProjectRoot(dir) {
+  // ~/.platform-factory is pf's per-user plugin directory, not a project.
+  const isHome = realPath(dir) === realPath(os.homedir());
+  return (!isHome && fs.existsSync(path.join(dir, '.platform-factory')))
+    || CONFIG_NAMES.some((name) => fs.existsSync(path.join(dir, name)));
+}
+
 function findProjectRoot(start) {
   let dir = path.resolve(start || process.cwd());
   for (;;) {
-    if (fs.existsSync(path.join(dir, '.platform-factory'))) return dir;
+    if (isProjectRoot(dir)) return dir;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -91,7 +115,7 @@ function evaluate(input, env = process.env) {
     if (!isManifest(args.file_path)) return null;
     return {
       event: 'PostToolUse',
-      context: `[pf-freeze-guard] ${path.basename(args.file_path)} changed: run \`pf freeze\` to refresh ${LOCK_REL} before \`pf build\`.`,
+      context: `[pf-freeze-guard] ${path.basename(args.file_path)} changed: run \`pf project freeze\` to refresh ${LOCK_DISPLAY} before \`pf build\`.`,
     };
   }
 
@@ -100,7 +124,7 @@ function evaluate(input, env = process.env) {
     if (lockTime === null) return null; // never frozen: pf itself reports it
     const stale = staleManifests(root, lockTime);
     if (stale.length === 0) return null;
-    const message = `[pf-freeze-guard] ${stale.join(', ')} newer than ${LOCK_REL}: run \`pf freeze\` first.`;
+    const message = `[pf-freeze-guard] ${stale.join(', ')} newer than ${LOCK_DISPLAY}: run \`pf project freeze\` first.`;
     return env.PF_GUARD_STRICT === '1'
       ? { event: 'PreToolUse', deny: message }
       : { event: 'PreToolUse', context: message };
