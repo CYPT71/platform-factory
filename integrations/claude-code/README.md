@@ -5,13 +5,14 @@ your dependency manifests while an agent edits a Platform Factory project.
 
 | Event | Trigger | Behavior |
 |-------|---------|----------|
-| `PostToolUse` | `Edit`/`Write`/`MultiEdit` on `package-lock.json`, `go.sum`, `requirements.txt`, `Cargo.lock`, `pom.xml`, … | Tells the agent to run `pf freeze`. |
+| `PostToolUse` | `Edit`/`Write`/`MultiEdit` on `package-lock.json`, `go.sum`, `requirements.txt`, `Cargo.lock`, `pom.xml`, … | Tells the agent to run `pf project freeze`. |
 | `PreToolUse` | `Bash` running `pf build\|publish\|launch\|deploy` | Warns when a manifest is newer than the freeze lock; denies with `PF_GUARD_STRICT=1`. |
 
 The hook never runs `pf` or project code (consistent with the
 [AI hooks policy](../../docs/ai-hooks-and-autofix.md): a cloned repository must
-not activate executables on its own). It is a no-op outside a project that has a
-`.platform-factory/` directory, and it fails open on any internal error.
+not activate executables on its own). It is a no-op outside a Platform Factory
+project (a `pf.yaml`-style config from `pf init`, or a `.platform-factory/`
+directory), and it fails open on any internal error.
 
 | Variable | Effect |
 |----------|--------|
