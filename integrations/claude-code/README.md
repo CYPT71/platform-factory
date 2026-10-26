@@ -20,16 +20,24 @@ not activate executables on its own). It is a no-op outside a project that has a
 
 ## Install
 
-Requires Node.js 18+. Pick one:
+Requires Node.js 18+. This directory is a Claude Code plugin
+(`platform-factory-guard`), so `${CLAUDE_PLUGIN_ROOT}` in `hooks/hooks.json`
+resolves to it automatically.
 
-**Standalone** — copy `scripts/pf-freeze-guard.js` somewhere stable and merge
-`hooks/hooks.json` into `~/.claude/settings.json` (or the project's
-`.claude/settings.json`), replacing `${CLAUDE_PLUGIN_ROOT}` with that directory.
+```text
+/plugin marketplace add CYPT71/platform-factory
+/plugin install platform-factory-guard@platform-factory
+```
 
-**With [ECC](https://github.com/affaan-m/everything-claude-code)** — install ECC,
-then add the same two entries to your ECC-managed hooks. The matching ECC skill
-(`platform-factory`) documents the full workflow and is loaded automatically when
-a project contains `.platform-factory/`.
+To try it from a local checkout without installing:
+`claude --plugin-dir integrations/claude-code`.
+
+## Using it with ECC
+
+The plugin is independent of [ECC](https://github.com/affaan-m/everything-claude-code)
+and runs next to ECC's own hooks: both are plain `PreToolUse`/`PostToolUse`
+command hooks, and Claude Code runs all matching hooks. ECC ships a
+`platform-factory` skill that documents the full `pf` workflow and this hook.
 
 ## Test
 
