@@ -113,6 +113,8 @@ publication, HTTP readiness, scaling, retries and repeated rollback.
   testing, CI/CD, Dockerfile consumer, MicroVM support, debugging.
 - [GitLab CI and microVM packaging](docs/gitlab-ci-microvm.md) — recursive input locks,
   static OCI candidates, native KVM/HVF boot and outbound lifecycle trigger.
+- [Claude Code / ECC hook](integrations/claude-code/README.md) — freeze guard
+  that keeps `pf freeze` in sync while an agent edits a project.
 - [Architecture and OCI layout](docs/architecture/oci-layout.md)
 - [Security model](docs/security/model.md)
 - [API compatibility policy](docs/api-compatibility.md)
