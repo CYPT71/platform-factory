@@ -1,0 +1,13 @@
+{
+  "name": "platform-factory-guard",
+  "version": "0.1.0",
+  "description": "Freeze guard hook for Platform Factory projects: keeps .platform-factory/freeze.lock.json in sync while Claude Code edits dependency manifests and runs pf build. Works alongside ECC.",
+  "author": {
+    "name": "CYPT71",
+    "url": "https://github.com/CYPT71"
+  },
+  "homepage": "https://github.com/CYPT71/platform-factory",
+  "repository": "https://github.com/CYPT71/platform-factory",
+  "license": "MIT",
+  "keywords": ["claude-code", "hooks", "oci", "supply-chain", "platform-factory", "ecc"]
+}

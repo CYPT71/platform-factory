@@ -1,0 +1,14 @@
+{
+  "name": "platform-factory",
+  "owner": {
+    "name": "CYPT71",
+    "url": "https://github.com/CYPT71"
+  },
+  "plugins": [
+    {
+      "name": "platform-factory-guard",
+      "source": "./integrations/claude-code",
+      "description": "Freeze guard hook for Platform Factory projects; works alongside ECC."
+    }
+  ]
+}
