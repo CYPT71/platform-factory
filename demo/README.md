@@ -10,6 +10,53 @@ It builds the real CLI and the real Go language plugin from this checkout. The
 application workspace itself starts with only `hello-world/main.go`; no
 pre-generated `pf.yaml`, lock file, container file, or OCI layout is used.
 
+## Recorded terminal demo
+
+The [README animation](../docs/assets/from-zero.gif) was recorded on macOS/arm64
+using the actual CLI and Go language plugin built from this checkout. Commands
+were entered individually in an interactive Bash terminal, including confirmation
+of the initialization plan. The application folder started empty. No demo script
+executed the sequence and no command output was substituted. Only idle pauses
+were shortened in the GIF; the [original terminal recording](../docs/assets/from-zero.cast)
+retains the output and timing.
+
+Prerequisites: install PF with its Go plugin, have the pinned Go toolchain on
+`PATH`, and start Podman. Tool installation and Podman startup happen before
+recording. The recorded target is Linux/amd64; an ARM64 Podman machine needs
+AMD64 execution support. Use a unique project directory so its image reference
+does not collide with an existing local image.
+
+Create an empty directory and enter it, then type these commands individually:
+
+```bash
+ls -A
+export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+cat > main.go <<'GO'
+package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("Hello from Platform Factory!")
+}
+GO
+pf init --engine podman .
+# Review the plan, then enter y at the confirmation prompt.
+clear
+pf launch 2>build.log
+clear
+pf verify --format text .platform-factory/image
+pf sbom --format text app
+pf status --format text .
+```
+
+`pf launch` builds, packages and runs the program, which prints
+`Hello from Platform Factory!`. Verbose build diagnostics remain in `build.log`.
+The final commands verify the retained OCI layout, list the executable's SBOM
+component, and report project/build/evidence readiness. Nothing is published or
+deployed to a cluster; the final status correctly leaves those stages pending.
+The SBOM inventory is not a vulnerability scan.
+
 ## Try PF yourself
 
 For a live presentation, three copy/paste-ready scripts are available:

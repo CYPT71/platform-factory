@@ -14,6 +14,12 @@ not need Docker, Podman, a registry account or a running cluster.
 [![OCI validation](https://github.com/CYPT71/platform-factory/actions/workflows/ci-oci-validation.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-oci-validation.yml?query=branch%3Amain)
 [![Release evidence](https://github.com/CYPT71/platform-factory/actions/workflows/ci-release.yml/badge.svg)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-release.yml)
 
+[![From an empty folder to a running container, verified OCI image and SBOM](docs/assets/from-zero.gif)](demo/README.md#recorded-terminal-demo)
+
+Real terminal recording: commands entered one at a time, from an empty application
+folder to a Go program running in Podman. Idle pauses are shortened.
+[Commands, prerequisites and original recording](demo/README.md#recorded-terminal-demo).
+
 Platform Factory turns a compiled executable into a deterministic OCI image,
 attaches native supply-chain evidence, and runs the result as a hardened
 container or a KVM/HVF microVM — one Go binary, no Docker daemon and no
