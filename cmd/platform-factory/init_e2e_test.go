@@ -51,7 +51,7 @@ func main() { fmt.Println("hello world") }
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantEntries := []string{".git", ".gitignore", ".pf", "deploy", "dist", "main.go", "pf.lock", "pf.yaml", "policies", "reports"}
+	wantEntries := []string{"main.go", "pf.lock", "pf.yaml"}
 	if got := entryNames(entries); strings.Join(got, "\x00") != strings.Join(wantEntries, "\x00") {
 		t.Fatalf("init scaffold=%v want=%v", got, wantEntries)
 	}

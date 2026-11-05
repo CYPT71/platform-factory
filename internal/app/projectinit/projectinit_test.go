@@ -18,7 +18,7 @@ import (
 
 func TestBuildPlanIsExplicitAndDoesNotMutate(t *testing.T) {
 	dir := t.TempDir()
-	plan, err := BuildPlan(dir, Ecosystem{Result: detect.Result{Kind: "go", Evidence: []string{"go.mod"}}, Artifact: "cmd/app/main.go", Confident: true}, nil, testObservations())
+	plan, err := BuildPlanWithOptions(dir, Ecosystem{Result: detect.Result{Kind: "go", Evidence: []string{"go.mod"}}, Artifact: "cmd/app/main.go", Confident: true}, nil, testObservations(), Options{Scaffold: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestBuildPlanWritesBoundedMultiEcosystemInventoryWithoutEnvironmentValues(t
 			{Detection: detect.Result{Kind: "go", Profile: "module", Evidence: []string{"go.mod"}}, BuildCommand: []string{"go", "build", "-o", "app", "."}, Artifact: "app", Dependencies: DependencyState{Mode: "manifest", Manifest: "go.mod", Reason: "go.mod detected"}, Environment: map[string]string{"API_TOKEN": "must-not-leak"}},
 		},
 	}
-	plan, err := BuildPlan(dir, ecosystem, nil, testObservations())
+	plan, err := BuildPlanWithOptions(dir, ecosystem, nil, testObservations(), Options{Scaffold: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +472,7 @@ func TestBuildPlanCoversExistingAndLegacyInputs(t *testing.T) {
 		if err := os.Symlink(outside, filepath.Join(dir, "reports")); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := BuildPlan(dir, Ecosystem{}, nil, testObservations()); err == nil || !strings.Contains(err.Error(), "unsafe") {
+		if _, err := BuildPlanWithOptions(dir, Ecosystem{}, nil, testObservations(), Options{Scaffold: true}); err == nil || !strings.Contains(err.Error(), "unsafe") {
 			t.Fatalf("expected unsafe scaffold rejection, got %v", err)
 		}
 	})

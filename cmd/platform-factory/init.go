@@ -23,7 +23,7 @@ import (
 // so the flag set behind --help (printInitUsage) can never drift from the
 // flag set actually parsed by runInit.
 type initFlags struct {
-	dryRun, assumeYes                                                            *bool
+	dryRun, assumeYes, scaffold                                                  *bool
 	bootDiskOverride, legacyStrategy, languageFlag, artifactFlag, dependencyMode *string
 	runtimeFlag, engineFlag                                                      *string
 	buildCommand                                                                 *string
@@ -61,6 +61,7 @@ func newInitFlagSet(output io.Writer) (*flag.FlagSet, initFlags) {
 		extractTo:        flags.String("extract-to", "", "new destination directory for a tar/tar.gz source archive"),
 		archiveFormat:    flags.String("archive-format", "", "source archive format: tar or tar.gz (requires --extract-to)"),
 		filenameStyle:    flags.String("filename-style", "short", "project filenames: short (pf.yaml/pf.lock) or long (platform-factory.yaml/platform-factory.lock)"),
+		scaffold:         flags.Bool("scaffold", false, "also create starter folders, inspection files, .gitignore and a Git repository"),
 		buildArgs:        &buildArgs,
 	}
 	flags.Var(&buildArgs, "build-arg", "one custom build argument; repeat to preserve argument boundaries")
@@ -68,7 +69,10 @@ func newInitFlagSet(output io.Writer) (*flag.FlagSet, initFlags) {
 }
 
 func printInitUsage(output io.Writer) {
-	fmt.Fprintln(output, `platform-factory init — turn a source directory into a pf.yaml project, without writing anything until you approve the plan
+	fmt.Fprintln(output, `platform-factory init — create a config and lock, without writing anything until you approve the plan
+
+By default only the project configuration and its lock are created. Use
+--scaffold for optional starter folders, inspection files and Git initialization.
 
 Usage:
   platform-factory init [OPTIONS] [DIRECTORY]
@@ -312,7 +316,7 @@ func runInit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 	}
 
-	plan, err := projectinit.BuildPlanWithFilenameStyle(dir, ecosystem, legacyDisks, projectinit.Observe(dir, time.Now()), *filenameStyle)
+	plan, err := projectinit.BuildPlanWithOptions(dir, ecosystem, legacyDisks, projectinit.Observe(dir, time.Now()), projectinit.Options{FilenameStyle: *filenameStyle, Scaffold: *f.scaffold})
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory init: %v\n", err)
 		return 1

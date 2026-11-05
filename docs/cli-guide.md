@@ -314,10 +314,17 @@ Projects may compose multiple local trees/files with `include` and
 Any project using these additional sources must run `pf freeze`; `pf build`
 recomputes size and SHA-256 for every frozen file and refuses missing, added or
 changed inputs before invoking the build command or writing an OCI layout.
-Fresh projects also persist `.pf/build.pipeline.json`. `pf build` strictly
-decodes and validates this DAG—including cycle detection—before freeze or any
-custom command. Existing projects without the file remain supported by
-deriving and validating the equivalent DAG from `pf.yaml` in memory.
+By default, `pf init` adds only `pf.yaml` and `pf.lock` (or the selected long
+filename pair). It does not initialize Git, write `.gitignore`, or create starter
+folders. Runtime, image and build state are created under `.platform-factory/`
+when the corresponding command needs them. Legacy filename migration retains
+its audit record under `.pf/migration.json`.
+
+Use `pf init --scaffold` to opt into Git initialization, starter directories,
+`.gitignore`, and the inspection inventory/DAG under `.pf/`. If
+`.pf/build.pipeline.json` exists, `pf build` strictly decodes and validates it,
+including cycle detection, before freeze or any custom command. Otherwise it
+derives and validates the equivalent DAG from `pf.yaml` in memory.
 
 Docker Save archives have their own explicit verifier:
 

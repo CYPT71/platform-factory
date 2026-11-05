@@ -40,8 +40,10 @@ for stack in go python javascript typescript; do
     "$pf" init --yes . >/dev/null
     test -f pf.yaml
     test -f pf.lock
-	  test -f .pf/inventory.json
-	  test -f .pf/build.pipeline.json
+    test ! -e .pf
+    test ! -e .git
+    test ! -e .gitignore
+    test "$(find . -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = "3"
     "$pf" inspect >/dev/null
   )
 done
@@ -55,7 +57,7 @@ cp "$work_root/projects/go/main.go" "$mixed/main.go"
 cp "$work_root/projects/python/app.py" "$mixed/app.py"
 cp "$work_root/projects/javascript/index.js" "$mixed/index.js"
 printf 'module example.invalid/mixed\ngo 1.24\n' > "$mixed/go.mod"
-"$pf" init --language go --runtime container --yes "$mixed" >/dev/null
+"$pf" init --scaffold --language go --runtime container --yes "$mixed" >/dev/null
 python3 - "$mixed/.pf/inventory.json" "$mixed/.pf/build.pipeline.json" <<'PY'
 import json, sys
 inventory = json.load(open(sys.argv[1]))

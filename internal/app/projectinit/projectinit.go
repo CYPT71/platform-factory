@@ -209,6 +209,22 @@ func BuildPlan(dir string, ecosystem Ecosystem, legacyDisks *project.LegacyDiskC
 // BuildPlanWithFilenameStyle creates exactly one config/lock pair. Keeping the
 // choice explicit avoids aliases that can diverge after the first atomic edit.
 func BuildPlanWithFilenameStyle(dir string, ecosystem Ecosystem, legacyDisks *project.LegacyDiskConfig, observed Observations, filenameStyle string) (Plan, error) {
+	return BuildPlanWithOptions(dir, ecosystem, legacyDisks, observed, Options{FilenameStyle: filenameStyle})
+}
+
+// Options controls optional project scaffolding. The default creates only the
+// configuration and its lock; commands create their output when needed.
+type Options struct {
+	FilenameStyle string
+	Scaffold      bool
+}
+
+// BuildPlanWithOptions plans required files and explicitly requested extras.
+func BuildPlanWithOptions(dir string, ecosystem Ecosystem, legacyDisks *project.LegacyDiskConfig, observed Observations, options Options) (Plan, error) {
+	filenameStyle := options.FilenameStyle
+	if filenameStyle == "" {
+		filenameStyle = "short"
+	}
 	if observed.GeneratedAt.IsZero() {
 		return Plan{}, errors.New("project init: generated-at observation is required")
 	}
@@ -258,32 +274,47 @@ func BuildPlanWithFilenameStyle(dir string, ecosystem Ecosystem, legacyDisks *pr
 		return Plan{}, err
 	}
 	plan = append(plan, Action{kind: ActionWriteFile, path: filepath.Join(dir, lockName), content: renderLockFile(observed.GitCommit, planDigest)})
-	if !exists(filepath.Join(dir, ".gitignore")) {
-		plan = append(plan, Action{kind: ActionWriteFile, path: filepath.Join(dir, ".gitignore"), content: []byte(".pf/\n.platform-factory/\ndist/\nreports/\n")})
-	}
-	for _, name := range []string{".pf", "policies", "deploy", "dist", "reports"} {
-		path := filepath.Join(dir, name)
-		if exists(path) {
-			if err := requireRealDirectory(path); err != nil {
-				return Plan{}, fmt.Errorf("project scaffold %s is unsafe: %w", path, err)
-			}
-			continue
+	if options.Scaffold {
+		if !exists(filepath.Join(dir, ".gitignore")) {
+			plan = append(plan, Action{kind: ActionWriteFile, path: filepath.Join(dir, ".gitignore"), content: []byte(".pf/\n.platform-factory/\ndist/\nreports/\n")})
 		}
-		plan = append(plan, Action{kind: ActionMkdir, path: path})
-		starterName, starterContent := starterFile(name)
-		plan = append(plan, Action{kind: ActionWriteFile, path: filepath.Join(path, starterName), content: starterContent})
+		for _, name := range []string{".pf", "policies", "deploy", "dist", "reports"} {
+			path := filepath.Join(dir, name)
+			if exists(path) {
+				if err := requireRealDirectory(path); err != nil {
+					return Plan{}, fmt.Errorf("project scaffold %s is unsafe: %w", path, err)
+				}
+				continue
+			}
+			plan = append(plan, Action{kind: ActionMkdir, path: path})
+			starterName, starterContent := starterFile(name)
+			plan = append(plan, Action{kind: ActionWriteFile, path: filepath.Join(path, starterName), content: starterContent})
+		}
+	} else if legacyPath != "" {
+		statePath := filepath.Join(dir, ".pf")
+		if exists(statePath) {
+			if err := requireRealDirectory(statePath); err != nil {
+				return Plan{}, err
+			}
+		} else {
+			plan = append(plan, Action{kind: ActionMkdir, path: statePath})
+		}
 	}
 	if legacyPath == "" && len(ecosystem.Inspections) > 0 {
 		inventory, err := renderInventory(ecosystem)
 		if err != nil {
 			return Plan{}, err
 		}
-		plan = append(plan, Action{kind: ActionWriteFile, path: filepath.Join(dir, ".pf", "inventory.json"), content: inventory})
+		if options.Scaffold {
+			plan = append(plan, Action{kind: ActionWriteFile, path: filepath.Join(dir, ".pf", "inventory.json"), content: inventory})
+		}
 		dag, err := renderInitialBuildDAG(ecosystem)
 		if err != nil {
 			return Plan{}, err
 		}
-		plan = append(plan, Action{kind: ActionWriteFile, path: filepath.Join(dir, ".pf", "build.pipeline.json"), content: dag})
+		if options.Scaffold {
+			plan = append(plan, Action{kind: ActionWriteFile, path: filepath.Join(dir, ".pf", "build.pipeline.json"), content: dag})
+		}
 	}
 	if legacyPath != "" {
 		trace := struct {
@@ -313,7 +344,7 @@ func BuildPlanWithFilenameStyle(dir string, ecosystem Ecosystem, legacyDisks *pr
 		if err != nil || (info.Mode()&os.ModeSymlink) != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
 			return Plan{}, fmt.Errorf("existing Git metadata %s is unsafe", gitPath)
 		}
-	} else {
+	} else if options.Scaffold {
 		plan = append(plan, Action{kind: ActionGitInit, path: dir})
 	}
 	result := Plan{Actions: plan, Findings: ecosystem.Inspection.Descriptions()}

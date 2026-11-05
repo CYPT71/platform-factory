@@ -42,10 +42,8 @@ grep -q 'pf.lock' <<<"$review"
 "$work_root/bin/pf" init --yes --engine "$engine" .
 test -f pf.yaml
 test -f pf.lock
-# main.go (already present) plus pf.yaml, pf.lock, .gitignore, .git,
-# and the .pf/policies/deploy/dist/reports scaffold directories pf init
-# --yes creates.
-test "$(find . -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = "10"
+# Init adds only the configuration and lock beside main.go.
+test "$(find . -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = "3"
 
 output="$($work_root/bin/pf launch)"
 image_created=1

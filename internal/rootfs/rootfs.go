@@ -35,6 +35,10 @@ type Options struct {
 	Output    string
 	Platform  string
 	Reference string
+	// FilesOnly extracts verified files without interpreting process metadata.
+	// Use only for data/runtime provisioning, never to launch the image.
+	// Runtime in the result is empty in this mode; archive validation is unchanged.
+	FilesOnly bool
 	// MaxBytes limits total uncompressed layer bytes, including tar
 	// metadata and padding. MaxFiles limits archive entries (not merely
 	// regular files), preventing directory/whiteout header bombs.
@@ -160,9 +164,12 @@ func Convert(opts Options) (result Result, err error) {
 		(config.OS != selected.Platform.OS || config.Architecture != selected.Platform.Architecture) {
 		return Result{}, errors.New("rootfs: config platform does not match manifest descriptor")
 	}
-	runtimeMetadata, err := parseRuntimeMetadata(config)
-	if err != nil {
-		return Result{}, err
+	var runtimeMetadata RuntimeMetadata
+	if !opts.FilesOnly {
+		runtimeMetadata, err = parseRuntimeMetadata(config)
+		if err != nil {
+			return Result{}, err
+		}
 	}
 
 	parent := filepath.Dir(filepath.Clean(opts.Output))

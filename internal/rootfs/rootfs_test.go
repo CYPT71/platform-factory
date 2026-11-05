@@ -765,3 +765,61 @@ func writeTestJSON(t *testing.T, name string, value any) {
 		t.Fatal(err)
 	}
 }
+
+// Base-image process defaults are irrelevant when extracting a runtime, but
+// remain mandatory when converting an image for execution.
+func TestConvertFilesOnlyDoesNotRelaxRuntimeConversion(t *testing.T) {
+	layout := writeTestLayout(t, []testEntry{{name: "hello.txt", body: "runtime data", kind: tar.TypeReg}})
+	var idx index
+	readTestJSON(t, filepath.Join(layout, "index.json"), &idx)
+	var doc manifest
+	if err := json.Unmarshal(readTestBlob(t, layout, idx.Manifests[0].Digest), &doc); err != nil {
+		t.Fatal(err)
+	}
+	var config imageConfig
+	if err := json.Unmarshal(readTestBlob(t, layout, doc.Config.Digest), &config); err != nil {
+		t.Fatal(err)
+	}
+	config.Config.Cmd = []string{"python3"}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Config = writeTestBlob(t, layout, doc.Config.MediaType, raw)
+	raw, err = json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := writeTestBlob(t, layout, idx.Manifests[0].MediaType, raw)
+	idx.Manifests[0].Digest, idx.Manifests[0].Size = updated.Digest, updated.Size
+	writeTestJSON(t, filepath.Join(layout, "index.json"), idx)
+	if _, err := Convert(Options{Layout: layout, Output: filepath.Join(t.TempDir(), "runtime")}); err == nil || !strings.Contains(err.Error(), "Entrypoint") {
+		t.Fatalf("execution accepted relative command: %v", err)
+	}
+	output := filepath.Join(t.TempDir(), "files")
+	result, err := Convert(Options{Layout: layout, Output: output, FilesOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Runtime.Process.Args) != 0 {
+		t.Fatalf("files-only extraction exposed a process: %+v", result.Runtime)
+	}
+	if data, err := os.ReadFile(filepath.Join(output, "hello.txt")); err != nil || string(data) != "runtime data" {
+		t.Fatalf("extracted files: %q %v", data, err)
+	}
+	// Corrupted layers still fail before installing output in files-only mode.
+	layerPath := testBlobPath(layout, doc.Layers[0].Digest)
+	if err := os.Chmod(layerPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layerPath, []byte("corrupted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rejected := filepath.Join(t.TempDir(), "rejected")
+	if _, err := Convert(Options{Layout: layout, Output: rejected, FilesOnly: true}); err == nil {
+		t.Fatal("files-only extraction accepted a corrupted layer")
+	}
+	if _, err := os.Stat(rejected); !os.IsNotExist(err) {
+		t.Fatalf("failed extraction installed output: %v", err)
+	}
+}

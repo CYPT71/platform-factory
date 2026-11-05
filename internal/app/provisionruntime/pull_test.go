@@ -64,6 +64,7 @@ func buildFakeSingleLayerImage(t *testing.T) (manifestDigest string, manifestByt
 	configBytes, err := json.Marshal(map[string]any{
 		"os": "linux", "architecture": "amd64",
 		"rootfs": map[string]any{"type": "layers", "diff_ids": []string{diffID}},
+		"config": map[string]any{"Cmd": []string{"python3"}},
 	})
 	if err != nil {
 		t.Fatal(err)

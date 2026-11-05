@@ -136,7 +136,7 @@ func pullImageRootfsWithClient(ctx context.Context, client *registry.Client, ima
 		return "", err
 	}
 
-	if _, err := rootfs.Convert(rootfs.Options{Layout: layoutDir, Output: destDir}); err != nil {
+	if _, err := rootfs.Convert(rootfs.Options{Layout: layoutDir, Output: destDir, FilesOnly: true}); err != nil {
 		return "", fmt.Errorf("extract: %w", err)
 	}
 	return selectedDigest, nil

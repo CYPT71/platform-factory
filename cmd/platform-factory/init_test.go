@@ -57,7 +57,7 @@ func TestRunInitExtractsTarSourcesTransactionally(t *testing.T) {
 			if code := runInit(args, nil, &stdout, &stderr); code != 0 {
 				t.Fatalf("code=%d stderr=%s", code, stderr.String())
 			}
-			for _, name := range []string{"app.py", "pf.yaml", "pf.lock", ".pf/inventory.json", ".pf/build.pipeline.json"} {
+			for _, name := range []string{"app.py", "pf.yaml", "pf.lock"} {
 				if _, err := os.Stat(filepath.Join(destination, name)); err != nil {
 					t.Fatalf("missing %s: %v", name, err)
 				}
@@ -411,7 +411,7 @@ func TestRunInitCreatesCompleteSafeProjectScaffold(t *testing.T) {
 	preexisting := filepath.Join(dir, "README.md")
 	writeProjectTestFile(t, preexisting, "pre-existing user file\n", 0o644)
 	var stdout, stderr bytes.Buffer
-	code := runInit([]string{dir}, nil, &stdout, &stderr)
+	code := runInit([]string{"--scaffold", dir}, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
