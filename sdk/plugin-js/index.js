@@ -16,7 +16,7 @@ const CONTENT_TYPE = "application/vnd.platform-factory.rpc.v1+json";
 // docs/api-compatibility.md), never written by writeMessage.
 const LEGACY_CONTENT_TYPE = "application/vnd.secure-oci.rpc.v1+json";
 const PROTOCOL_VERSION = "v1";
-const MAX_MESSAGE_BYTES = 1 << 20;
+const MAX_MESSAGE_BYTES = 512 << 10;
 const CAPABILITY = Object.freeze({
   runtimeStatus: "runtime.status", runtimeLogs: "runtime.logs", runtimeCreate: "runtime.create",
   runtimeStart: "runtime.start", runtimeStop: "runtime.stop", runtimeRestart: "runtime.restart",

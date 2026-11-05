@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -115,5 +116,49 @@ func TestWriteDeterministicTarIsDeterministic(t *testing.T) {
 	}
 	if string(a) != string(b) {
 		t.Fatal("expected two runs over identical input to produce byte-identical output")
+	}
+}
+
+func TestLayerRejectsSymlinkSourceAndUnsafePrefixesBeforeChangingOutput(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "dependency"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(source, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	for _, test := range []struct{ source, prefix string }{{link, "app/deps"}, {source, "../escape"}, {source, "/absolute"}, {source, "."}} {
+		output := filepath.Join(t.TempDir(), "out.tar")
+		if err := os.WriteFile(output, []byte("previous layer"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteDeterministicTar(test.source, test.prefix, output); err == nil {
+			t.Fatalf("accepted source=%q prefix=%q", test.source, test.prefix)
+		}
+		if got, err := os.ReadFile(output); err != nil || string(got) != "previous layer" {
+			t.Fatalf("prior output changed: %q %v", got, err)
+		}
+	}
+}
+
+func TestLayerReplacementPreservesPrivateOutputPermissions(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "dependency"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(t.TempDir(), "layer.tar")
+	if err := os.WriteFile(output, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteDeterministicTar(source, "app/deps", output); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
+		t.Fatalf("private output became %o", info.Mode().Perm())
 	}
 }

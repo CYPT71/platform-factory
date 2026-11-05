@@ -1,8 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/CYPT71/platform-factory/sdk/langplugin"
@@ -67,5 +71,45 @@ func TestRunBuildLayerDelegatesToSharedTarWriter(t *testing.T) {
 	info, err := os.Stat(output)
 	if err != nil || info.Size() == 0 {
 		t.Fatalf("output=%v err=%v", info, err)
+	}
+}
+
+func TestFreezeWithInstalledSDKAndNoExternalPackages(t *testing.T) {
+	if _, err := exec.LookPath("dotnet"); err != nil {
+		t.Skip("dotnet SDK unavailable")
+	}
+	version, err := exec.Command("dotnet", "--version").Output()
+	if err != nil {
+		t.Skipf("dotnet SDK unavailable: %v", err)
+	}
+	major, err := strconv.Atoi(strings.Split(strings.TrimSpace(string(version)), ".")[0])
+	if err != nil || major < 8 {
+		t.Skipf("unsupported SDK version %q", version)
+	}
+	root := t.TempDir()
+	project := fmt.Sprintf(`<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net%d.0</TargetFramework></PropertyGroup></Project>`, major)
+	if err := os.WriteFile(filepath.Join(root, "Fixture.csproj"), []byte(project), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "NuGet.Config"), []byte(`<configuration><packageSources><clear /></packageSources></configuration>`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cwd, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runFreeze([]string{"--root", relative}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "packages.lock.json")); err != nil {
+		t.Fatalf("lock absent: %v", err)
+	}
+	if err := runBuildLayer([]string{"--root", root, "--output", filepath.Join(t.TempDir(), "deps.tar"), "--dest", "app/deps/dotnet"}); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -36,3 +36,9 @@ See `examples/sdk/plugin-csharp` for a complete, runnable example.
 
 The contextual `Handle` overload accepts `(JsonElement, RequestContext)` for
 any `Capabilities.*` value; the SDK owns framing and correlation echo.
+
+## Message size
+
+JSON message bodies are limited to **512 KiB (524,288 UTF-8 bytes)** on reads
+and writes, matching the Go host. Larger payloads are rejected. See the
+[wire compatibility policy](../../docs/api-compatibility.md#plugin-frame-size).

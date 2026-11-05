@@ -89,3 +89,25 @@ Successful validation proves:
 This is the current MVP boundary. Python/Node/.NET plugin inspection and native
 Hello World experiences are tested elsewhere, but a verified Linux runtime
 layer for their OCI launch is still an explicit open item.
+
+## Verify binary packaging without a container engine
+
+From the repository root:
+
+```bash
+./demo/verify-binary-packaging.sh
+```
+
+Prerequisites: the Go version pinned in `go.mod`, Python 3 and enough disk space
+for temporary build outputs. Building the tools may download Go modules on a
+fresh machine. No Docker/Podman engine, registry credentials or cluster is used.
+The script does not install binaries globally, start a workload or publish an
+artifact. Its temporary directory is printed and retained for inspection.
+
+The script builds a Linux/amd64 sample executable, packages that same input
+twice, verifies both OCI layouts and compares their manifest digests. It then
+verifies an untouched copy, appends JSON whitespace to its manifest blob, and
+requires the changed artifact to be refused. This demonstrates deterministic
+packaging and artifact integrity for this fixture. It is not a benchmark,
+a claim that arbitrary source builds are reproducible, or a full signing demo.
+Native backend execution is not exercised by this engine-free proof.

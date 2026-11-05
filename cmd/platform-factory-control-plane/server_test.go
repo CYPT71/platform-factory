@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
 	"fmt"
+	"github.com/CYPT71/platform-factory/internal/cache"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -791,4 +793,124 @@ func TestVerifiedWorkerCompletionRequiresAndChecksProvenanceSignature(t *testing
 			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 		}
 	})
+}
+
+func TestRestoreQuotaUsageAfterRestartWithLowerLimitIsIdempotent(t *testing.T) {
+	plane := control.NewControlPlane(time.Minute)
+	ids := make([]string, 2)
+	for i := range ids {
+		id, err := plane.SubmitLeaseWithTenant("work", "", nil, "", "acme", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = id
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := plane.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := control.LoadControlPlane(time.Minute, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Plane: restored, Scheduler: quota.NewFairScheduler(quota.NewTenantQuota(quota.Quota{MaxParallel: 1}))}
+	for range 2 {
+		if err := server.RestoreQuotaUsage(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := server.Scheduler.GetTenantInfo("acme").ParallelUsed; got != 2 {
+		t.Fatalf("usage=%d", got)
+	}
+	if err := server.reserveTenantSlot("acme"); err == nil {
+		t.Fatal("new work admitted while restored work exceeds limit")
+	}
+	server.releaseTenantSlot(ids[0])
+	server.releaseTenantSlot(ids[0])
+	if err := server.reserveTenantSlot("acme"); err == nil {
+		t.Fatal("duplicate release freed another lease slot")
+	}
+	server.releaseTenantSlot(ids[1])
+	if err := server.reserveTenantSlot("acme"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCASRouteRequiresVerifiedClientAndPersistsVerifiedBlob(t *testing.T) {
+	store, err := cache.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Plane: control.NewControlPlane(time.Minute), CAS: store}
+	routes := server.Routes()
+	data := []byte("worker input")
+	digest := fmt.Sprintf("sha256:%x", sha256.Sum256(data))
+	target := "/cas/blobs/" + digest
+	request := func(method string, verified bool, body []byte) *httptest.ResponseRecorder {
+		req := authenticatedRequest(method, target, "client", nil)
+		if !verified {
+			req.TLS = nil
+		}
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		req.ContentLength = int64(len(body))
+		rec := httptest.NewRecorder()
+		routes.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := request(http.MethodPut, false, data); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated upload: %d", rec.Code)
+	}
+	if rec := request(http.MethodPut, true, []byte("tampered")); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad digest: %d", rec.Code)
+	}
+	if rec := request(http.MethodPut, true, data); rec.Code != http.StatusCreated {
+		t.Fatalf("upload: %d %s", rec.Code, rec.Body)
+	}
+	if rec := request(http.MethodGet, false, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated download: %d", rec.Code)
+	}
+	if rec := request(http.MethodGet, true, nil); rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), data) {
+		t.Fatalf("download: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCompletionBeforeTenantRegistrationDoesNotLeakQuota(t *testing.T) {
+	for _, terminal := range []string{"complete", "cancel"} {
+		t.Run(terminal, func(t *testing.T) {
+			plane := control.NewControlPlane(time.Minute)
+			server := &Server{Plane: plane, Scheduler: quota.NewFairScheduler(quota.NewTenantQuota(quota.Quota{MaxParallel: 1}))}
+			if err := server.reserveTenantSlot("acme"); err != nil {
+				t.Fatal(err)
+			}
+			id, err := plane.SubmitLeaseWithTenant("work", "", nil, "", "acme", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Deterministically exercise the scheduling interval between making
+			// the lease visible and registering its reserved tenant slot.
+			if terminal == "complete" {
+				if err := plane.RegisterWorker("worker", "linux/amd64"); err != nil {
+					t.Fatal(err)
+				}
+				if _, ok, err := plane.NextLease("worker"); err != nil || !ok {
+					t.Fatalf("next: %v %v", ok, err)
+				}
+				if err := plane.CompleteLease("worker", id, "done"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := plane.CancelLease("operator", id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			server.releaseTenantSlot(id)
+			server.rememberTenantSlot(id, "acme")
+			if got := server.Scheduler.GetTenantInfo("acme").ParallelUsed; got != 0 {
+				t.Fatalf("terminal lease leaked %d slots", got)
+			}
+			if err := server.reserveTenantSlot("acme"); err != nil {
+				t.Fatalf("new work remains blocked: %v", err)
+			}
+		})
+	}
 }

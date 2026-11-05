@@ -50,31 +50,34 @@ type Server struct {
 	// test gets.
 	Scheduler *quota.FairScheduler
 
-	// leaseTenant remembers which tenant a still-open lease was submitted
-	// for, so its concurrency slot can be released on completion or
-	// cancellation. This is intentionally in-memory only, not persisted
-	// in control.Lease or the durable snapshot: a control-plane restart
-	// resets in-flight quota accounting along with it, which is an
-	// accepted limitation of this first integration, not a durability
-	// promise.
+	// leaseTenant records open durable leases whose concurrency slots are held.
+	// Rebuilt by RestoreQuotaUsage before requests are served.
 	tenantMu    sync.Mutex
 	leaseTenant map[string]quota.TenantID
 }
 
-// RestoreQuotaUsage rebuilds ephemeral counters from durable open leases.
+// RestoreQuotaUsage rebuilds counters from durable open leases before serving.
+// It is idempotent and counts existing leases even when a limit was lowered.
 func (s *Server) RestoreQuotaUsage() error {
 	if s.Scheduler == nil {
 		return nil
 	}
+	usage := make(map[quota.TenantID]int)
+	leases := make(map[string]quota.TenantID)
 	for _, lease := range s.Plane.Leases() {
 		if lease.Tenant == "" || (lease.State != control.LeasePending && lease.State != control.LeaseAssigned) {
 			continue
 		}
-		if err := s.Scheduler.Schedule(quota.TenantID(lease.Tenant), quota.ResourceTypeParallel, 1); err != nil {
-			return fmt.Errorf("restore quota usage for lease %s: %w", lease.ID, err)
-		}
-		s.rememberTenantSlot(lease.ID, lease.Tenant)
+		tenant := quota.TenantID(lease.Tenant)
+		usage[tenant]++
+		leases[lease.ID] = tenant
 	}
+	if err := s.Scheduler.RestoreParallelUsage(usage); err != nil {
+		return fmt.Errorf("restore quota usage: %w", err)
+	}
+	s.tenantMu.Lock()
+	s.leaseTenant = leases
+	s.tenantMu.Unlock()
 	return nil
 }
 
@@ -127,6 +130,15 @@ func (s *Server) rememberTenantSlot(leaseID, tenant string) {
 		s.leaseTenant = make(map[string]quota.TenantID)
 	}
 	s.leaseTenant[leaseID] = quota.TenantID(tenant)
+	// A worker may finish (or an operator cancel) immediately after the lease
+	// becomes visible, before registration reaches this point. Reconcile under
+	// the same lock used by terminal release: either this check releases the
+	// reservation, or the terminal handler observes the registered mapping.
+	if lease, ok := s.Plane.LeaseStatus(leaseID); ok &&
+		(lease.State == control.LeaseCompleted || lease.State == control.LeaseCanceled) {
+		delete(s.leaseTenant, leaseID)
+		s.Scheduler.Release(quota.TenantID(tenant), quota.ResourceTypeParallel, 1)
+	}
 	s.tenantMu.Unlock()
 }
 
@@ -163,7 +175,16 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /lease/status", s.handleLeaseStatus)
 	mux.HandleFunc("GET /workers", s.handleWorkers)
 	if s.CAS != nil {
-		mux.Handle("/cas/blobs/", http.StripPrefix("/cas/blobs/", cache.BlobHandler(s.CAS, cache.DefaultRemoteBlobLimit)))
+		blobs := http.StripPrefix("/cas/blobs/", cache.BlobHandler(s.CAS, cache.DefaultRemoteBlobLimit))
+		mux.Handle("/cas/blobs/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Shared CAS has the same CA trust domain as operator submissions.
+			// Also enforce authentication when Routes is embedded by another server.
+			if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.VerifiedChains[0]) == 0 || r.TLS.VerifiedChains[0][0] == nil {
+				writeError(w, http.StatusUnauthorized, errors.New("verified mTLS client certificate required"))
+				return
+			}
+			blobs.ServeHTTP(w, r)
+		}))
 	}
 	return mux
 }

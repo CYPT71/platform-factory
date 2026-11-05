@@ -23,7 +23,7 @@ CONTENT_TYPE = "application/vnd.platform-factory.rpc.v1+json"
 # docs/api-compatibility.md), never written by write_message.
 LEGACY_CONTENT_TYPE = "application/vnd.secure-oci.rpc.v1+json"
 PROTOCOL_VERSION = "v1"
-_MAX_MESSAGE_BYTES = 1 << 20
+_MAX_MESSAGE_BYTES = 512 << 10
 
 Handler = Callable[[Dict[str, Any]], Dict[str, Any]]
 ContextHandler = Callable[[Dict[str, Any], "RequestContext"], Dict[str, Any]]
@@ -63,7 +63,7 @@ class RPCError(Exception):
 class ProtocolError(Exception):
     """A framing or transport-level error: malformed headers, an
     unsupported Content-Type, a truncated body, or a body over the
-    1 MiB limit."""
+    512 KiB limit."""
 
 
 def write_message(output: BinaryIO, value: Dict[str, Any]) -> None:

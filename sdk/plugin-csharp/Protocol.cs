@@ -36,7 +36,7 @@ public sealed class RpcException : Exception
 
 /// <summary>ProtocolException reports a framing or transport-level
 /// error: malformed headers, an unsupported Content-Type, a truncated
-/// body, or a body over the 1 MiB limit.</summary>
+/// body, or a body over the 512 KiB limit.</summary>
 public sealed class ProtocolException : Exception
 {
     public ProtocolException(string message) : base(message) { }
@@ -53,7 +53,7 @@ public sealed class Server
     /// window (see docs/api-compatibility.md), never written.</summary>
     public const string LegacyContentType = "application/vnd.secure-oci.rpc.v1+json";
     public const string ProtocolVersion = "v1";
-    private const int MaxMessageBytes = 1 << 20;
+    private const int MaxMessageBytes = 512 << 10;
 
     private readonly string _name;
     private readonly string _version;

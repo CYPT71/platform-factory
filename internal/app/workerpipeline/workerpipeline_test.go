@@ -29,6 +29,113 @@ func TestExecutorRunsARealStage(t *testing.T) {
 	}
 }
 
+func TestExecutorRejectsParentTraversalBeforeMaterialization(t *testing.T) {
+	for _, tc := range []struct {
+		name, workdir, target string
+	}{
+		{"workdir parent", "../escaped", ""},
+		{"workdir ancestor", "../../escaped", ""},
+		{"blob parent", "lease", "../escaped"},
+		{"blob ancestor", "lease", "../../escaped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "parent", "root")
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			store, err := cache.Open(filepath.Join(base, "cas"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			descriptor, err := store.Put(strings.NewReader("must stay in the workspace"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pulls := 0
+			execute, err := Executor(root, store, func(context.Context, cache.Descriptor) error {
+				pulls++
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := LeasePayload{APIVersion: LeaseAPIVersion, Workdir: tc.workdir,
+				Pipeline: json.RawMessage(`{"api_version":"platform-factory.dev/v1","name":"bounded","stages":[{"id":"build","command":{"executable":"sh","args":["-c","printf built > artifact"]},"network":"none"}]}`)}
+			outside := filepath.Join(root, tc.workdir)
+			if tc.target != "" {
+				payload.Blobs = []LeaseBlob{{Descriptor: descriptor, Target: tc.target}}
+				outside = filepath.Join(outside, tc.target)
+			}
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := execute(context.Background(), string(raw)); err == nil || !strings.Contains(err.Error(), "clean relative path") {
+				t.Errorf("traversing path must be rejected before execution: %v", err)
+			}
+			if pulls != 0 {
+				t.Errorf("invalid path triggered %d CAS fetches", pulls)
+			}
+			if _, err := os.Lstat(outside); !os.IsNotExist(err) {
+				t.Errorf("traversal created an outside path: %s (%v)", outside, err)
+			}
+		})
+	}
+}
+
+func TestExecutorRejectsEscapingWorkspaceSymlink(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "redirect")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	execute, err := Executor(root, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := `{"api_version":"platform-factory.dev/worker-pipeline/v1","workdir":"redirect/lease","pipeline":{"api_version":"platform-factory.dev/v1","name":"bounded","stages":[{"id":"build","command":{"executable":"sh","args":["-c","printf built > artifact"]},"network":"none"}]}}`
+	if _, err := execute(context.Background(), payload); err == nil {
+		t.Error("workspace creation followed a symlink outside the root")
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "lease")); !os.IsNotExist(err) {
+		t.Errorf("outside workspace was created: %v", err)
+	}
+}
+
+func TestExecutorRejectsEscapingBlobSymlink(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	store, err := cache.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := store.Put(strings.NewReader("must stay in the workspace"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	execute, err := Executor(root, store, func(context.Context, cache.Descriptor) error {
+		if err := os.Symlink(outside, filepath.Join(root, "lease", "redirect")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(LeasePayload{APIVersion: LeaseAPIVersion, Workdir: "lease",
+		Pipeline: json.RawMessage(`{"api_version":"platform-factory.dev/v1","name":"bounded","stages":[{"id":"build","command":{"executable":"sh","args":["-c","printf built > artifact"]},"network":"none"}]}`),
+		Blobs:    []LeaseBlob{{Descriptor: descriptor, Target: "redirect/escaped"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := execute(context.Background(), string(payload)); err == nil {
+		t.Error("blob materialization followed a symlink outside the workspace")
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "escaped")); !os.IsNotExist(err) {
+		t.Errorf("outside blob was created: %v", err)
+	}
+}
+
 func TestExecutorRejectsHostilePayloads(t *testing.T) {
 	root := t.TempDir()
 	execute, err := Executor(root, nil, nil)
@@ -70,9 +177,9 @@ func TestExecutorPullsVerifiedCASInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pipeline := json.RawMessage(`{"api_version":"platform-factory.dev/v1","name":"cas-worker","stages":[{"id":"build","command":{"executable":"sh","args":["-c","cat input.txt > artifact"]},"network":"none"}]}`)
+	pipeline := json.RawMessage(`{"api_version":"platform-factory.dev/v1","name":"cas-worker","stages":[{"id":"build","command":{"executable":"sh","args":["-c","cat src/input.txt > artifact"]},"network":"none"}]}`)
 	payload, _ := json.Marshal(LeasePayload{APIVersion: LeaseAPIVersion, Workdir: "lease-cas", Pipeline: pipeline,
-		Blobs: []LeaseBlob{{Descriptor: descriptor, Target: "input.txt"}}})
+		Blobs: []LeaseBlob{{Descriptor: descriptor, Target: "src/input.txt"}}})
 	if _, err := execute(context.Background(), string(payload)); err != nil {
 		t.Fatal(err)
 	}

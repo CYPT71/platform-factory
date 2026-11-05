@@ -47,3 +47,9 @@ See `examples/sdk/plugin-python` for the complete, runnable example.
 For arbitrary capabilities, `handle_context` supplies native dictionaries and
 an immutable `RequestContext`; `CAPABILITY` provides standard names. The SDK
 owns framing and TraceID/OperationID correlation.
+
+## Message size
+
+JSON message bodies are limited to **512 KiB (524,288 UTF-8 bytes)** on reads
+and writes, matching the Go host. Larger payloads are rejected. See the
+[wire compatibility policy](../../docs/api-compatibility.md#plugin-frame-size).

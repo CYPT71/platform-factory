@@ -124,13 +124,18 @@ func TestConfirmDefaultsAnEmptyTagToLatest(t *testing.T) {
 	if !got.result.Confirmed {
 		t.Fatalf("expected confirmation, got %+v", got.result)
 	}
-	// Confirm itself (not Update) applies the "latest" default - verify
-	// the same logic Confirm runs after tea.NewProgram returns.
-	result := got.result
-	if result.Tag == "" {
-		result.Tag = "latest"
+	if got.result.Tag != "latest" {
+		t.Fatalf("tag=%q", got.result.Tag)
 	}
-	if result.Tag != "latest" {
-		t.Fatalf("tag=%q", result.Tag)
+}
+
+func TestEmptyTagPreviewMatchesConfirmedDefault(t *testing.T) {
+	m := newTestModel("service", "  ")
+	if !strings.Contains(m.View(), "service:latest") {
+		t.Fatal("preview omits effective tag")
+	}
+	m.Update(key("enter"))
+	if m.result.Tag != "latest" {
+		t.Fatalf("tag=%q", m.result.Tag)
 	}
 }

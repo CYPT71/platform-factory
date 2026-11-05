@@ -4,26 +4,18 @@ This advanced example needs three certificate identities issued by one test
 CA: a server certificate, a worker certificate whose Organization contains
 `worker`, and the CA certificate. Do not reuse development keys in production.
 
-Start the mutually authenticated control plane and a worker with real
-capability, cache-locality and load declarations:
+For real inline-pipeline execution, follow the
+[distributed worker guide](../../docs/distributed-builds.md). It starts both
+processes with a real workspace root and submits `submit-lease.json`, which
+runs `sh -c 'printf built > artifact'`. The worker must advertise `linux/amd64`
+for that fixture; edit `required_platform` to match another actual worker.
+Use a fresh inner `workdir` for each execution.
 
-```sh
-go run ./cmd/platform-factory-control-plane \
-  -listen 127.0.0.1:8443 -cert server.pem -key server-key.pem -ca ca.pem \
-  -state-file /tmp/platform-factory-control.json \
-  -audit-file /tmp/platform-factory-audit.jsonl
-
-go run ./cmd/platform-factory-worker \
-  -control-plane https://127.0.0.1:8443 \
-  -cert worker.pem -key worker-key.pem -ca ca.pem \
-  -platform linux/amd64 -capabilities kvm,network \
-  -cached-content sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  -max-parallel 2
-```
-
-`register-worker.json` and `submit-lease.json` show the strict wire payloads.
-The worker identity is always taken from the verified certificate CommonName;
-an ID in JSON is never trusted.
+`register-worker.json` illustrates the registration shape; a running worker
+registers itself. JSON identity fields never replace the verified certificate
+CommonName. Submit, status and cancel requests also require a client
+certificate whose Organization contains `worker`; the filename `operator.pem`
+below does not grant a distinct operator role.
 
 To stop pending or running work, post `cancel-lease.json` with an authenticated
 client certificate:
@@ -46,5 +38,7 @@ verified before the control plane appends after a restart, so modification,
 reordering and incomplete writes fail closed.
 
 Expected result: the worker registers as `linux/amd64`, runs at most two
-leases concurrently, rejects work requiring unknown capabilities, and prefers
-the supplied cached digest when multiple leases are eligible.
+leases concurrently and creates `build-01/artifact` containing `built`. The
+submission does not require KVM or a CAS hub. Additional scheduling constraints
+can be supplied explicitly; they are declarations, not hardware or isolation
+attestations.

@@ -83,12 +83,14 @@ Docker/Podman or Kubernetes client.
 
 The v2 milestone adds a language-neutral pipeline engine reachable from
 the shipped CLI. `platform-factory pipeline plan PIPELINE.json` validates a
-`platform-factory.dev/v1alpha1` document and prints its stages, dependency
+`platform-factory.dev/v1` document and prints its stages, dependency
 levels, canonical fingerprint and required-vs-available capabilities;
 `platform-factory pipeline run` executes the DAG with a continuous ready-set
 scheduler (independent branches overlap), materializes declared
 artifacts between stages with consumption-time digest verification, and
 writes a `platform-factory.dev/journal/v1` result journal.
+The earlier `v1alpha1` and `v1beta1` wire formats remain accepted for migration;
+new documents should use `v1`. See the [compatibility policy](api-compatibility.md).
 
 On Linux the stage executor runs each stage in fresh user, mount, PID,
 network, IPC and UTS namespaces: writes are confined to the stage root,
@@ -157,11 +159,14 @@ KVM/HVF MicroVMs, containerd/Kubernetes, distributed scheduling and structured
 observability.
 
 `platform-factory detect PATH` inspects inputs without executing them and
-emits JSON. It recognizes static and dynamic ELF files, `amd64`/`arm64`,
-glibc/musl interpreters, native dependencies, shebang scripts, Python and
-Node lockfiles, JAR archives and .NET assemblies. A directory matching more
-than one ecosystem is reported as ambiguous and returns exit code 2 unless
-the caller explicitly passes `--accept-ambiguous`.
+emits JSON. The native file classifier recognizes static and dynamic ELF
+files, `amd64`/`arm64`, glibc/musl interpreters, native dependencies and
+shebang scripts. Directory language detection runs the loaded language
+plugins' inspection commands; markers and build inference belong to those
+plugins, not a built-in host language catalogue. Unrecognized inputs can also
+fall back to an explicitly configured RPC detection plugin. A directory
+matching more than one ecosystem is reported as ambiguous and returns exit
+code 2 unless the caller explicitly passes `--accept-ambiguous`.
 
 ```bash
 go run ./cmd/platform-factory detect ./my-app
@@ -194,6 +199,8 @@ remain supported alongside the more descriptive `image`, `container`, and
 `vm` forms. `cmd/oci-builder` remains available for backward-compatible
 low-level automation, but no longer has build capabilities missing from
 `platform-factory`.
+
+### Publish and deploy
 
 The complete local-to-production workflow is available from the same binary:
 
@@ -667,7 +674,7 @@ evidence.
 
 | Workflow | File | Trigger | Validation and evidence |
 | --- | --- | --- | --- |
-| **Quality** | `ci-quality.yml` | Push, pull request, weekly schedule | Matrix over `amd64`/`arm64`: records the Go environment, checks formatting/`go vet`/tests/race detection/85% coverage (amd64 leg), cross-compiles and ELF-verifies both architectures, then self-builds and self-verifies an OCI layout (including a reproducible-timestamp and hostile-layout-mutation re-check). |
+| **Quality** | `ci-quality.yml` | Push, pull request, weekly schedule | Matrix over `amd64`/`arm64`: records the Go environment, checks formatting/`go vet`/tests/race detection/87% coverage (amd64 leg), cross-compiles and ELF-verifies both architectures, then self-builds and self-verifies an OCI layout (including a reproducible-timestamp and hostile-layout-mutation re-check). |
 | **OCI validation** | `ci-oci-validation.yml` | Push and pull request | Builds a deterministic layout, verifies every descriptor/blob/layer, rejects hostile mutations, and uploads validation, checksum, and filesystem evidence. |
 | **Security analysis** | `ci-security.yml` | Push, pull request, weekly schedule | Two jobs: `static-analysis` validates workflow pinning/safety, runs `go vet`, pinned `govulncheck`, and race tests, and rejects risky process-execution or insecure-TLS APIs; `pr-policy` (pull requests only) rejects forbidden tracked build output, policy markers, and whitespace errors relative to the PR base. |
 | **Reproducibility** | `ci-reproducibility.yml` | Push, pull request, weekly schedule | Builds the executable and OCI layout twice in isolated temporary directories, compares every byte, and uploads SHA-256 evidence. |
@@ -687,7 +694,7 @@ go tool cover -func=coverage.out
 go vet ./...
 ```
 
-GitHub Actions verifies formatting, vet, normal and race tests, enforces at least 85% statement coverage, builds a static sample, and checks the OCI artifacts. Before any layout is generated, CI verifies the executable is an ELF64 binary for the requested architecture and rejects binaries with a `PT_INTERP` program header (dynamic linking). Pushing a semantic version tag (`vMAJOR.MINOR.PATCH`) creates the protected release after independent amd64/arm64 layout validation, multi-platform publication, and digest-signature gates succeed. It attaches `platform-factory-image-amd64.tar`, `platform-factory-image-arm64.tar`, and `platform-factory-reports.zip`. The workflow also publishes one multi-platform index at `ghcr.io/<owner>/<repository>@sha256:<digest>` using `GITHUB_TOKEN` with `packages:write`.
+GitHub Actions verifies formatting, vet, normal and race tests, enforces at least 87% statement coverage, builds a static sample, and checks the OCI artifacts. Before any layout is generated, CI verifies the executable is an ELF64 binary for the requested architecture and rejects binaries with a `PT_INTERP` program header (dynamic linking). Pushing a semantic version tag (`vMAJOR.MINOR.PATCH`) creates the protected release after independent amd64/arm64 layout validation, multi-platform publication, and digest-signature gates succeed. It attaches `platform-factory-image-amd64.tar`, `platform-factory-image-arm64.tar`, and `platform-factory-reports.zip`. The workflow also publishes one multi-platform index at `ghcr.io/<owner>/<repository>@sha256:<digest>` using `GITHUB_TOKEN` with `packages:write`.
 
 ### GHCR deployment
 

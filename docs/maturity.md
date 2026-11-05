@@ -1,9 +1,10 @@
 # Component maturity
 
-Per `Sanetizer-todo.md` phase 2 (items 3, 4, 31): a plain boolean
-stable/unstable lies by omission. Every component below is classified
-against one of three levels, with the criteria that earned it that level
-- not a vibe, a checklist.
+This document records the release-scope assessment using Experimental,
+Supported and Stable support levels. The [capability maturity matrix](reference/maturity.md)
+separately records implementation readiness using Stable, Beta, Alpha and Stub.
+The two scales answer different questions; an implemented capability does not
+automatically gain production support or independent security review.
 
 This document describes the current, honest state. It is not itself an
 enforcement mechanism: nothing in the CLI currently reads or enforces
@@ -44,16 +45,16 @@ these levels (see "What isn't true yet" at the bottom).
 
 | Component | Level | Why |
 |---|---|---|
-| OCI builder (`oci`, `cmd/oci-builder`) | **Supported** | Deterministic-build and hostile-layout regression tests in CI (`ci-quality.yml`); no versioned compatibility policy or failure-injection tests yet, so not Stable. |
-| Supply chain (SBOM, provenance, signing, `internal/sbom`, `internal/provenance`, `internal/signing`) | **Supported** | Tested, used by every build; no dedicated threat-model audit performed yet. |
-| Language plugins - Go, Python, Node.js (`internal/project` built-in freeze adapters, `plugins/lang-python`, `plugins/lang-node`) | **Supported** | The three officially frozen languages for the next release (see "Scope freeze" below); tested, documented in `docs/language-plugin-layers.md`. |
+| OCI builder (`oci`, `cmd/oci-builder`) | **Supported** | Deterministic-build and hostile-layout regression tests in CI (`ci-quality.yml`), with the versioned `api/oci/v1` adapter and [compatibility policy](api-compatibility.md). This support level does not establish independent security review or every failure-injection/operational requirement of Stable. |
+| Supply chain (SBOM, provenance, signing, `internal/sbom`, `internal/provenance`, `internal/signing`) | **Supported** | Exercised by the publication/evidence paths and their tests; a plain low-level build does not automatically emit all evidence. Independent security review remains a separate requirement. |
+| Language plugins - Go, Python, Node.js (`internal/app/project` built-in freeze adapters, `plugins/lang-python`, `plugins/lang-node`) | **Supported** | The three officially frozen languages for the next release (see "Scope freeze" below); tested, documented in `docs/language-plugin-layers.md`. |
 | Language plugins - Ruby, PHP, Java, .NET, Rust (`plugins/lang-*`) | **Experimental** | Built and tested in isolation same as Python/Node, but outside the frozen release scope below - API/behavior may still shift. |
-| `pf plugin load/unload/list` (`sdk/langplugin`, `cmd/platform-factory/plugin.go`) | **Experimental** | New this week (2026-08-06); no real-scenario usage yet beyond this session's own smoke tests. |
+| `pf plugin load/unload/list` (`sdk/langplugin`, `cmd/platform-factory/plugin.go`) | **Experimental** | Managed binary installation, inspection probing and source preparation have tests; that evidence alone does not establish a cross-release support guarantee. |
 | containerd runtime (`plugins/containerd`) | **Supported** | Own test suite, used by the kind-cluster CI job; no failure-injection tests (containerd restart mid-operation, etc.) yet. |
 | KubeVirt deployment (`plugins/kubevirt`) | **Experimental** | Tested in isolation; RBAC/permission model and real-cluster failure modes not yet exercised end to end. |
 | Legacy VM disk boot (`internal/vmdisk`, `pf init` legacy-disk detection) | **Experimental** | Recently added (`Started Meine Graal v6.1`, commit `0e24a0d`); format coverage (qcow2/vhd/vhdx) is real but no production usage yet. |
-| Distributed control plane (`cmd/platform-factory-control-plane`, `cmd/platform-factory-worker`) | **Beta** | Durable leases, mTLS roles, quotas, signed completions and real pipeline stages are implemented; kind validates cancellation and worker-loss recovery. CAS transfer, HA and multi-version rolling upgrades remain open. |
-| Cross-platform VMM (HVF on macOS, KVM on Linux) | **Supported on native Linux/KVM and native macOS/HVF; Experimental elsewhere** | `linux/amd64` and `darwin` (native) are both exercised for real in CI and in this session's own testing. `linux/arm64` currently does not even compile (`internal/hypervisor/sandbox`'s seccomp table is x86_64-only - see the "Known gap" note in `containers/dev/Dockerfile`), so it is not merely Experimental there, it is broken; treat it as such until that's fixed. |
+| Distributed control plane (`cmd/platform-factory-control-plane`, `cmd/platform-factory-worker`) | **Beta** | Durable leases, mTLS roles, quotas, signed completions and real pipeline stages are implemented; kind validates cancellation and worker-loss recovery. Worker CAS transfer can be enabled with `-cas-dir`; durable open-lease quota accounting is restored at startup. HA and multi-version rolling upgrades remain open. |
+| Cross-platform VMM (HVF on macOS, KVM on Linux) | **Supported on native Linux/KVM and native macOS/HVF; Experimental elsewhere** | Native KVM direct boot targets Linux/amd64; HVF targets macOS/arm64. The CLI cross-builds for Linux/arm64, but this does not provide an ARM64 KVM backend: strict host seccomp also fails closed outside Linux/amd64. See the [compatibility matrix](reference/compatibility.md) for hardware and CI evidence. |
 
 ## Scope freeze for the next release
 
@@ -71,9 +72,10 @@ local modern source
 ```
 
 Officially supported languages for that path: **Go, Python, Node.js**.
-Everything else (Ruby/PHP/Java/.NET/Rust language plugins, KubeVirt,
-legacy VM disk boot, the distributed control plane) remains available
-but Experimental, per the table above.
+Ruby/PHP/Java/.NET/Rust language plugins, KubeVirt and legacy VM disk boot
+remain outside that frozen support scope. The distributed control plane has
+the separate Beta implementation assessment above; that label does not add it
+to the supported release path.
 
 ## What isn't true yet
 
@@ -94,3 +96,9 @@ the same "moins mensonger" principle it's built on:
   value of naming that explicitly, per item 31, is only to prevent any
   one area from quietly becoming "everyone assumes someone else
   understands this," not to assign blame.
+
+## Stabilisation in progress
+
+See the [execution record](stabilisation.md) for corrections and remaining
+acceptance gates. The requested target is Stable for all experimental features;
+that target has not been reached by merely changing this table.

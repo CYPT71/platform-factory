@@ -76,9 +76,6 @@ func Confirm(proposedImage, proposedTag string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if result.Confirmed && result.Tag == "" {
-		result.Tag = "latest"
-	}
 	return result, nil
 }
 
@@ -87,6 +84,14 @@ func (m *model) Init() tea.Cmd { return textinput.Blink }
 func validReference(image string) bool {
 	trimmed := strings.TrimSpace(image)
 	return trimmed != "" && trimmed == image && !strings.ContainsAny(image, " \t\r\n\x00")
+}
+
+func normalizedTag(tag string) string {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return "latest"
+	}
+	return tag
 }
 
 func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -102,7 +107,7 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.err = ""
-			m.result = Result{Image: m.image.Value(), Tag: strings.TrimSpace(m.tag.Value()), Confirmed: true}
+			m.result = Result{Image: m.image.Value(), Tag: normalizedTag(m.tag.Value()), Confirmed: true}
 			m.done = true
 			return m, tea.Quit
 		case "tab", "shift+tab", "up", "down":
@@ -148,7 +153,7 @@ func (m *model) View() string {
 	fmt.Fprintf(&b, "%s  %s\n", imageLabel, m.image.View())
 	fmt.Fprintf(&b, "%s  %s\n", tagLabel, m.tag.View())
 	b.WriteString("\n")
-	fmt.Fprintf(&b, "-> %s\n", dimStyle.Render(m.image.Value()+":"+m.tag.Value()))
+	fmt.Fprintf(&b, "-> %s\n", dimStyle.Render(m.image.Value()+":"+normalizedTag(m.tag.Value())))
 	if m.err != "" {
 		fmt.Fprintln(&b, errorStyle.Render(m.err))
 	}

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 var ErrUsage = errors.New("language plugin: usage")
@@ -40,7 +41,8 @@ func ParseRootFlag(subcommand string, args []string) (string, error) {
 	if *root == "" {
 		return "", errors.New("--root is required")
 	}
-	return *root, nil
+	// Resolve before a package manager changes its working directory.
+	return filepath.Abs(*root)
 }
 
 func FileExists(path string) bool {
@@ -49,8 +51,17 @@ func FileExists(path string) bool {
 }
 
 func RunIn(directory, name string, args ...string) error {
+	return RunInWithEnv(directory, nil, name, args...)
+}
+
+// RunInWithEnv supplies per-command environment overrides without mutating
+// the host process environment. Package managers still run on the host.
+func RunInWithEnv(directory string, environment []string, name string, args ...string) error {
 	command := exec.Command(name, args...)
 	command.Dir, command.Stdout, command.Stderr = directory, os.Stderr, os.Stderr
+	if len(environment) > 0 {
+		command.Env = append(os.Environ(), environment...)
+	}
 	return command.Run()
 }
 
@@ -95,13 +106,44 @@ func BuildLayer(args []string, dependenciesPath, pluginName string) error {
 // (oci/extralayers.go) would reject them anyway - refusing
 // here gives a clearer, earlier error.
 func WriteDeterministicTar(source, destPrefix, output string) error {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return fmt.Errorf("read layer source: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("layer source must be a real directory")
+	}
+	if !filepath.IsLocal(destPrefix) || filepath.Clean(destPrefix) == "." || strings.ContainsAny(destPrefix, "\\:\x00") {
+		return errors.New("layer destination prefix must be a local relative path")
+	}
+	sourceAbs, err := filepath.Abs(source)
+	if err != nil {
+		return err
+	}
+	outputAbs, err := filepath.Abs(output)
+	if err != nil {
+		return err
+	}
+	if filepath.VolumeName(sourceAbs) == filepath.VolumeName(outputAbs) {
+		relative, err := filepath.Rel(sourceAbs, outputAbs)
+		if err != nil {
+			return err
+		}
+		if relative == "." || filepath.IsLocal(relative) {
+			return errors.New("layer output must be outside its source directory")
+		}
+	}
+	sourceRoot, err := os.OpenRoot(source)
+	if err != nil {
+		return err
+	}
+	defer sourceRoot.Close()
 	type entry struct {
 		relPath string
-		absPath string
 		info    os.FileInfo
 	}
 	var entries []entry
-	err := filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -118,7 +160,7 @@ func WriteDeterministicTar(source, destPrefix, output string) error {
 		if !info.Mode().IsRegular() && !info.IsDir() {
 			return fmt.Errorf("refusing to package non-regular file %s (mode %s)", rel, info.Mode())
 		}
-		entries = append(entries, entry{relPath: filepath.ToSlash(rel), absPath: path, info: info})
+		entries = append(entries, entry{relPath: filepath.ToSlash(rel), info: info})
 		return nil
 	})
 	if err != nil {
@@ -126,11 +168,18 @@ func WriteDeterministicTar(source, destPrefix, output string) error {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].relPath < entries[j].relPath })
 
-	out, err := os.Create(output)
+	outputMode := os.FileMode(0644)
+	if previous, err := os.Stat(output); err == nil {
+		outputMode = previous.Mode().Perm()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	out, err := os.CreateTemp(filepath.Dir(output), ".pf-layer-*")
 	if err != nil {
 		return fmt.Errorf("create %s: %w", output, err)
 	}
 	defer out.Close()
+	defer os.Remove(out.Name())
 	tw := tar.NewWriter(out)
 	for _, e := range entries {
 		name := filepath.ToSlash(filepath.Join(destPrefix, e.relPath))
@@ -148,7 +197,7 @@ func WriteDeterministicTar(source, destPrefix, output string) error {
 			return fmt.Errorf("write header for %s: %w", name, err)
 		}
 		if !e.info.IsDir() {
-			if err := copyFileInto(tw, e.absPath); err != nil {
+			if err := copyFileInto(tw, sourceRoot, filepath.FromSlash(e.relPath)); err != nil {
 				return fmt.Errorf("write content for %s: %w", name, err)
 			}
 		}
@@ -156,11 +205,20 @@ func WriteDeterministicTar(source, destPrefix, output string) error {
 	if err := tw.Close(); err != nil {
 		return err
 	}
-	return out.Close()
+	if err := out.Chmod(outputMode); err != nil {
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	return os.Rename(out.Name(), output)
 }
 
-func copyFileInto(w *tar.Writer, path string) error {
-	file, err := os.Open(path)
+func copyFileInto(w *tar.Writer, root *os.Root, path string) error {
+	file, err := root.Open(path)
 	if err != nil {
 		return err
 	}

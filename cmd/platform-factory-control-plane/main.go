@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/CYPT71/platform-factory/internal/cache"
 	"github.com/CYPT71/platform-factory/internal/control"
 	"github.com/CYPT71/platform-factory/internal/mtls"
 	"github.com/CYPT71/platform-factory/internal/observability"
@@ -34,9 +35,10 @@ func run(args []string) error {
 	reapInterval := fs.Duration("reap-interval", 5*time.Second, "how often to check for expired worker heartbeats")
 	statePath := fs.String("state-file", "", "durable scheduler snapshot path (required for restart recovery)")
 	auditPath := fs.String("audit-file", "", "append-only hash-chained lifecycle journal path")
+	casDir := fs.String("cas-dir", "", "optional shared content-addressed blob directory; exposes /cas/blobs/ to authenticated mTLS clients")
 	tenantMaxParallel := fs.Int("tenant-max-parallel", 0, "if greater than zero, cap concurrent leases per tenant "+
 		"(POST /lease/submit's optional \"tenant\" field); leases that omit a tenant are never limited; "+
-		"quota state is in-memory only and does not survive a restart")
+		"open-lease accounting is restored when -state-file is configured")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -45,6 +47,9 @@ func run(args []string) error {
 	}
 	if *listen == "" {
 		return fmt.Errorf("-listen must not be empty")
+	}
+	if *tenantMaxParallel < 0 {
+		return fmt.Errorf("-tenant-max-parallel must not be negative")
 	}
 	if *heartbeatTimeout <= 0 || *reapInterval <= 0 {
 		return fmt.Errorf("-heartbeat-timeout and -reap-interval must be greater than zero")
@@ -86,15 +91,25 @@ func run(args []string) error {
 		}
 		observability.Info("opened audit journal", observability.Fields{"path": *auditPath})
 	}
+	server := &Server{Plane: plane, StatePath: *statePath, Audit: audit, Provenance: provenance.NewProvenanceStore()}
+	if *casDir != "" {
+		store, err := cache.Open(*casDir)
+		if err != nil {
+			return fmt.Errorf("open CAS: %w", err)
+		}
+		server.CAS = store
+	}
+	if *tenantMaxParallel > 0 {
+		server.Scheduler = quota.NewFairScheduler(quota.NewTenantQuota(quota.Quota{MaxParallel: *tenantMaxParallel}))
+		if err := server.RestoreQuotaUsage(); err != nil {
+			return err
+		}
+		observability.Info("tenant quota enforcement enabled", observability.Fields{"max_parallel": *tenantMaxParallel})
+	}
 	stop := make(chan struct{})
 	go runPersistentReapLoop(plane, *reapInterval, *statePath, audit, stop)
 	defer close(stop)
 
-	server := &Server{Plane: plane, StatePath: *statePath, Audit: audit, Provenance: provenance.NewProvenanceStore()}
-	if *tenantMaxParallel > 0 {
-		server.Scheduler = quota.NewFairScheduler(quota.NewTenantQuota(quota.Quota{MaxParallel: *tenantMaxParallel}))
-		observability.Info("tenant quota enforcement enabled", observability.Fields{"max_parallel": *tenantMaxParallel})
-	}
 	httpServer := &http.Server{
 		Addr:              *listen,
 		Handler:           server.Routes(),

@@ -468,14 +468,7 @@ this change - see Todo item 11).
 
 # Final-Product-Roadmap "Fermer v4" pass (2026-08-12)
 
-Requested: work autonomously on the hardest open tasks in
-`.wiki-worktree/Implementations/Final-Product-Roadmap.md` (the "v6 Graal"
-roadmap, 616 open items at last count), ideally with the `codex` CLI.
-`codex` (0.1.2505172129, installed at `/opt/homebrew/bin/codex`) turned out
-to be unauthenticated with no non-interactive login path available in this
-sandbox (its only auth flow is an interactive ChatGPT sign-in / pasted API
-key, and it fails outright on raw-mode stdin here) - confirmed by direct
-attempt, not assumed. All work below is this session's own, not Codex's.
+This pass focused on concrete open tasks in the implementation roadmap.
 
 Given the roadmap's true size (custom filesystem parsers, a virtio
 network/storage stack, a distributed control plane, etc. - not a
@@ -1152,8 +1145,7 @@ automatically from a public JSON catalog instead of requiring `sources
 add` for every one, while making it structurally impossible for the
 catalog to grant trust. Went through the full plan-mode workflow the user
 asked for (present existing state + architecture + risks first, then
-implement) - the plan is at
-`/Users/cyprien/.claude/plans/spicy-moseying-octopus.md`.
+implement).
 
 **catalog = UNTRUSTED DISCOVERY, trust store/signatures/local verification
 = TRUST.** This is enforced structurally, not just by convention: the

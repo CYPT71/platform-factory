@@ -445,3 +445,51 @@ func TestInspectFileExistsHelper(t *testing.T) {
 		t.Fatal("a missing path should not be reported as an existing file")
 	}
 }
+
+func TestInspectionHistoricalContracts(t *testing.T) {
+	for _, fixture := range []string{"inspection-legacy.json", "inspection-v1.json"} {
+		raw, err := os.ReadFile(filepath.Join("testdata", fixture))
+		if err != nil {
+			t.Fatal(err)
+		}
+		binary := filepath.Join(t.TempDir(), "plugin")
+		writeScript(t, binary, sprintfScript(string(raw)))
+		got, err := RunInspection(binary, t.TempDir())
+		if err != nil {
+			t.Fatalf("%s: %v", fixture, err)
+		}
+		if !got.Match || got.Language != "ruby" || got.Dependencies.Mode != "manifest" {
+			t.Fatalf("%s: %+v", fixture, got)
+		}
+	}
+}
+
+func TestInspectionRejectsUnknownWireVersion(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "plugin")
+	writeScript(t, binary, sprintfScript(`{"api_version":"platform-factory.dev/language-inspection/v999","match":true,"language":"ruby"}`))
+	if _, err := RunInspection(binary, t.TempDir()); err == nil {
+		t.Fatal("future inspection contract accepted")
+	}
+}
+
+func TestInspectionV1MatchesFrozenFixture(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "Gemfile"), []byte("source 'https://example.invalid'"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Inspect(root, Definition{Language: "ruby", Profile: "ruby", Markers: []string{"Gemfile"}, Manifests: []string{"Gemfile"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile(filepath.Join("testdata", "inspection-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != strings.TrimSpace(string(want)) {
+		t.Fatalf("inspection contract changed:\ngot %s\nwant %s", actual, want)
+	}
+}

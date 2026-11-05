@@ -372,11 +372,17 @@ func checkOversizedFrame(ctx context.Context, executable string) error {
 		return err
 	}
 	defer process.close()
-	header := fmt.Sprintf("Content-Type: %s\r\nContent-Length: %d\r\n\r\n", apiplugin.ContentType, (1<<20)+1)
+	// Send a complete, otherwise valid request just above the Go host's
+	// 512 KiB limit. A truncated or invalid body could be refused for the
+	// wrong reason and let an SDK with a larger wire limit pass this check.
+	const limit = 512 << 10
+	prefix, suffix := `{"id":"oversized","method":"v1.hello","padding":"`, `"}`
+	body := prefix + strings.Repeat("x", limit+1-len(prefix)-len(suffix)) + suffix
+	header := fmt.Sprintf("Content-Type: %s\r\nContent-Length: %d\r\n\r\n", apiplugin.ContentType, len(body))
 	if _, err := io.WriteString(process.stdin, header); err != nil {
 		return err
 	}
-	if _, err := io.WriteString(process.stdin, strings.Repeat("x", 4096)); err != nil {
+	if _, err := io.WriteString(process.stdin, body); err != nil {
 		// The plugin may close stdin immediately after rejecting the
 		// header; a write failure here is the expected refusal.
 		return nil

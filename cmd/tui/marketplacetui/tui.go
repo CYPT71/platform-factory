@@ -136,6 +136,10 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.verifiedOnly = !m.verifiedOnly
 			m.refresh()
 			return m, nil
+		case "up", "down", "pgup", "pgdown":
+			var command tea.Cmd
+			m.list, command = m.list.Update(message)
+			return m, command
 		case "ctrl+l":
 			m.search.SetValue("")
 			m.refresh()
@@ -148,6 +152,12 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.search.Value() != previous {
 			m.refresh()
 		}
+		return m, tea.Batch(commands...)
+	}
+	if m.state == viewList {
+		var command tea.Cmd
+		m.search, command = m.search.Update(message)
+		commands = append(commands, command)
 	}
 	var command tea.Cmd
 	m.list, command = m.list.Update(message)

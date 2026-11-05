@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -18,7 +19,7 @@ func withStubExecutor(t *testing.T, stub executor) {
 
 func TestHandleLifecycleDrivesVirtctl(t *testing.T) {
 	var calls [][]string
-	withStubExecutor(t, func(name string, args []string, stdin []byte) ([]byte, error) {
+	withStubExecutor(t, func(_ context.Context, name string, args []string, stdin []byte) ([]byte, error) {
 		calls = append(calls, append([]string{name}, args...))
 		return []byte("ok"), nil
 	})
@@ -39,7 +40,7 @@ func TestHandleLifecycleDrivesVirtctl(t *testing.T) {
 
 func TestHandleStatusAndLogs(t *testing.T) {
 	var calls [][]string
-	withStubExecutor(t, func(name string, args []string, stdin []byte) ([]byte, error) {
+	withStubExecutor(t, func(_ context.Context, name string, args []string, stdin []byte) ([]byte, error) {
 		calls = append(calls, append([]string{name}, args...))
 		return []byte(`{"kind":"VirtualMachine"}`), nil
 	})
@@ -65,7 +66,7 @@ func TestHandleStatusAndLogs(t *testing.T) {
 
 func TestHandleDelete(t *testing.T) {
 	var calls [][]string
-	withStubExecutor(t, func(name string, args []string, stdin []byte) ([]byte, error) {
+	withStubExecutor(t, func(_ context.Context, name string, args []string, stdin []byte) ([]byte, error) {
 		calls = append(calls, append([]string{name}, args...))
 		return nil, nil
 	})
@@ -79,7 +80,7 @@ func TestHandleDelete(t *testing.T) {
 }
 
 func TestHandleCreateIsDryRunByDefault(t *testing.T) {
-	withStubExecutor(t, func(string, []string, []byte) ([]byte, error) {
+	withStubExecutor(t, func(context.Context, string, []string, []byte) ([]byte, error) {
 		t.Fatal("executor called without apply")
 		return nil, nil
 	})
@@ -101,7 +102,7 @@ func TestHandleCreateAppliesThroughKubectl(t *testing.T) {
 	var command string
 	var args []string
 	var piped []byte
-	withStubExecutor(t, func(name string, commandArgs []string, stdin []byte) ([]byte, error) {
+	withStubExecutor(t, func(_ context.Context, name string, commandArgs []string, stdin []byte) ([]byte, error) {
 		command, args, piped = name, commandArgs, stdin
 		return []byte("applied"), nil
 	})
@@ -125,7 +126,7 @@ func TestHandleCreateAppliesThroughKubectl(t *testing.T) {
 }
 
 func TestHandleCreatePropagatesApplyFailure(t *testing.T) {
-	withStubExecutor(t, func(string, []string, []byte) ([]byte, error) {
+	withStubExecutor(t, func(context.Context, string, []string, []byte) ([]byte, error) {
 		return nil, errors.New("apply failed")
 	})
 	params, _ := json.Marshal(specParams{
@@ -139,7 +140,7 @@ func TestHandleCreatePropagatesApplyFailure(t *testing.T) {
 
 func TestHandleRBACIsDryRunByDefaultAndApplies(t *testing.T) {
 	var applyCalled bool
-	withStubExecutor(t, func(name string, args []string, stdin []byte) ([]byte, error) {
+	withStubExecutor(t, func(_ context.Context, name string, args []string, stdin []byte) ([]byte, error) {
 		applyCalled = true
 		if name != "kubectl" || !reflect.DeepEqual(args, []string{"apply", "-f", "-"}) {
 			t.Fatalf("command=%s args=%v", name, args)
@@ -172,7 +173,7 @@ func TestHandleRBACIsDryRunByDefaultAndApplies(t *testing.T) {
 }
 
 func TestHandlersRejectInvalidConfigurationWithoutExecuting(t *testing.T) {
-	withStubExecutor(t, func(string, []string, []byte) ([]byte, error) {
+	withStubExecutor(t, func(context.Context, string, []string, []byte) ([]byte, error) {
 		t.Fatal("executor called for invalid configuration")
 		return nil, nil
 	})
@@ -193,5 +194,31 @@ func TestHandlersRejectInvalidConfigurationWithoutExecuting(t *testing.T) {
 	}
 	if _, err := handleCreate(context.Background(), missingImage); err == nil {
 		t.Fatal("accepted create with no image")
+	}
+}
+
+func TestRunCommandHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := runCommand(ctx, os.Args[0], []string{"-test.run=^$"}, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestLifecyclePropagatesRequestCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	withStubExecutor(t, func(got context.Context, _ string, _ []string, _ []byte) ([]byte, error) {
+		if got != ctx {
+			t.Fatal("request context replaced")
+		}
+		return nil, got.Err()
+	})
+	params, _ := json.Marshal(specParams{Name: "demo", Namespace: "test"})
+	for _, action := range []string{"start", "stop", "restart"} {
+		if _, err := handleLifecycle(action)(ctx, params); !errors.Is(err, context.Canceled) {
+			t.Fatalf("%s err=%v", action, err)
+		}
 	}
 }

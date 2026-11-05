@@ -32,3 +32,9 @@ for complete, runnable examples.
 
 `handleContext(CAPABILITY.runtimeStatus, handler)` supports arbitrary
 capabilities with native values and immutable `traceId`/`operationId` fields.
+
+## Message size
+
+JSON message bodies are limited to **512 KiB (524,288 UTF-8 bytes)** on reads
+and writes, matching the Go host. Larger payloads are rejected. See the
+[wire compatibility policy](../../docs/api-compatibility.md#plugin-frame-size).

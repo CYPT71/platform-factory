@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -86,7 +87,7 @@ func run() error {
 	// piped output and redirected stdin have none, so both the wizard and
 	// the animated build view are gated on isatty, with a plain sequential
 	// fallback below for everything else.
-	terminal := isatty.IsTerminal(os.Stdout.Fd())
+	terminal := isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd())
 	interactive := terminal && *flagComponents == "" && !*flagYes
 	if interactive {
 		selectedKeys, prefix, err = runWizard(prefix)
@@ -119,18 +120,14 @@ func run() error {
 	version := gitVersion(repoRoot)
 	if terminal {
 		model := newBuildModel(steps, repoRoot, prefix, *flagGOOS, *flagGOARCH, version)
+		defer model.cancel()
 		finalModel, err := tea.NewProgram(model).Run()
 		if err != nil {
 			return err
 		}
 		built := finalModel.(buildModel)
-		if built.failed {
-			for _, step := range built.steps {
-				if step.status == statusFailed {
-					return step.err
-				}
-			}
-			return errors.New("installation failed")
+		if err := built.resultError(); err != nil {
+			return err
 		}
 	} else if err := runPlainBuild(steps, repoRoot, prefix, *flagGOOS, *flagGOARCH, version); err != nil {
 		return err
@@ -291,6 +288,10 @@ type buildModel struct {
 	version  string
 	done     bool
 	failed   bool
+	canceled bool
+	ctx      context.Context
+	cancel   context.CancelFunc
+	runBuild func(context.Context, stepView) ([]byte, error)
 }
 
 func newBuildModel(steps []stepView, repoRoot, prefix, goos, goarch, version string) buildModel {
@@ -298,7 +299,9 @@ func newBuildModel(steps []stepView, repoRoot, prefix, goos, goarch, version str
 	if len(steps) > 0 {
 		steps[0].status = statusBuilding
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return buildModel{
+		ctx: ctx, cancel: cancel,
 		steps:    steps,
 		spinner:  s,
 		repoRoot: repoRoot,
@@ -320,10 +323,27 @@ func (m buildModel) Init() tea.Cmd {
 // one place that actually shells out, shared by the animated bubbletea
 // view and the plain sequential fallback used outside a terminal.
 func buildBinary(repoRoot, prefix, goos, goarch, version string, step stepView) ([]byte, error) {
+	return buildBinaryContext(context.Background(), repoRoot, prefix, goos, goarch, version, step)
+}
+
+func buildBinaryContext(ctx context.Context, repoRoot, prefix, goos, goarch, version string, step stepView) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	out, err := filepath.Abs(filepath.Join(prefix, step.Name+installer.BinSuffix(goos)))
 	if err != nil {
 		return nil, err
 	}
+	staged, err := os.CreateTemp(filepath.Dir(out), ".pf-build-*")
+	if err != nil {
+		return nil, err
+	}
+	stagedPath := staged.Name()
+	if err := staged.Close(); err != nil {
+		os.Remove(stagedPath)
+		return nil, err
+	}
+	defer os.Remove(stagedPath)
 	ldflags := "-s -w"
 	if step.Name == "platform-factory" {
 		ldflags += " -X main.version=" + version
@@ -332,7 +352,7 @@ func buildBinary(repoRoot, prefix, goos, goarch, version string, step stepView) 
 	if step.CGO {
 		cgo = "1"
 	}
-	cmd := exec.Command("go", "build", "-trimpath", "-ldflags="+ldflags, "-o", out, step.Pkg)
+	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-ldflags="+ldflags, "-o", stagedPath, step.Pkg)
 	// Build in the owning module so GOWORK=off installations work too.
 	if strings.HasPrefix(step.Pkg, "./plugins/") {
 		relative := strings.TrimPrefix(step.Pkg, "./")
@@ -347,13 +367,21 @@ func buildBinary(repoRoot, prefix, goos, goarch, version string, step stepView) 
 	}
 	cmd.Env = append(os.Environ(), "CGO_ENABLED="+cgo, "GOOS="+goos, "GOARCH="+goarch)
 	output, err := cmd.CombinedOutput()
-	if err != nil || !step.CGO || goos != "darwin" {
+	if err != nil {
 		return output, err
 	}
-	// Apple's native VM API requires this entitlement on the executable.
-	sign := exec.Command("codesign", "--force", "--sign", "-", "--entitlements", filepath.Join(repoRoot, "scripts/microvm/hvf.entitlements"), out)
-	signedOutput, err := sign.CombinedOutput()
-	return append(output, signedOutput...), err
+	if step.CGO && goos == "darwin" {
+		sign := exec.CommandContext(ctx, "codesign", "--force", "--sign", "-", "--entitlements", filepath.Join(repoRoot, "scripts/microvm/hvf.entitlements"), stagedPath)
+		signedOutput, signErr := sign.CombinedOutput()
+		output = append(output, signedOutput...)
+		if signErr != nil {
+			return output, signErr
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return output, err
+	}
+	return output, os.Rename(stagedPath, out)
 }
 
 func runPlainBuild(steps []stepView, repoRoot, prefix, goos, goarch, version string) error {
@@ -371,9 +399,14 @@ func runPlainBuild(steps []stepView, repoRoot, prefix, goos, goarch, version str
 
 func (m buildModel) runStep(i int) tea.Cmd {
 	step := m.steps[i]
-	repoRoot, prefix, goos, goarch, version := m.repoRoot, m.prefix, m.goos, m.goarch, m.version
 	return func() tea.Msg {
-		output, err := buildBinary(repoRoot, prefix, goos, goarch, version, step)
+		var output []byte
+		var err error
+		if m.runBuild != nil {
+			output, err = m.runBuild(m.ctx, step)
+		} else {
+			output, err = buildBinaryContext(m.ctx, m.repoRoot, m.prefix, m.goos, m.goarch, m.version, step)
+		}
 		if err != nil {
 			return stepDoneMsg{index: i, err: fmt.Errorf("%s: %w: %s", step.Name, err, strings.TrimSpace(string(output)))}
 		}
@@ -381,17 +414,44 @@ func (m buildModel) runStep(i int) tea.Cmd {
 	}
 }
 
+func (m buildModel) resultError() error {
+	if m.canceled {
+		return context.Canceled
+	}
+	if m.failed {
+		for _, step := range m.steps {
+			if step.err != nil {
+				return step.err
+			}
+		}
+		return errors.New("installation failed")
+	}
+	if !m.done {
+		return errors.New("installation incomplete")
+	}
+	return nil
+}
+
 func (m buildModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
-			return m, tea.Quit
+			if m.cancel != nil {
+				m.cancel()
+			}
+			m.canceled = true
+			// Wait for the active command's result before leaving the program.
+			return m, nil
 		}
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
 	case stepDoneMsg:
+		if m.canceled {
+			m.done = true
+			return m, tea.Quit
+		}
 		if msg.err != nil {
 			m.steps[msg.index].status = statusFailed
 			m.steps[msg.index].err = msg.err
@@ -413,7 +473,11 @@ func (m buildModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m buildModel) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Building selected binaries"))
+	if m.canceled {
+		b.WriteString(titleStyle.Render("Canceling installation…"))
+	} else {
+		b.WriteString(titleStyle.Render("Building selected binaries"))
+	}
 	b.WriteString("\n\n")
 	for _, step := range m.steps {
 		switch step.status {

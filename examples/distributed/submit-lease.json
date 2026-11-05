@@ -1,6 +1,4 @@
 {
-  "payload": "build-stage:compile",
-  "required_platform": "linux/amd64",
-  "required_capabilities": ["kvm"],
-  "preferred_content": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  "payload": "{\"api_version\":\"platform-factory.dev/worker-pipeline/v1\",\"workdir\":\"build-01\",\"pipeline\":{\"api_version\":\"platform-factory.dev/v1\",\"name\":\"real-worker\",\"stages\":[{\"id\":\"build\",\"command\":{\"executable\":\"sh\",\"args\":[\"-c\",\"printf built > artifact\"]},\"network\":\"none\"}]}}",
+  "required_platform": "linux/amd64"
 }

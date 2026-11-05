@@ -1,9 +1,8 @@
 # MCP server
 
 `platform-factory mcp serve` runs a native [Model Context Protocol](https://modelcontextprotocol.io)
-server over stdio, giving an MCP-speaking client (Claude Code, Codex, Cursor,
-ChatGPT, ...) a purpose-built interface onto this repository: inspecting its
-architecture, listing and validating plugins, driving the real
+server over stdio, giving compatible clients an interface for inspecting
+the repository architecture, listing and validating plugins, driving the real
 `init`/`build`/`publish`/`deploy`/`status`/`doctor`/`detect`/`verify`/`inspect`
 product commands, and proposing changes - core changes, new/modified plugins,
 or both - as a reviewable draft pull request, with a comprehensive PR
@@ -115,37 +114,20 @@ also contain the target project:
 
 then call, for example, `pf_build {"project_root": "/app", ...}`.
 
-## Two tiers of mutating tools
+## Repository and product tools
 
 Every tool that only reads (`pf_project_inspect`, `pf_plugin_list`,
 `pf_core_inspect`, ...) works with zero configuration.
 
-Tools that change something come in two forms:
+The repository primitives take explicit structured parameters:
 
 - **Client-orchestrated primitives** - always available, take structured
   parameters, and do exactly what they're told: `pf_plugin_create`,
   `pf_core_read_file`, `pf_core_write_file`, `pf_core_self_check`,
   `pf_git_status`, `pf_git_prepare_branch`, `pf_git_commit`,
-  `pf_core_create_pr`. An MCP client's own model drives these across
+  `pf_core_create_pr`. The client invokes these across
   multiple tool calls, the way MCP tools normally work.
-- **Server-embedded agent mode** - opt-in, and built *on top of* the same
-  primitives above (in-process function calls, not a self-referential MCP
-  round-trip): `pf_plugin_modify`, `pf_core_patch`, and `pf_implement` accept
-  a free-text `request` and have the server call its own configured LLM to
-  turn that into concrete edits. This tier requires
-  `PLATFORM_FACTORY_MCP_ANTHROPIC_API_KEY` (an Anthropic API key) in the
-  server process's environment. Without it, these three tools return a
-  structured `agent_unavailable` error naming the primitives to use instead
-  - never a silent no-op, never a fabricated result.
-
-Optionally, `PLATFORM_FACTORY_MCP_ANTHROPIC_MODEL` overrides the model
-(default `claude-sonnet-4-5`).
-
-Every agent-mode loop is bounded to 3 attempts (plan → edit → validate,
-retrying with the validation failure fed back to the model) before giving up
-with a clear error.
-
-A third group, **product tools**, is not about this repository's own source
+The **product tools** is not about this repository's own source
 at all: `pf_init`, `pf_build`, `pf_publish`, `pf_deploy`, `pf_project`,
 `pf_status`, `pf_doctor`, `pf_detect`, `pf_verify`, `pf_inspect` re-exec the
 running `platform-factory` binary itself with a fixed subcommand and a

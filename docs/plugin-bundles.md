@@ -14,7 +14,7 @@ not passed off as framed-RPC plugins.
 ## Publisher workflow
 
 First build the all-in-one distribution as documented in
-[commercial distribution](commercial-distribution.md). From the source checkout:
+[distribution](distribution.md). From the source checkout:
 
 ```sh
 # Use a private directory outside every distributable output.

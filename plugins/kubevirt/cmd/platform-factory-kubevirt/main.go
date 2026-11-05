@@ -44,12 +44,12 @@ import (
 // executor runs an external command with optional stdin and returns its
 // combined stdout. Swappable in tests so no test needs a real kubectl or
 // virtctl on PATH.
-type executor func(name string, args []string, stdin []byte) ([]byte, error)
+type executor func(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error)
 
 var execCommand executor = runCommand
 
-func runCommand(name string, args []string, stdin []byte) ([]byte, error) {
-	command := exec.Command(name, args...)
+func runCommand(ctx context.Context, name string, args []string, stdin []byte) ([]byte, error) {
+	command := exec.CommandContext(ctx, name, args...)
 	if stdin != nil {
 		command.Stdin = bytes.NewReader(stdin)
 	}
@@ -168,7 +168,7 @@ type commandResult struct {
 	Output string `json:"output,omitempty"`
 }
 
-func handleCreate(_ context.Context, raw json.RawMessage) (any, error) {
+func handleCreate(ctx context.Context, raw json.RawMessage) (any, error) {
 	params, err := decodeSpecParams(raw)
 	if err != nil {
 		return nil, err
@@ -187,14 +187,14 @@ func handleCreate(_ context.Context, raw json.RawMessage) (any, error) {
 	if !params.Apply {
 		return manifestResult{Manifest: string(manifest)}, nil
 	}
-	output, err := execCommand("kubectl", []string{"apply", "-f", "-"}, manifest)
+	output, err := execCommand(ctx, "kubectl", []string{"apply", "-f", "-"}, manifest)
 	if err != nil {
 		return nil, fmt.Errorf("kubectl apply: %w", err)
 	}
 	return manifestResult{Manifest: string(manifest), Applied: true, Output: string(output)}, nil
 }
 
-func handleRBAC(_ context.Context, raw json.RawMessage) (any, error) {
+func handleRBAC(ctx context.Context, raw json.RawMessage) (any, error) {
 	params, err := decodeSpecParams(raw)
 	if err != nil {
 		return nil, err
@@ -210,7 +210,7 @@ func handleRBAC(_ context.Context, raw json.RawMessage) (any, error) {
 	if !params.Apply {
 		return manifestResult{Manifest: string(manifest)}, nil
 	}
-	output, err := execCommand("kubectl", []string{"apply", "-f", "-"}, manifest)
+	output, err := execCommand(ctx, "kubectl", []string{"apply", "-f", "-"}, manifest)
 	if err != nil {
 		return nil, fmt.Errorf("kubectl apply: %w", err)
 	}
@@ -221,7 +221,7 @@ func handleRBAC(_ context.Context, raw json.RawMessage) (any, error) {
 // virtctl <action> for it - shared by start/stop/restart, which differ only
 // in the verb virtctl itself takes.
 func handleLifecycle(action string) plugin.Handler {
-	return func(_ context.Context, raw json.RawMessage) (any, error) {
+	return func(ctx context.Context, raw json.RawMessage) (any, error) {
 		params, err := decodeSpecParams(raw)
 		if err != nil {
 			return nil, err
@@ -233,7 +233,7 @@ func handleLifecycle(action string) plugin.Handler {
 		if err := kubevirt.ValidateTarget(spec); err != nil {
 			return nil, err
 		}
-		output, err := execCommand("virtctl", []string{action, "--namespace", spec.Namespace, spec.Name}, nil)
+		output, err := execCommand(ctx, "virtctl", []string{action, "--namespace", spec.Namespace, spec.Name}, nil)
 		if err != nil {
 			return nil, fmt.Errorf("virtctl %s: %w", action, err)
 		}
@@ -241,7 +241,7 @@ func handleLifecycle(action string) plugin.Handler {
 	}
 }
 
-func handleStatus(_ context.Context, raw json.RawMessage) (any, error) {
+func handleStatus(ctx context.Context, raw json.RawMessage) (any, error) {
 	params, err := decodeSpecParams(raw)
 	if err != nil {
 		return nil, err
@@ -253,14 +253,14 @@ func handleStatus(_ context.Context, raw json.RawMessage) (any, error) {
 	if err := kubevirt.ValidateTarget(spec); err != nil {
 		return nil, err
 	}
-	output, err := execCommand("kubectl", []string{"get", "virtualmachine", "--namespace", spec.Namespace, spec.Name, "-o", "json"}, nil)
+	output, err := execCommand(ctx, "kubectl", []string{"get", "virtualmachine", "--namespace", spec.Namespace, spec.Name, "-o", "json"}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("kubectl get: %w", err)
 	}
 	return commandResult{Output: string(output)}, nil
 }
 
-func handleLogs(_ context.Context, raw json.RawMessage) (any, error) {
+func handleLogs(ctx context.Context, raw json.RawMessage) (any, error) {
 	params, err := decodeSpecParams(raw)
 	if err != nil {
 		return nil, err
@@ -272,14 +272,14 @@ func handleLogs(_ context.Context, raw json.RawMessage) (any, error) {
 	if err := kubevirt.ValidateTarget(spec); err != nil {
 		return nil, err
 	}
-	output, err := execCommand("virtctl", []string{"console", "--namespace", spec.Namespace, spec.Name}, nil)
+	output, err := execCommand(ctx, "virtctl", []string{"console", "--namespace", spec.Namespace, spec.Name}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("virtctl console: %w", err)
 	}
 	return commandResult{Output: string(output)}, nil
 }
 
-func handleDelete(_ context.Context, raw json.RawMessage) (any, error) {
+func handleDelete(ctx context.Context, raw json.RawMessage) (any, error) {
 	params, err := decodeSpecParams(raw)
 	if err != nil {
 		return nil, err
@@ -291,7 +291,7 @@ func handleDelete(_ context.Context, raw json.RawMessage) (any, error) {
 	if err := kubevirt.ValidateTarget(spec); err != nil {
 		return nil, err
 	}
-	output, err := execCommand("kubectl", []string{"delete", "virtualmachine", "--namespace", spec.Namespace, spec.Name}, nil)
+	output, err := execCommand(ctx, "kubectl", []string{"delete", "virtualmachine", "--namespace", spec.Namespace, spec.Name}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("kubectl delete: %w", err)
 	}

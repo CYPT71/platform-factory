@@ -57,22 +57,19 @@ Release CI builds and verifies the extracted package on macOS, Linux and
 Windows before executing the CLI. Linux/arm64 is also packaged; the Linux/amd64
 runtime/shim are deliberately absent from that target.
 
-## Acceptance and commercial scope
+## Acceptance and supported scope
 
 The delivery contract is: one install selection builds the supported official
-components; no missing plugin requires a customer to discover a separate Go
+components; no missing plugin requires a user to discover a separate Go
 module; every archive can be checked before execution; existing plugin trust
 and native Apple virtualization behavior are preserved.
 
-This is a distributable product foundation, not a claim of production or
-commercial completion. Remaining commercial decisions include pricing,
-licensing/support terms, release signing ownership and customer acceptance.
-The compiled-service path now has [real cluster acceptance](local-kubernetes-acceptance.md)
+The compiled-service path has [real cluster acceptance](local-kubernetes-acceptance.md)
 for signed reproducible publication, scaling, logs, redeployment and repeated
-rollback. Technical work still includes the interpreted-language runtime supply
-chain and real customer acceptance beyond this controlled cluster scenario. [TODO review](../TODO-REVIEW.md) tracks those gaps. No external
-release, paid service, cluster deployment or publication is performed by these
-local build commands.
+rollback. Remaining technical work includes the interpreted-language runtime
+supply chain and acceptance beyond this controlled cluster scenario.
+[TODO review](../TODO-REVIEW.md) tracks these gaps. These local build commands
+do not publish a release or deploy a cluster workload.
 
 The [security maintenance record](security-maintenance.md) documents the corrected
 Go toolchain, runtime dependencies and Linux-specific vulnerability scans.

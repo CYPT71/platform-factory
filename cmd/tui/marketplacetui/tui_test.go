@@ -277,3 +277,35 @@ func TestModelInstallAndRemoveFlow(t *testing.T) {
 		t.Fatalf("installed directory should be gone, stat err=%v", err)
 	}
 }
+
+func commandQuits(cmd tea.Cmd) bool {
+	if cmd == nil {
+		return false
+	}
+	switch msg := cmd().(type) {
+	case tea.QuitMsg:
+		return true
+	case tea.BatchMsg:
+		for _, child := range msg {
+			if commandQuits(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestSearchCharactersNeverTriggerListShortcuts(t *testing.T) {
+	for _, query := range []string{"query", "jdk", "ruby", "?"} {
+		m := newTestModel(t, sampleIndexForTUI(), t.TempDir())
+		for _, r := range query {
+			_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			if commandQuits(cmd) {
+				t.Fatalf("search %q quits on %q", query, r)
+			}
+		}
+		if m.search.Value() != query {
+			t.Fatalf("query=%q", m.search.Value())
+		}
+	}
+}

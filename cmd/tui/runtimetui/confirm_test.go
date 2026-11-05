@@ -115,3 +115,12 @@ func TestNoHostCandidateOmitsTheHostChoice(t *testing.T) {
 		}
 	}
 }
+
+func TestCtrlCCancelsFromImageEditor(t *testing.T) {
+	m := newTestModel("")
+	m.Update(key("enter"))
+	_, cmd := m.Update(key("ctrl+c"))
+	if !m.done || m.result.Source != SourceSkip || cmd == nil {
+		t.Fatalf("Ctrl+C did not cancel: done=%v result=%+v", m.done, m.result)
+	}
+}

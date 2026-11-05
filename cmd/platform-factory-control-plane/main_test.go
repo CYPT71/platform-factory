@@ -257,3 +257,32 @@ func TestPersistentReapLoopLogsStateSaveFailureViaObservability(t *testing.T) {
 		t.Fatalf("expected the failing path in the log output, got: %s", buf.String())
 	}
 }
+
+func TestRunOpensConfiguredCASBeforeListening(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := writeControlPlaneTestCertificate(t, dir)
+	casPath := filepath.Join(dir, "cas")
+	err := run([]string{"-cert=" + certPath, "-key=" + keyPath, "-ca=" + certPath, "-listen=invalid::address", "-cas-dir=" + casPath})
+	if err == nil {
+		t.Fatal("invalid listener accepted")
+	}
+	if strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(casPath, "blobs", "sha256")); err != nil {
+		t.Fatalf("CAS not initialized: %v", err)
+	}
+}
+
+func TestRunRejectsInvalidCASBeforeListening(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := writeControlPlaneTestCertificate(t, dir)
+	blocker := filepath.Join(dir, "file")
+	if err := os.WriteFile(blocker, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := run([]string{"-cert=" + certPath, "-key=" + keyPath, "-ca=" + certPath, "-cas-dir=" + blocker})
+	if err == nil || !strings.Contains(err.Error(), "open CAS") {
+		t.Fatalf("err=%v", err)
+	}
+}

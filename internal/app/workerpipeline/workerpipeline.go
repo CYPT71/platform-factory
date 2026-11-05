@@ -76,19 +76,35 @@ func Executor(root string, store cache.ContentStore, pull func(context.Context, 
 		if payload.APIVersion != LeaseAPIVersion {
 			return "", fmt.Errorf("worker: unsupported pipeline lease API version %q", payload.APIVersion)
 		}
-		if payload.Workdir == "" || filepath.IsAbs(payload.Workdir) || filepath.Clean(payload.Workdir) != payload.Workdir || payload.Workdir == "." || filepath.Clean(payload.Workdir) == ".." {
+		if !filepath.IsLocal(payload.Workdir) || filepath.Clean(payload.Workdir) != payload.Workdir || payload.Workdir == "." {
 			return "", errors.New("worker: workdir must be a clean relative path")
 		}
+		for _, blob := range payload.Blobs {
+			if !filepath.IsLocal(blob.Target) || filepath.Clean(blob.Target) != blob.Target || blob.Target == "." {
+				return "", errors.New("worker: blob target must be a clean relative path")
+			}
+		}
+		definition, _, err := pipeline.Decode(bytes.NewReader(payload.Pipeline))
+		if err != nil {
+			return "", fmt.Errorf("worker: decode pipeline: %w", err)
+		}
+		rootDir, err := os.OpenRoot(absolute)
+		if err != nil {
+			return "", fmt.Errorf("worker: open execution root: %w", err)
+		}
+		defer rootDir.Close()
 		workdir := filepath.Join(absolute, payload.Workdir)
-		if err := os.Mkdir(workdir, 0o700); err != nil {
+		if err := rootDir.Mkdir(payload.Workdir, 0o700); err != nil {
 			return "", fmt.Errorf("worker: create workdir: %w", err)
 		}
+		workspace, err := rootDir.OpenRoot(payload.Workdir)
+		if err != nil {
+			return "", fmt.Errorf("worker: open workspace: %w", err)
+		}
+		defer workspace.Close()
 		for _, blob := range payload.Blobs {
 			if store == nil || pull == nil {
 				return "", errors.New("worker: pipeline lease requires an unconfigured CAS")
-			}
-			if blob.Target == "" || filepath.IsAbs(blob.Target) || filepath.Clean(blob.Target) != blob.Target || blob.Target == "." || filepath.Clean(blob.Target) == ".." {
-				return "", errors.New("worker: blob target must be a clean relative path")
 			}
 			if err := pull(ctx, blob.Descriptor); err != nil {
 				return "", fmt.Errorf("worker: pull blob %s: %w", blob.Digest, err)
@@ -97,12 +113,11 @@ func Executor(root string, store cache.ContentStore, pull func(context.Context, 
 			if err != nil {
 				return "", err
 			}
-			target := filepath.Join(workdir, blob.Target)
-			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			if err := workspace.MkdirAll(filepath.Dir(blob.Target), 0o700); err != nil {
 				reader.Close()
 				return "", err
 			}
-			file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			file, err := workspace.OpenFile(blob.Target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 			if err == nil {
 				_, err = io.Copy(file, io.LimitReader(reader, blob.Size+1))
 			}
@@ -113,10 +128,6 @@ func Executor(root string, store cache.ContentStore, pull func(context.Context, 
 			if err != nil || closeErr != nil || readCloseErr != nil {
 				return "", errors.Join(err, closeErr, readCloseErr)
 			}
-		}
-		definition, _, err := pipeline.Decode(bytes.NewReader(payload.Pipeline))
-		if err != nil {
-			return "", fmt.Errorf("worker: decode pipeline: %w", err)
 		}
 		runner := executor.New(workdir, nil)
 		report, err := (pipeline.Scheduler{Parallelism: 1, Runner: runner}).Run(ctx, definition)

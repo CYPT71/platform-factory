@@ -18,9 +18,13 @@ type DependencyInspection struct {
 	Reason   string   `json:"reason"`
 }
 
+// InspectionAPIVersion identifies the additive language inspection wire contract.
+const InspectionAPIVersion = "platform-factory.dev/language-inspection/v1"
+
 // Inspection is the language-owned, read-only answer consumed by pf init.
 // Match=false means the host should consult another plugin.
 type Inspection struct {
+	APIVersion   string               `json:"api_version,omitempty"`
 	Match        bool                 `json:"match"`
 	Language     string               `json:"language,omitempty"`
 	Profile      string               `json:"profile,omitempty"`
@@ -52,7 +56,7 @@ func Inspect(root string, definition Definition) (Inspection, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return Inspection{}, errors.New("inspection root must be a real directory")
 	}
-	result := Inspection{Language: definition.Language, Profile: definition.Profile}
+	result := Inspection{APIVersion: InspectionAPIVersion, Language: definition.Language, Profile: definition.Profile}
 	for _, marker := range definition.Markers {
 		if matches, _ := filepath.Glob(filepath.Join(root, marker)); len(matches) > 0 {
 			sort.Strings(matches)
@@ -80,7 +84,7 @@ func Inspect(root string, definition Definition) (Inspection, error) {
 		result.Evidence = append(result.Evidence, sources...)
 	}
 	if len(result.Evidence) == 0 {
-		return Inspection{Match: false}, nil
+		return Inspection{APIVersion: InspectionAPIVersion, Match: false}, nil
 	}
 	result.Match = true
 	for _, manifest := range definition.Manifests {
@@ -135,7 +139,23 @@ func Inspect(root string, definition Definition) (Inspection, error) {
 	return result, nil
 }
 
-func WriteInspection(result Inspection) error { return json.NewEncoder(os.Stdout).Encode(result) }
+func WriteInspection(result Inspection) error {
+	if result.APIVersion == "" {
+		result.APIVersion = InspectionAPIVersion
+	}
+	if err := validateInspectionVersion(result); err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(result)
+}
+
+func validateInspectionVersion(result Inspection) error {
+	// Unversioned output from already shipped plugins remains readable.
+	if result.APIVersion != "" && result.APIVersion != InspectionAPIVersion {
+		return fmt.Errorf("unsupported language inspection api_version %q", result.APIVersion)
+	}
+	return nil
+}
 
 func RunInspection(binary, root string) (Inspection, error) {
 	cmd := exec.Command(binary, "inspect", "--root", root)
@@ -146,6 +166,9 @@ func RunInspection(binary, root string) (Inspection, error) {
 	var result Inspection
 	if err := json.Unmarshal(output, &result); err != nil {
 		return Inspection{}, fmt.Errorf("decode %s inspection: %w", binary, err)
+	}
+	if err := validateInspectionVersion(result); err != nil {
+		return Inspection{}, err
 	}
 	return result, nil
 }

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
+	tea "github.com/charmbracelet/bubbletea"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/CYPT71/platform-factory/internal/app/installer"
 )
@@ -62,5 +66,86 @@ func TestEnsurePFAliasReplacesAStaleAlias(t *testing.T) {
 	}
 	if _, err := os.Readlink(stalePath); err != nil {
 		t.Fatalf("stale pf file was not replaced by a symlink: %v", err)
+	}
+}
+
+func TestInstallerCancellationWaitsForBuildAndNeverReportsSuccess(t *testing.T) {
+	steps := []stepView{{BuildStep: installer.BuildStep{Name: "first"}}, {BuildStep: installer.BuildStep{Name: "second"}}}
+	m := newBuildModel(steps, "", "", "linux", "amd64", "test")
+	defer m.cancel()
+	started := make(chan struct{})
+	m.runBuild = func(ctx context.Context, _ stepView) ([]byte, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	result := make(chan tea.Msg, 1)
+	go func() { result <- m.runStep(0)() }()
+	<-started
+	updated, command := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m = updated.(buildModel)
+	if command != nil || !m.canceled {
+		t.Fatal("must wait for active build instead of quitting immediately")
+	}
+	select {
+	case message := <-result:
+		updated, command = m.Update(message)
+		m = updated.(buildModel)
+	case <-time.After(2 * time.Second):
+		t.Fatal("build did not observe cancellation")
+	}
+	if !errors.Is(m.resultError(), context.Canceled) || !m.done || m.current != 0 {
+		t.Fatalf("canceled state=%+v", m)
+	}
+	if command == nil {
+		t.Fatal("completion must now quit")
+	}
+	if _, ok := command().(tea.QuitMsg); !ok {
+		t.Fatal("expected quit after cancellation completes")
+	}
+}
+
+func TestInstallerBuildReplacesBinaryOnlyAfterSuccess(t *testing.T) {
+	for _, scenario := range []string{"success", "failure", "canceled"} {
+		t.Run(scenario, func(t *testing.T) {
+			root, prefix := t.TempDir(), t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/fixture\n\ngo 1.26.10\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			source := "package main\nfunc main() {}\n"
+			if scenario == "failure" {
+				source = "not Go source"
+			}
+			if err := os.WriteFile(filepath.Join(root, "main.go"), []byte(source), 0600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(prefix, "fixture"+installer.BinSuffix(runtime.GOOS))
+			if err := os.WriteFile(path, []byte("old binary"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if scenario == "canceled" {
+				cancel()
+			}
+			_, err := buildBinaryContext(ctx, root, prefix, runtime.GOOS, runtime.GOARCH, "test", stepView{BuildStep: installer.BuildStep{Name: "fixture", Pkg: "."}})
+			if (err == nil) != (scenario == "success") {
+				t.Fatalf("build err=%v", err)
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if scenario != "success" && string(data) != "old binary" {
+				t.Fatal("failed/canceled build replaced working binary")
+			}
+			if scenario == "success" && string(data) == "old binary" {
+				t.Fatal("successful build not installed")
+			}
+			entries, err := os.ReadDir(prefix)
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("staging files remain: %v %v", entries, err)
+			}
+		})
 	}
 }

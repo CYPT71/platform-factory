@@ -125,6 +125,11 @@ jobs:
           test -f "$bootstrap_root/windows/bin/oci-builder.exe"
           test -f "$bootstrap_root/windows/bin/example-service.exe"
           test -f "$bootstrap_root/windows/bin/microvm-init.exe"
+      - name: Verify the shipped language CLI contracts offline
+        if: matrix.target == 'amd64'
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/verify-language-contracts.py --bin-dir "$bootstrap_root/linux/bin"
       - name: Prove containerd node installation is idempotent and reversible
         if: matrix.target == 'amd64'
         env: {GOTOOLCHAIN: local}

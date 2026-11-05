@@ -14,8 +14,12 @@ be added to an unversioned `api` directory.
 Native implementations are deliberately not public SDK packages. KVM, HVF,
 and WHPX live under `internal/hypervisor/{kvm,hvf,whpx}`; authenticated guest
 channels live in `internal/guest`; boot bundles and durable machine state live
-in `internal/runtime`. Product code must depend on the SDK contracts instead
-of importing an implementation package.
+in `internal/runtime`. External consumers use the public contracts rather than
+importing these implementation packages. Inside the repository, application
+and domain packages use inward-facing internal contracts; command composition
+roots adapt public SDKs to those contracts. `internal/archtest` rejects imports
+of `api` or `sdk` from internal packages, and imports of `internal` from public
+contracts and SDKs. See the [source map](architecture/oci-layout.md#source-map).
 
 Within a stable major version:
 
@@ -38,6 +42,19 @@ The public conformance binary embeds validation, fingerprint, cache-key, and
 execution-backend vectors. Compatibility changes must update implementation
 code while preserving already shipped fixtures; historical fixtures must not
 be rewritten to make a breaking change pass.
+
+### Plugin frame size
+
+The v1 host and Go/Python/JavaScript/TypeScript/C# SDKs bound each JSON message
+body to **512 KiB (524,288 bytes)**, measured after UTF-8 encoding; headers are
+separate from that body limit. Larger results must be split or represented by
+bounded artifact references. The non-Go SDKs previously allowed 1 MiB, which
+could produce responses the Go host refused. They now enforce the existing
+host boundary on both reads and writes. No wire fields or Content-Type changed.
+
+`platform-factory-conformance plugin EXECUTABLE` sends a complete, valid request
+of 524,289 body bytes to verify rejection at that boundary. A truncated body
+does not establish that an implementation enforces the size limit.
 
 Publication targets use the same rule. Run
 `platform-factory-conformance publication` to validate OCI Registry reference
@@ -96,3 +113,24 @@ be confused with the CLI envelope. Standard OCI and SBOM documents retain
 their standard schema identifiers. Commands not yet carrying this envelope
 remain explicitly outside the global stable-output claim until migrated and
 covered by historical fixtures.
+
+## Language inspection contract
+
+The plain-executable language plugins now emit
+`api_version: platform-factory.dev/language-inspection/v1` from `inspect`.
+This is separate from the RPC plugin framing contract. Existing unversioned
+inspection responses remain readable; an explicitly unknown version is rejected.
+Existing fields retain their meaning and new fields must be optional. Removing
+or changing a field requires a new major wire version and a migration path.
+
+Frozen legacy and v1 fixtures live in `sdk/langplugin/testdata`; the SDK tests
+read them through the real inspection process boundary. The CI offline CLI
+check executes all eight shipped plugins and the dependency-layer paths of
+Ruby, PHP, Java, .NET and Rust. Those checks do not execute their package managers
+or establish production support for their runtimes. `--root` is resolved to an
+absolute path before a package manager changes its working directory.
+
+Dependency layer prefixes must be relative local paths, without backslashes,
+colons or NUL bytes. A layer source must be a real directory; an output inside
+that directory is refused. A complete tar is staged and renamed into place
+only after successful writing, so failures preserve an existing layer.

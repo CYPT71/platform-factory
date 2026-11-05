@@ -20,8 +20,13 @@ Current, verified limitations instead:
 
 - **`verify-release` doesn't fetch a published image; it verifies local
   artifacts.** `internal/registry.Client` gained `GetManifest`/`GetBlob`
-  on 2026-08-04, but nothing in the shipped CLI calls them yet — there is
-  no `platform-factory pull`. See the [maturity matrix](reference/maturity.md).
+  and are used by `pf plugin provision-runtime` to fetch a digest-pinned
+  language runtime image. That explicit provisioning step selects a Linux
+  platform, verifies downloaded content, and extracts it through the shared
+  rootfs converter. It is not a general-purpose `platform-factory pull`
+  command, and builds do not implicitly provision runtimes. See the
+  [language runtime guide](language-plugin-layers.md) and
+  [maturity matrix](reference/maturity.md).
 - **Does not prove an executable is static.** Use the static build
   command in the README, or `-extra-file` for a binary that genuinely
   can't be statically linked.

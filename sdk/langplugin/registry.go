@@ -106,31 +106,37 @@ func Load(name, sourcePath string) (installedPath string, err error) {
 			"non-root container, no $HOME - set $%s to a writable path instead)", dir, err, dirEnv)
 	}
 	destination := filepath.Join(dir, binaryName(name))
-	temporary := destination + ".loading"
-	if err := copyExecutable(sourcePath, temporary); err != nil {
-		_ = os.Remove(temporary)
+	temporary, err := os.CreateTemp(dir, "."+binaryName(name)+"-*.loading")
+	if err != nil {
+		return "", fmt.Errorf("create plugin staging file: %w", err)
+	}
+	defer os.Remove(temporary.Name())
+	if err := stageExecutable(sourcePath, temporary); err != nil {
 		return "", err
 	}
-	if err := os.Rename(temporary, destination); err != nil {
-		_ = os.Remove(temporary)
+	if err := os.Rename(temporary.Name(), destination); err != nil {
 		return "", fmt.Errorf("install %s: %w", destination, err)
 	}
 	return destination, nil
 }
 
-func copyExecutable(sourcePath, destinationPath string) error {
+// stageExecutable writes through the exclusively created staging descriptor.
+// No shared predictable pathname can redirect or mix concurrent installations.
+func stageExecutable(sourcePath string, destination *os.File) error {
+	defer destination.Close()
 	source, err := os.Open(sourcePath)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", sourcePath, err)
 	}
 	defer source.Close()
-	destination, err := os.OpenFile(destinationPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", destinationPath, err)
-	}
 	if _, err := io.Copy(destination, source); err != nil {
-		_ = destination.Close()
-		return fmt.Errorf("write %s: %w", destinationPath, err)
+		return fmt.Errorf("write plugin: %w", err)
+	}
+	if err := destination.Chmod(0755); err != nil {
+		return err
+	}
+	if err := destination.Sync(); err != nil {
+		return err
 	}
 	return destination.Close()
 }

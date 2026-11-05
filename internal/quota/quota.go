@@ -5,6 +5,7 @@ package quota
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -209,10 +210,12 @@ func (e *QuotaExceededError) Error() string {
 
 // FairScheduler provides fairness-aware scheduling based on tenant quotas and priorities.
 type FairScheduler struct {
-	quotas *TenantQuota
-	stats  map[TenantID]*TenantStats
-	global *SchedulerStats
-	mu     sync.RWMutex
+	// accountingMu serializes admission checks with reservations and releases.
+	accountingMu sync.Mutex
+	quotas       *TenantQuota
+	stats        map[TenantID]*TenantStats
+	global       *SchedulerStats
+	mu           sync.RWMutex
 }
 
 // NewFairScheduler creates a new FairScheduler.
@@ -226,6 +229,15 @@ func NewFairScheduler(quotas *TenantQuota) *FairScheduler {
 
 // CanSchedule checks if a tenant can schedule a new execution based on their quota.
 func (fs *FairScheduler) CanSchedule(tenant TenantID, resource ResourceType, requested int64) (bool, error) {
+	fs.accountingMu.Lock()
+	defer fs.accountingMu.Unlock()
+	return fs.canSchedule(tenant, resource, requested)
+}
+
+func (fs *FairScheduler) canSchedule(tenant TenantID, resource ResourceType, requested int64) (bool, error) {
+	if requested < 0 {
+		return false, fmt.Errorf("resource reservation must not be negative")
+	}
 	quota := fs.quotas.GetQuota(tenant)
 
 	stats := fs.getOrCreateStats(tenant)
@@ -251,6 +263,13 @@ func (fs *FairScheduler) CanSchedule(tenant TenantID, resource ResourceType, req
 		return true, nil
 	}
 
+	if requested > math.MaxInt64-used {
+		return false, fmt.Errorf("resource reservation overflows accounting")
+	}
+	if resource == ResourceTypeParallel && requested > int64(int(^uint(0)>>1))-used {
+		return false, fmt.Errorf("parallel reservation overflows accounting")
+	}
+
 	if limit <= 0 {
 		return true, nil // No limit set
 	}
@@ -269,7 +288,9 @@ func (fs *FairScheduler) CanSchedule(tenant TenantID, resource ResourceType, req
 
 // Schedule attempts to schedule a resource for a tenant.
 func (fs *FairScheduler) Schedule(tenant TenantID, resource ResourceType, amount int64) error {
-	canSchedule, err := fs.CanSchedule(tenant, resource, amount)
+	fs.accountingMu.Lock()
+	defer fs.accountingMu.Unlock()
+	canSchedule, err := fs.canSchedule(tenant, resource, amount)
 	if !canSchedule {
 		return err
 	}
@@ -303,29 +324,36 @@ func (fs *FairScheduler) Schedule(tenant TenantID, resource ResourceType, amount
 
 // Release releases resources for a tenant.
 func (fs *FairScheduler) Release(tenant TenantID, resource ResourceType, amount int64) {
+	if amount <= 0 {
+		return
+	}
+	fs.accountingMu.Lock()
+	defer fs.accountingMu.Unlock()
 	stats := fs.getOrCreateStats(tenant)
 
 	switch resource {
 	case ResourceTypeCPU:
-		newCPU := stats.CPUUsed() - amount
+		released := min(stats.CPUUsed(), amount)
+		newCPU := stats.CPUUsed() - released
 		if newCPU < 0 {
 			newCPU = 0
 		}
 		stats.UpdateCPU(newCPU)
 		fs.global.mu.Lock()
-		fs.global.totalCPU -= amount
+		fs.global.totalCPU -= released
 		if fs.global.totalCPU < 0 {
 			fs.global.totalCPU = 0
 		}
 		fs.global.mu.Unlock()
 	case ResourceTypeMemory:
-		newMemory := stats.MemoryUsed() - amount
+		released := min(stats.MemoryUsed(), amount)
+		newMemory := stats.MemoryUsed() - released
 		if newMemory < 0 {
 			newMemory = 0
 		}
 		stats.UpdateMemory(newMemory)
 		fs.global.mu.Lock()
-		fs.global.totalMemory -= amount
+		fs.global.totalMemory -= released
 		if fs.global.totalMemory < 0 {
 			fs.global.totalMemory = 0
 		}
@@ -343,18 +371,50 @@ func (fs *FairScheduler) Release(tenant TenantID, resource ResourceType, amount 
 		}
 		stats.UpdateNetwork(newNetwork)
 	case ResourceTypeParallel:
-		newParallel := stats.ParallelUsed() - int(amount)
+		released := min(int64(stats.ParallelUsed()), amount)
+		newParallel := stats.ParallelUsed() - int(released)
 		if newParallel < 0 {
 			newParallel = 0
 		}
 		stats.UpdateParallel(newParallel)
 		fs.global.mu.Lock()
-		fs.global.totalParallel -= int(amount)
+		fs.global.totalParallel -= int(released)
 		if fs.global.totalParallel < 0 {
 			fs.global.totalParallel = 0
 		}
 		fs.global.mu.Unlock()
 	}
+}
+
+// RestoreParallelUsage replaces concurrency accounting from durable open leases.
+// Call before serving requests. Existing work is counted even if a configured
+// limit has since been lowered; new admissions remain blocked until it drains.
+func (fs *FairScheduler) RestoreParallelUsage(usage map[TenantID]int) error {
+	fs.accountingMu.Lock()
+	defer fs.accountingMu.Unlock()
+	total := 0
+	for _, count := range usage {
+		if count < 0 || count > int(^uint(0)>>1)-total {
+			return fmt.Errorf("invalid restored parallel usage")
+		}
+		total += count
+	}
+	fs.mu.Lock()
+	for tenant, stats := range fs.stats {
+		stats.UpdateParallel(usage[tenant])
+	}
+	for tenant, count := range usage {
+		if _, ok := fs.stats[tenant]; !ok {
+			stats := NewTenantStats()
+			stats.UpdateParallel(count)
+			fs.stats[tenant] = stats
+		}
+	}
+	fs.mu.Unlock()
+	fs.global.mu.Lock()
+	fs.global.totalParallel = total
+	fs.global.mu.Unlock()
+	return nil
 }
 
 // GetPriority returns the priority for a tenant.
@@ -425,10 +485,13 @@ func (fs *FairScheduler) GetTenantInfo(tenant TenantID) TenantInfo {
 // GetAllTenantsInfo returns information about all tenants.
 func (fs *FairScheduler) GetAllTenantsInfo() []TenantInfo {
 	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-
-	infos := make([]TenantInfo, 0, len(fs.stats))
+	tenants := make([]TenantID, 0, len(fs.stats))
 	for tenant := range fs.stats {
+		tenants = append(tenants, tenant)
+	}
+	fs.mu.RUnlock()
+	infos := make([]TenantInfo, 0, len(tenants))
+	for _, tenant := range tenants {
 		infos = append(infos, fs.GetTenantInfo(tenant))
 	}
 	return infos

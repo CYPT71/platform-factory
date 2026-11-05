@@ -89,13 +89,24 @@ func Confirm(language, hostCandidate, hostArch string) (Result, error) {
 func (m *model) Init() tea.Cmd { return textinput.Blink }
 
 func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	if kit.IsQuitKey(message) {
+		m.result, m.done = Result{Source: SourceSkip}, true
+		return m, tea.Quit
+	}
 	key, ok := message.(tea.KeyMsg)
 	if !ok {
+		if m.editingImage {
+			var command tea.Cmd
+			m.imageInput, command = m.imageInput.Update(message)
+			return m, command
+		}
 		return m, nil
 	}
 	if m.editingImage {
 		if kit.IsCancelKey(message) {
 			m.editingImage = false
+			m.imageInput.Blur()
+			m.err = ""
 			return m, nil
 		}
 		switch key.String() {
@@ -132,8 +143,7 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		selected := m.choices[m.cursor]
 		if selected.source == SourceImage {
 			m.editingImage = true
-			m.imageInput.Focus()
-			return m, textinput.Blink
+			return m, m.imageInput.Focus()
 		}
 		m.result, m.done = Result{Source: selected.source}, true
 		return m, tea.Quit

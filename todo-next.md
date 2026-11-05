@@ -1,8 +1,7 @@
 # Clean Architecture refactor: status and next stage
 
-Full original plan (context, dependency rule, verification strategy) is
-at `/Users/cyprien/.claude/plans/zany-fluttering-frost.md`. This file is
-the actionable, evidence-based backlog for continuing the work.
+This file records the dependency rules, verification strategy and actionable
+backlog for continuing the architecture work.
 
 ## Repo-wide pass: every cmd/ binary, plus api/sdk boundary hardening
 

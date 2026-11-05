@@ -1,6 +1,6 @@
 # delivery-sandbox-policy
 
-Require isolated AI execution without ambient credentials.
+Require isolated execution without ambient credentials.
 
 Offline JSON analyzer; no network, filesystem, secrets or model calls.
 Shared implementation: `internal/extensions`; signed bundles: `pf extensions bundle`.

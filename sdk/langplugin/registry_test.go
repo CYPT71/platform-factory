@@ -1,6 +1,7 @@
 package langplugin
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -198,5 +199,65 @@ func TestLoadNamesTheOverrideEnvVarWhenTheDefaultDirectoryIsUnwritable(t *testin
 	}
 	if !strings.Contains(err.Error(), dirEnv) {
 		t.Fatalf("error %q does not name %s as the override", err.Error(), dirEnv)
+	}
+}
+
+func TestLoadDoesNotFollowStaleLoadingSymlink(t *testing.T) {
+	dir := withPluginDir(t)
+	source := filepath.Join(t.TempDir(), "source")
+	writeFakeBinary(t, source)
+	outside := filepath.Join(t.TempDir(), "keep")
+	if err := os.WriteFile(outside, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, binaryName("ruby")+".loading")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	installed, err := Load("ruby", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(outside); err != nil || string(got) != "keep" {
+		t.Fatalf("stale symlink target changed: %q %v", got, err)
+	}
+	if info, err := os.Lstat(installed); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("installed entry not a regular file: %v %v", info, err)
+	}
+}
+
+func TestConcurrentLoadsInstallOnlyCompleteBinaries(t *testing.T) {
+	withPluginDir(t)
+	sources := make([]string, 8)
+	expected := make(map[string]bool)
+	for i := range sources {
+		sources[i] = filepath.Join(t.TempDir(), "source")
+		data := bytes.Repeat([]byte{byte('a' + i)}, 128<<10)
+		expected[string(data)] = true
+		if err := os.WriteFile(sources[i], data, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := make(chan struct{})
+	results := make(chan error, len(sources))
+	for _, source := range sources {
+		go func() { <-start; _, err := Load("ruby", source); results <- err }()
+	}
+	close(start)
+	for range sources {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	path, err := Resolve("ruby")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !expected[string(data)] {
+		t.Fatalf("installed mixed/truncated binary: length=%d err=%v", len(data), err)
+	}
+	names, err := List()
+	if err != nil || len(names) != 1 || names[0] != "ruby" {
+		t.Fatalf("names=%v err=%v", names, err)
 	}
 }

@@ -646,3 +646,64 @@ func TestQuotaZeroValues(t *testing.T) {
 		t.Errorf("expected zero quota, got %+v", gotQuota)
 	}
 }
+
+func TestConcurrentReservationsRespectParallelLimit(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		scheduler := NewFairScheduler(NewTenantQuota(Quota{MaxParallel: 1}))
+		start := make(chan struct{})
+		results := make(chan error, 128)
+		for range 128 {
+			go func() { <-start; results <- scheduler.Schedule("acme", ResourceTypeParallel, 1) }()
+		}
+		close(start)
+		accepted := 0
+		for range 128 {
+			if <-results == nil {
+				accepted++
+			}
+		}
+		if accepted != 1 {
+			t.Fatalf("round %d: accepted %d reservations for limit 1", round, accepted)
+		}
+	}
+}
+
+func TestRestoreParallelUsagePreservesOverLimitWorkAndReplacesCounters(t *testing.T) {
+	scheduler := NewFairScheduler(NewTenantQuota(Quota{MaxParallel: 1}))
+	if err := scheduler.RestoreParallelUsage(map[TenantID]int{"acme": 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.RestoreParallelUsage(map[TenantID]int{"acme": 2}); err != nil {
+		t.Fatal(err)
+	}
+	if got := scheduler.GetTenantInfo("acme").ParallelUsed; got != 2 {
+		t.Fatalf("restored usage=%d", got)
+	}
+	if err := scheduler.Schedule("acme", ResourceTypeParallel, 1); err == nil {
+		t.Fatal("admitted new work above lowered limit")
+	}
+	scheduler.Release("acme", ResourceTypeParallel, 2)
+	if err := scheduler.Schedule("acme", ResourceTypeParallel, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := scheduler.RestoreParallelUsage(nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := scheduler.GetTenantInfo("acme").ParallelUsed; got != 0 {
+		t.Fatalf("stale usage=%d", got)
+	}
+}
+
+func TestNegativeReservationCannotBypassQuota(t *testing.T) {
+	scheduler := NewFairScheduler(NewTenantQuota(Quota{MaxParallel: 1}))
+	if err := scheduler.Schedule("acme", ResourceTypeParallel, -1); err == nil {
+		t.Fatal("negative reservation accepted")
+	}
+	if err := scheduler.Schedule("acme", ResourceTypeParallel, 1); err != nil {
+		t.Fatal(err)
+	}
+	scheduler.Release("acme", ResourceTypeParallel, -1)
+	if got := scheduler.GetTenantInfo("acme").ParallelUsed; got != 1 {
+		t.Fatalf("negative release changed usage to %d", got)
+	}
+}

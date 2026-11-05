@@ -97,10 +97,12 @@ func runFreeze(args []string) error {
 		return err
 	}
 	packages := filepath.Join(root, depsRelPath)
-	if err := langplugin.RunIn(root, "dotnet", "restore", "--use-lock-file", "--packages", packages); err != nil {
+	if err := langplugin.RunInWithEnv(root, []string{"NUGET_PACKAGES=" + packages}, "dotnet", "restore", "--use-lock-file"); err != nil {
 		return fmt.Errorf("dotnet restore: %w", err)
 	}
-	return nil
+	// A dependency-free restore succeeds without creating the NuGet cache.
+	// It must still be packageable as an empty, deterministic dependency layer.
+	return os.MkdirAll(packages, 0755)
 }
 
 func runBuildLayer(args []string) error {
