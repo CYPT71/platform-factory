@@ -44,8 +44,7 @@ func currentCgroupV2Path() (string, error) {
 // configured CPU/memory/PIDs limits to it, and moves the calling process
 // into it. It requires write access to the parent directory, which in a
 // real deployment means the cgroup subtree has already been delegated to
-// whatever user/service account runs the VMM supervisor - the same
-// precondition patch.bash's own check_kvm documents for /dev/kvm access.
+// the user or service account running the VMM supervisor.
 func (s *Sandbox) applyCgroups() error {
 	parent := s.config.CgroupParent
 	if parent == "" {

@@ -190,8 +190,7 @@ func TestRunPublishExecutesInOrderAndReportsFailure(t *testing.T) {
 
 // TestRunPublishTransitionsWorkloadStateThroughStateMachine proves runPublish
 // actually drives internal/core.RuntimeState.TransitionTo (statemachine.go),
-// not just the operation journal - the item mvp.md's own §4 flagged as
-// deferred twice ("Actually wire the state machine in product paths").
+// alongside the operation journal.
 // A successful publish must leave the workload at PhasePublished; a failed
 // one must leave it at PhaseFailed - both reached only through the
 // legal Built -> Publishing -> {Published,Failed} path the transition

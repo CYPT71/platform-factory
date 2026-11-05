@@ -367,8 +367,7 @@ func runNative(action string, spec microvm.Spec, runner string, requireNative bo
 
 // runKubeVirt dispatches to a real, discovered, verified and sandboxed
 // KubeVirt plugin by capability, rather than shelling out to a hardcoded
-// binary name the way an earlier version of this function did (see
-// mvp.md's own account of that gap): --backend=kubevirt is a legitimate,
+// binary name. The --backend=kubevirt flag is a legitimate,
 // explicit user selection of which backend to drive, but which concrete
 // plugin actually implements it, and whether that plugin is trusted to
 // run at all, now goes through the same declared->discovered->negotiated->

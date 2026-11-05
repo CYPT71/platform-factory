@@ -68,7 +68,7 @@ The compiled-service path has [real cluster acceptance](local-kubernetes-accepta
 for signed reproducible publication, scaling, logs, redeployment and repeated
 rollback. Remaining technical work includes the interpreted-language runtime
 supply chain and acceptance beyond this controlled cluster scenario.
-[TODO review](../TODO-REVIEW.md) tracks these gaps. These local build commands
+[Next steps](../todo-next.md) tracks these gaps. These local build commands
 do not publish a release or deploy a cluster workload.
 
 The [security maintenance record](security-maintenance.md) documents the corrected

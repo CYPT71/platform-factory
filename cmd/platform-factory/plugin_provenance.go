@@ -1,6 +1,4 @@
-// platform-factory plugin-provenance is the capture pipeline mvp.md's
-// "Add verifiable build provenance of plugin" / "Associate source +
-// builder + artifact + digest" checklist items asked for: given a built
+// platform-factory plugin-provenance captures build provenance: given a built
 // plugin executable and its source tree, it captures the source commit,
 // builder identity and build inputs, and emits a signed predicate
 // (internal/provenance.ProvenanceRecord) associating them with the

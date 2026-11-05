@@ -18,9 +18,8 @@ import (
 	"github.com/CYPT71/platform-factory/internal/signing"
 )
 
-// PluginBuildInputs is everything mvp.md's "Add verifiable build
-// provenance of plugin" checklist item names as required content - source
-// commit, builder identity, build inputs - kept separate from the I/O that
+// PluginBuildInputs records the source commit, builder identity and build
+// inputs, kept separate from the I/O that
 // captures them (CapturePluginSourceCommit, DigestPluginExecutable) so
 // GeneratePluginProvenance itself stays a pure, deterministic function of
 // its inputs, not a function of the filesystem or git state at call time.
@@ -69,8 +68,7 @@ func (i PluginBuildInputs) validate() error {
 }
 
 // GeneratePluginProvenance builds the signed-predicate content - source,
-// builder identity, artifact and digest, associated together - that
-// mvp.md's provenance items ask for, reusing this package's own
+// builder identity, artifact and digest, associated together - using
 // ProvenanceRecord/Material/Invocation/ConfigSource shape (signing.go)
 // instead of inventing a second predicate format: a plugin's build
 // provenance and an OCI image's build provenance (Generate, provenance.go)

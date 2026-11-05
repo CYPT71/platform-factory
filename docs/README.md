@@ -36,6 +36,7 @@ and evidence. Runnable examples are indexed in [examples](../examples/README.md)
 - [Security model](security/model.md): trust boundaries and enforcement limits.
 - [Technology toolkit](technology-toolkit.md): offline analyzers and their contracts.
 - [Contribution guide](../CONTRIBUTING.md): development and review workflow.
+- [Next steps](../todo-next.md): prioritized work and acceptance criteria.
 
 ## Read evidence at the right level
 

@@ -288,12 +288,8 @@ func TestMustRel(t *testing.T) {
 // a statically linked binary with no PT_INTERP and no DT_NEEDED, and
 // cross-compiling a genuinely *dynamically* linked ELF (to exercise the
 // DT_NEEDED/RPATH walk itself) needs a cgo cross-linker this environment
-// doesn't have. That specific path - RPATH-vs-absolute classification,
-// libpython/libc/libm/the ELF interpreter resolution, the destination
-// math - is proven instead by the real, recorded run against the actual
-// python:3.12-slim image pulled from Docker Hub (see patch.md), which is
-// a stronger, not weaker, form of evidence than a synthetic fixture
-// would be. This test's job is narrower and complementary: confirm the
+// doesn't have. Dynamic-library resolution requires a separate runtime
+// acceptance test. This test's job is narrower: confirm the
 // closure walk itself doesn't panic or misbehave on a real ELF file, not
 // a hand-rolled or copied one.
 func TestResolveRuntimeClosureAgainstARealCrossCompiledELF(t *testing.T) {

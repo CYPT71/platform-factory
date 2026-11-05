@@ -7,9 +7,8 @@
 // internal/networking (native KVM/HVF probing, direct boot, disk
 // inspection, port-forward parsing); the remaining CLI code in
 // cmd/platform-factory/microvm.go is deeply coupled to *pluginHost, the
-// microVMExecutor process-launch abstraction, and flag parsing, and -
-// per mvp.md's own explicit deferral - the native-KVM-eligibility
-// hardware probing needs its own hermeticity design session before any
+// microVMExecutor process-launch abstraction, and flag parsing. Native KVM
+// eligibility probing needs a hermetic test design before any
 // further extraction there is safe. Only Capability, Params, and Result
 // - the KubeVirt plugin's wire contract, with no host-probing or
 // process-launch concerns at all - move here.
