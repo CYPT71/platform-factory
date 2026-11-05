@@ -14,11 +14,12 @@ not need Docker, Podman, a registry account or a running cluster.
 [![OCI validation](https://github.com/CYPT71/platform-factory/actions/workflows/ci-oci-validation.yml/badge.svg?branch=main&event=push)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-oci-validation.yml?query=branch%3Amain)
 [![Release evidence](https://github.com/CYPT71/platform-factory/actions/workflows/ci-release.yml/badge.svg)](https://github.com/CYPT71/platform-factory/actions/workflows/ci-release.yml)
 
-[![From an empty folder to a Python program running in a verified OCI image](docs/assets/from-zero.gif)](demo/README.md#recorded-terminal-demo)
+[![FastAPI Hello World: verified OCI image, HTTP 200 and a running Podman container](docs/assets/from-zero.gif)](demo/README.md#recorded-terminal-demo)
 
 Real terminal recording: commands entered one at a time, from an empty application
-folder to Python running in Podman. Initialization adds only the config and lock;
-generated runtime/build data stays in `.platform-factory/`. Idle pauses are shortened.
+folder to FastAPI returning `Hello World`, ending with `podman ps`. Initialization
+adds only the config and lock; generated runtime/build data stays in
+`.platform-factory/`. Idle pauses are shortened.
 [Commands, prerequisites and original recording](demo/README.md#recorded-terminal-demo).
 
 Platform Factory turns a compiled executable into a deterministic OCI image,
