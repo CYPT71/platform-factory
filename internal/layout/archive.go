@@ -184,11 +184,94 @@ func containsSuspiciousAssignment(lower, marker string) bool {
 		if isEmptyQuotedValue(after) {
 			continue
 		}
-		if isSelfReferencingKeyword(marker, after) {
+		// Match the whole keyword: ssl_keyfile_password=ssl_keyfile_password
+		// is the same pass-through as password=password.
+		keywordStart := start
+		for keywordStart > 0 && isIdentifierByte(lower[keywordStart-1]) {
+			keywordStart--
+		}
+		keyword := lower[keywordStart:searchFrom]
+		if isSelfReferencingKeyword(keyword, after) || isMaskedAssignment(after) ||
+			isNamedLookup(strings.TrimSuffix(keyword, "="), after) || isReferenceSchema(after) {
 			continue
 		}
 		return true
 	}
+}
+
+// These forms contain references or a redaction, rather than an embedded
+// credential. Keep the complete value boundary so a literal suffix is scanned.
+func assignmentBoundary(rest string) bool {
+	rest = strings.TrimLeft(rest, " \t")
+	return rest == "" || strings.ContainsRune(",)\r\n", rune(rest[0]))
+}
+
+func isMaskedAssignment(after string) bool {
+	quote := ""
+	for _, candidate := range []string{`\"`, `\'`, `"`, `'`} {
+		if strings.HasPrefix(after, candidate) {
+			quote = candidate
+			break
+		}
+	}
+	if quote == "" {
+		return false
+	}
+	value := after[len(quote):]
+	end := strings.Index(value, quote)
+	if end < 3 || strings.Trim(value[:end], "*") != "" {
+		return false
+	}
+	return assignmentBoundary(value[end+len(quote):])
+}
+
+func assignmentIdentifier(value string) bool {
+	if value == "" || !(value[0] == '_' || value[0] >= 'a' && value[0] <= 'z') {
+		return false
+	}
+	for i := 1; i < len(value); i++ {
+		if !isIdentifierByte(value[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isNamedLookup(name, after string) bool {
+	bracket := strings.IndexByte(after, '[')
+	if bracket < 1 || !assignmentIdentifier(after[:bracket]) {
+		return false
+	}
+	for _, quote := range []string{`"`, `'`} {
+		lookup := quote + name + quote + "]"
+		if strings.HasPrefix(after[bracket+1:], lookup) {
+			return assignmentBoundary(after[bracket+1+len(lookup):])
+		}
+	}
+	return false
+}
+
+// A typed schema containing only named references is not a scalar credential.
+// Literal values, expressions and nested structures do not receive this exemption.
+func isReferenceSchema(after string) bool {
+	const prefix = "cast(any, {"
+	if !strings.HasPrefix(after, prefix) {
+		return false
+	}
+	end := strings.Index(after[len(prefix):], "})")
+	if end < 0 {
+		return false
+	}
+	content := after[len(prefix) : len(prefix)+end]
+	for _, field := range strings.Split(content, ",") {
+		key, value, ok := strings.Cut(field, ":")
+		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if !ok || len(key) < 3 || key[0] != key[len(key)-1] || (key[0] != '\'' && key[0] != '"') ||
+			!assignmentIdentifier(key[1:len(key)-1]) || !assignmentIdentifier(value) {
+			return false
+		}
+	}
+	return assignmentBoundary(after[len(prefix)+end+2:])
 }
 
 func isSafeAssignmentValue(after string) bool {

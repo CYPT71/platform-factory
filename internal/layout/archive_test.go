@@ -217,3 +217,36 @@ func TestContainsSecretMarkerDoesNotMatchOnPrefixWords(t *testing.T) {
 		t.Fatal("a value merely prefixed by 'self' must still be flagged")
 	}
 }
+
+func TestContainsSecretMarkerAcceptsDependencyPlumbing(t *testing.T) {
+	for _, source := range []string{
+		`url = self.replace(password=\"********\")`,
+		`ssl_keyfile_password=ssl_keyfile_password,`,
+		`client_secret=client_secret,`,
+		`password=parts['password'],`,
+		`password=cast(Any, {"tokenUrl": tokenUrl, "scopes": scopes}),`,
+	} {
+		if containsSecretMarker([]byte(source)) {
+			t.Errorf("dependency plumbing flagged: %s", source)
+		}
+	}
+}
+
+func TestContainsSecretMarkerKeepsRejectingDependencyLiterals(t *testing.T) {
+	for _, source := range []string{
+		`ssl_keyfile_password="hunter2"`,
+		`client_secret="hunter2"`,
+		`password=parts['hunter2']`,
+		`password=cast(str, "hunter2")`,
+		`password=cast(Any, "hunter2")`,
+		`password=cast(Any, {"value": "hunter2"})`,
+		`password=parts['password'] + "hunter2"`,
+		`password="********" + "hunter2"`,
+		`password="***hunter2"`,
+		`password="********"\nsecret=hunter2`,
+	} {
+		if !containsSecretMarker([]byte(source)) {
+			t.Errorf("credential literal accepted: %s", source)
+		}
+	}
+}
