@@ -23,15 +23,21 @@ func RunHeartbeat(ctx context.Context, agent *Agent, interval time.Duration, mis
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	runHeartbeat(ctx, agent.State, ticker.C, interval, missedThreshold, onStatusChange)
+}
+
+// runHeartbeat keeps probe scheduling separate from status transitions so tests
+// can drive every boundary without depending on socket deadlines or scheduling.
+func runHeartbeat(ctx context.Context, state func(context.Context) (string, error), ticks <-chan time.Time, interval time.Duration, missedThreshold int, onStatusChange func(bool, int)) {
 	consecutiveMisses := 0
 	stuck := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticks:
 			probeCtx, cancel := context.WithTimeout(ctx, interval)
-			_, err := agent.State(probeCtx)
+			_, err := state(probeCtx)
 			cancel()
 			if err != nil {
 				consecutiveMisses++

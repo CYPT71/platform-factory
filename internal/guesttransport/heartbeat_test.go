@@ -2,133 +2,85 @@ package guesttransport
 
 import (
 	"context"
+	"errors"
 	"net"
-	"sync"
 	"testing"
 	"time"
 )
 
-// serveState answers exactly n OpState requests with "running", one at a
-// time, blocking between them until told to serve the next - giving the
-// test precise control over when the guest "goes quiet" and when it
-// resumes, instead of racing real wall-clock timing against the guest
-// loop's own pace.
-func serveStateOnDemand(t *testing.T, codec *Codec, releases <-chan struct{}) {
-	t.Helper()
-	go func() {
-		for range releases {
-			if err := ServeOne(context.Background(), codec, handlerFunc(func(context.Context, Request) Response {
-				return Response{State: "running"}
-			})); err != nil {
-				return
-			}
-		}
-	}()
-}
-
 func TestRunHeartbeatDetectsAndRecoversFromStuckGuest(t *testing.T) {
-	host, guest := net.Pipe()
-	agent, err := NewAgent(host, testKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer agent.Close()
-	guestCodec, err := NewCodec(guest, guest, testKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer guest.Close()
-
-	// Never closed: a background sender may still be selecting on it when
-	// the test returns (racing a close would be exactly the kind of
-	// send-on-closed-channel hazard this is avoiding), and every
-	// goroutine holding it exits via ctx.Done() on its own once cancel()
-	// runs below.
-	releases := make(chan struct{})
-	serveStateOnDemand(t, guestCodec, releases)
-
-	var mu sync.Mutex
-	var events []struct {
+	ctx, cancel := context.WithCancel(context.Background())
+	ticks := make(chan time.Time)
+	results := make(chan error)
+	type event struct {
 		stuck  bool
 		missed int
 	}
-	onStatusChange := func(stuck bool, consecutiveMisses int) {
-		mu.Lock()
-		defer mu.Unlock()
-		events = append(events, struct {
-			stuck  bool
-			missed int
-		}{stuck, consecutiveMisses})
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	const interval = 20 * time.Millisecond
-	const threshold = 3
-	go RunHeartbeat(ctx, agent, interval, threshold, onStatusChange)
-
-	// Two responsive probes: the guest answers immediately each time -
-	// never crosses the stuck threshold, so no event fires yet.
-	releases <- struct{}{}
-	releases <- struct{}{}
-	time.Sleep(3 * interval)
-	mu.Lock()
-	gotBeforeStuck := len(events)
-	mu.Unlock()
-	if gotBeforeStuck != 0 {
-		t.Fatalf("events fired before any miss: %d", gotBeforeStuck)
-	}
-
-	// Now the guest goes quiet: no releases sent, so every probe times
-	// out. After `threshold` consecutive misses, exactly one "stuck"
-	// event must fire - not one per miss.
-	time.Sleep(time.Duration(threshold+2) * interval)
-	mu.Lock()
-	if len(events) != 1 || !events[0].stuck || events[0].missed != threshold {
-		t.Fatalf("events after going quiet = %+v, want exactly one stuck event at threshold %d", events, threshold)
-	}
-	mu.Unlock()
-
-	// Still quiet for a while longer: still exactly one event (no
-	// re-firing on every subsequent miss once already stuck).
-	time.Sleep(3 * interval)
-	mu.Lock()
-	stillOne := len(events)
-	mu.Unlock()
-	if stillOne != 1 {
-		t.Fatalf("events fired again while still stuck: %d", stillOne)
-	}
-
-	// The guest recovers: answer every subsequent probe immediately.
+	events := make(chan event, 16)
+	done := make(chan struct{})
 	go func() {
-		for {
+		defer close(done)
+		runHeartbeat(ctx, func(ctx context.Context) (string, error) {
 			select {
-			case releases <- struct{}{}:
+			case err := <-results:
+				return "running", err
 			case <-ctx.Done():
-				return
+				return "", ctx.Err()
+			}
+		}, ticks, time.Minute, 3, func(stuck bool, missed int) {
+			events <- event{stuck, missed}
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("heartbeat did not stop after cancellation")
+		}
+	})
+	sendTick := func() {
+		t.Helper()
+		select {
+		case ticks <- time.Time{}:
+		case <-time.After(5 * time.Second):
+			t.Fatal("heartbeat did not accept a probe tick")
+		}
+	}
+	// Inject probe results instead of racing 20ms socket deadlines. Transport
+	// framing is covered by the agent and protocol tests; this checks status
+	// transitions, including suppression of repeated notifications.
+	sendTick()
+	miss := errors.New("guest unavailable")
+	for i, result := range []error{nil, nil, miss, miss, miss, miss, miss, miss, nil, nil} {
+		select {
+		case results <- result:
+		case <-time.After(5 * time.Second):
+			t.Fatal("heartbeat did not request a probe result")
+		}
+		// Accepting the next tick proves the previous callback has completed.
+		sendTick()
+		switch i {
+		case 4, 8:
+			want := event{stuck: i == 4}
+			if want.stuck {
+				want.missed = 3
+			}
+			select {
+			case got := <-events:
+				if got != want {
+					t.Fatalf("probe %d: event = %+v, want %+v", i, got, want)
+				}
+			default:
+				t.Fatalf("probe %d: missing status transition", i)
+			}
+		default:
+			select {
+			case got := <-events:
+				t.Fatalf("probe %d: unexpected event %+v", i, got)
+			default:
 			}
 		}
-	}()
-	// Poll instead of a single fixed sleep: a loaded CI runner can easily
-	// miss a 3-tick (60ms) window between starting the recovery goroutine
-	// and its first successful probe landing, with nothing wrong in
-	// RunHeartbeat itself - wait for the second event however long the
-	// scheduler actually takes, capped well above any real recovery
-	// latency, rather than flaking on scheduling jitter.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		mu.Lock()
-		n := len(events)
-		mu.Unlock()
-		if n >= 2 || time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(interval)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(events) != 2 || events[1].stuck {
-		t.Fatalf("events after recovery = %+v, want a second, non-stuck event", events)
 	}
 }
 
