@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"strings"
 	"testing"
 )
@@ -76,5 +78,38 @@ func TestRunPipelineTextRunAndMissingArgs(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "resolve: succeeded") {
 		t.Fatalf("stdout=%s", stdout.String())
+	}
+}
+
+func TestProjectBuildInvocationRecognizesAutomationFlags(t *testing.T) {
+	for _, args := range [][]string{nil, {"--yes"}, {"--dry-run", "--yes"}, {"--yes=false"}, {"--dry-run=true"}} {
+		if !projectBuildInvocation(args) {
+			t.Errorf("project invocation rejected: %v", args)
+		}
+	}
+	for _, args := range [][]string{{"app"}, {"--yes", "app"}, {"--arch", "amd64"}, {"--output", "dist"}, {"--yes=invalid"}} {
+		if projectBuildInvocation(args) {
+			t.Errorf("binary invocation stolen: %v", args)
+		}
+	}
+}
+
+func TestDetachedContainerPreservesExecutionRestrictions(t *testing.T) {
+	for _, flag := range []string{"--detach", "-d"} {
+		var out, diagnostics bytes.Buffer
+		called := false
+		code := runContainer(context.Background(), []string{flag, "--runtime=podman", "example/test:local"}, &out, &diagnostics, func(_ string, args []string, _ io.Reader, _, _ io.Writer) error {
+			called = true
+			joined := strings.Join(args, " ")
+			for _, want := range []string{"--detach", "--rm", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--network=none", "--pids-limit=128"} {
+				if !strings.Contains(joined, want) {
+					t.Errorf("missing %s: %v", want, args)
+				}
+			}
+			return nil
+		})
+		if code != 0 || !called {
+			t.Fatalf("%s: code=%d diagnostic=%s", flag, code, diagnostics.String())
+		}
 	}
 }

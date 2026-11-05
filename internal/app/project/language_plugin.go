@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/CYPT71/platform-factory/internal/project"
 	"github.com/CYPT71/platform-factory/internal/shellquote"
@@ -87,4 +88,28 @@ func LanguagePluginLayer(loaded project.Loaded, stderr io.Writer, execute func(n
 		return "", cleanup, fmt.Errorf("%s build-layer exited successfully but did not create %s", binary, tarPath)
 	}
 	return tarPath, cleanup, nil
+}
+
+// RuntimeEnvironment makes frozen Python dependencies importable only when
+// those files are actually packaged. An explicitly configured value wins.
+// The source configuration is never mutated, including its environment map.
+func RuntimeEnvironment(language string, configured map[string]string, files []project.ExtraFile) map[string]string {
+	if language != "python" {
+		return configured
+	}
+	if _, explicit := configured["PYTHONPATH"]; explicit {
+		return configured
+	}
+	const prefix = "/app/.platform-factory/deps/python/"
+	for _, file := range files {
+		if strings.HasPrefix(file.Dest, prefix) && !strings.HasPrefix(file.Dest, prefix+"runtime/") {
+			env := make(map[string]string, len(configured)+1)
+			for key, value := range configured {
+				env[key] = value
+			}
+			env["PYTHONPATH"] = strings.TrimSuffix(prefix, "/")
+			return env
+		}
+	}
+	return configured
 }

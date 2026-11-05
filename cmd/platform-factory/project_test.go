@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -2064,7 +2065,7 @@ func TestRebuildProjectLayoutSurfacesStaleOutputRemovalFailure(t *testing.T) {
 	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
 	var stdout, stderr bytes.Buffer
 	code := rebuildProjectLayout(context.Background(), loaded, nil, &stdout, &stderr, execute)
-	if code != 1 || !strings.Contains(stderr.String(), "remove stale output") {
+	if code != 1 || !strings.Contains(stderr.String(), "prepare replacement") {
 		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 }
@@ -2211,5 +2212,161 @@ func TestMigrateProjectSurfacesValidationFailureOnMigratedDocument(t *testing.T)
 		if strings.HasPrefix(entry.Name(), ".migrate-") {
 			t.Fatalf("temporary migration file left behind: %s", entry.Name())
 		}
+	}
+}
+
+func TestFreezeFailurePreservesPreviousDependencyLock(t *testing.T) {
+	loaded := loadProjectTest(t, "language: python\nprofile: python\nartifact: app.py\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app.py"), "print('hello')\n", 0o644)
+	lock := filepath.Join(loaded.Root, "requirements.lock")
+	writeProjectTestFile(t, lock, "fastapi==0.115.12\n", 0o600)
+	var out, diagnostics bytes.Buffer
+	calls := 0
+	code := freezeProject(loaded, nil, &out, &diagnostics, func(_ string, _ []string, _ string, stdout, stderr io.Writer) error {
+		calls++
+		if calls == 2 {
+			_, _ = io.WriteString(stdout, "partial output\n")
+			return errors.New("interrupted freeze")
+		}
+		return nil
+	})
+	if code == 0 {
+		t.Fatal("failed command reported success")
+	}
+	raw, err := os.ReadFile(lock)
+	if err != nil || string(raw) != "fastapi==0.115.12\n" {
+		t.Fatalf("previous lock lost: %q %v", raw, err)
+	}
+	info, err := os.Stat(lock)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("lock permissions changed: %v %v", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(loaded.Root, ".platform-factory", "freeze.lock.json")); !os.IsNotExist(err) {
+		t.Fatalf("failed freeze published inventory: %v", err)
+	}
+}
+
+func TestFreezeOutputRefusesEscapingAndSymlinkTargets(t *testing.T) {
+	for _, output := range []string{"../outside.lock", "requirements.lock", "nested/requirements.lock"} {
+		t.Run(output, func(t *testing.T) {
+			root, outside := t.TempDir(), t.TempDir()
+			protected := filepath.Join(outside, "protected.lock")
+			writeProjectTestFile(t, protected, "keep", 0o600)
+			if output == "requirements.lock" {
+				if err := os.Symlink(protected, filepath.Join(root, output)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if strings.HasPrefix(output, "nested/") {
+				if err := os.Symlink(outside, filepath.Join(root, "nested")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := executeFreezeStep(root, freezeStep{args: []string{"producer"}, output: output}, io.Discard, func(_ string, _ []string, _ string, out, _ io.Writer) error {
+				_, err := io.WriteString(out, "new")
+				return err
+			})
+			if err == nil {
+				t.Fatal("unsafe freeze output accepted")
+			}
+			raw, err := os.ReadFile(protected)
+			if err != nil || string(raw) != "keep" {
+				t.Fatalf("outside changed: %q %v", raw, err)
+			}
+		})
+	}
+}
+
+func TestProjectDetachedRunRejectsConflictingModesBeforeWriting(t *testing.T) {
+	for _, args := range [][]string{{"run", "--detach", "--watch"}, {"run", "--name", "invalid/name"}, {"run", "-p", "invalid"}} {
+		var out, diagnostics bytes.Buffer
+		if code := runProject(args, &out, &diagnostics, nil, nil, nil); code != 2 {
+			t.Fatalf("%v: code=%d stderr=%s", args, code, diagnostics.String())
+		}
+	}
+}
+
+func TestRebuildPreservesPreviousImageOnFailureAndCancellation(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancelled=%v", cancelled), func(t *testing.T) {
+			loaded := loadProjectTest(t, "language: compiled\nartifact: app\nbuild_command: [builder]\n")
+			writeProjectTestFile(t, filepath.Join(loaded.Output(), "marker"), "previous image", 0o644)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			execute := func(string, []string, string, io.Writer, io.Writer) error {
+				if cancelled {
+					cancel()
+					return context.Canceled
+				}
+				return errors.New("intentional build failure")
+			}
+			var stdout, stderr bytes.Buffer
+			if code := rebuildProjectLayout(ctx, loaded, nil, &stdout, &stderr, execute); code == 0 {
+				t.Fatal("failed replacement reported success")
+			}
+			data, err := os.ReadFile(filepath.Join(loaded.Output(), "marker"))
+			if err != nil || string(data) != "previous image" {
+				t.Fatalf("previous image lost: %q %v", data, err)
+			}
+			entries, err := filepath.Glob(filepath.Join(filepath.Dir(loaded.Output()), ".pf-rebuild-*"))
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("temporary replacements: %v %v", entries, err)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("unexpected success output: %s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRebuildPreservesImageAfterPackagingFailureAndRecovers(t *testing.T) {
+	loaded := loadProjectTest(t, "language: compiled\nartifact: app\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "binary", 0o755)
+	execute := func(string, []string, string, io.Writer, io.Writer) error { return nil }
+	var stdout, stderr bytes.Buffer
+	if code := rebuildProjectLayout(context.Background(), loaded, nil, &stdout, &stderr, execute); code != 0 {
+		t.Fatalf("initial build: %d %s", code, stderr.String())
+	}
+	previous, err := os.ReadFile(filepath.Join(loaded.Output(), "index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := filepath.Join(loaded.Root, ".platform-factory", "release")
+	if err := os.RemoveAll(release); err != nil {
+		t.Fatal(err)
+	}
+	writeProjectTestFile(t, release, "force evidence-write failure after packaging", 0o644)
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "app"), "new binary", 0o755)
+	stdout.Reset()
+	stderr.Reset()
+	if code := rebuildProjectLayout(context.Background(), loaded, nil, &stdout, &stderr, execute); code == 0 {
+		t.Fatal("replacement incorrectly succeeded")
+	}
+	retained, err := os.ReadFile(filepath.Join(loaded.Output(), "index.json"))
+	if err != nil || !bytes.Equal(previous, retained) {
+		t.Fatalf("previous index changed: %v", err)
+	}
+	if _, err := layout.Verify(loaded.Output()); err != nil {
+		t.Fatalf("previous layout corrupted: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("false success: %s", stdout.String())
+	}
+	if err := os.Remove(release); err != nil {
+		t.Fatal(err)
+	}
+	if code := rebuildProjectLayout(context.Background(), loaded, nil, &stdout, &stderr, execute); code != 0 {
+		t.Fatalf("recovery failed: %d %s", code, stderr.String())
+	}
+	recovered, err := os.ReadFile(filepath.Join(loaded.Output(), "index.json"))
+	if err != nil || bytes.Equal(previous, recovered) {
+		t.Fatalf("replacement was not published: %v", err)
+	}
+	if _, err := layout.Verify(loaded.Output()); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := filepath.Glob(filepath.Join(filepath.Dir(loaded.Output()), ".pf-rebuild-*"))
+	if len(entries) != 0 {
+		t.Fatalf("temporary directories remain: %v", entries)
 	}
 }

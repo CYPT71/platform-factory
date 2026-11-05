@@ -12,9 +12,11 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mattn/go-isatty"
@@ -434,7 +436,18 @@ func commandAlias(args []string) (translated []string, warning string) {
 }
 
 func projectBuildInvocation(args []string) bool {
-	return len(args) == 0 || (len(args) == 1 && args[0] == "--dry-run")
+	for _, arg := range args {
+		name, value, assigned := strings.Cut(arg, "=")
+		if name != "--dry-run" && name != "--yes" {
+			return false
+		}
+		if assigned {
+			if _, err := strconv.ParseBool(value); err != nil {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // printUsage shows the commands a newcomer actually needs for the
@@ -619,7 +632,10 @@ func executeMicroVMCommand(name string, args, environment []string, stdin io.Rea
 }
 
 func executeProjectCommand(name string, args []string, directory string, stdout, stderr io.Writer) error {
-	command := exec.Command(name, args...)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	command := exec.CommandContext(ctx, name, args...)
+	command.WaitDelay = 2 * time.Second
 	command.Dir = directory
 	command.Stdin = os.Stdin
 	command.Stdout = stdout
@@ -636,7 +652,7 @@ type runFlags struct {
 	cpus, memory, network, hostname *string
 	containerName, layoutName       *string
 	pidsLimit                       *int
-	allowHostNetwork, watch         *bool
+	allowHostNetwork, watch, detach *bool
 	publishes, dnsServers, addHosts *repeatedFlag
 	volumes, envVars                *repeatedFlag
 }
@@ -658,6 +674,8 @@ func newRunFlagSet(output io.Writer) (*flag.FlagSet, *runFlags) {
 	values.containerName = flags.String("name", "", "container name")
 	values.layoutName = flags.String("layout", "", "verified local OCI layout to import automatically when needed")
 	values.watch = flags.Bool("watch", false, "only valid with no IMAGE argument: discover the project in the current directory and keep rebuilding/restarting it whenever a source file changes (same as `pf project run --watch`)")
+	values.detach = flags.Bool("detach", false, "run the explicitly selected container image in the background; prints its container ID, not readiness")
+	flags.BoolVar(values.detach, "d", false, "alias for --detach")
 	flags.Var(values.publishes, "publish", "publish [IP:]HOST:CONTAINER[/tcp|udp]; repeatable")
 	flags.Var(values.publishes, "port", "alias for --publish; repeatable")
 	flags.Var(values.publishes, "p", "short alias for --publish; repeatable")
@@ -800,6 +818,9 @@ func runContainer(ctx context.Context, args []string, stdout, stderr io.Writer, 
 		"--cpus=" + *cpus, "--memory=" + *memory,
 		"--pids-limit=" + strconv.Itoa(*pidsLimit),
 		"--tmpfs=/tmp:rw,noexec,nosuid,size=16m",
+	}
+	if *values.detach {
+		runtimeArgs = append(runtimeArgs, "--detach")
 	}
 	if *hostname != "" {
 		runtimeArgs = append(runtimeArgs, "--hostname="+*hostname)

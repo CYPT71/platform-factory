@@ -3,6 +3,7 @@ package project
 import (
 	"bytes"
 	"errors"
+	"github.com/CYPT71/platform-factory/internal/project"
 	"io"
 	"os"
 	"strings"
@@ -154,5 +155,32 @@ func TestLanguagePluginLayerErrorsWhenPluginDoesNotProduceOutput(t *testing.T) {
 func TestLanguagePluginDestPrefix(t *testing.T) {
 	if got := LanguagePluginDestPrefix("python"); got != "app/.platform-factory/deps/python" {
 		t.Fatalf("got=%q", got)
+	}
+}
+
+func TestRuntimeEnvironmentUsesOnlyPackagedPythonDependencies(t *testing.T) {
+	files := []project.ExtraFile{{Dest: "/app/.platform-factory/deps/python/fastapi/__init__.py"}}
+	input := map[string]string{"MODE": "test"}
+	got := RuntimeEnvironment("python", input, files)
+	if got["PYTHONPATH"] != "/app/.platform-factory/deps/python" || got["MODE"] != "test" {
+		t.Fatalf("environment=%v", got)
+	}
+	if _, ok := input["PYTHONPATH"]; ok {
+		t.Fatal("configuration was mutated")
+	}
+	for _, explicit := range []string{"", "/custom"} {
+		if got := RuntimeEnvironment("python", map[string]string{"PYTHONPATH": explicit}, files); got["PYTHONPATH"] != explicit {
+			t.Fatalf("override changed: %v", got)
+		}
+	}
+	for _, test := range []struct {
+		language string
+		files    []project.ExtraFile
+	}{
+		{"go", files}, {"python", nil}, {"python", []project.ExtraFile{{Dest: "/app/.platform-factory/deps/python/runtime/python3"}}},
+	} {
+		if got := RuntimeEnvironment(test.language, nil, test.files); got != nil {
+			t.Fatalf("unexpected environment: %v", got)
+		}
 	}
 }

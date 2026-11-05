@@ -26,9 +26,10 @@ type Agent struct {
 	conn   io.ReadWriteCloser
 	client *Client
 
-	requestMu sync.Mutex
-	stateMu   sync.Mutex
-	closed    bool
+	requestGate chan struct{}
+	stateMu     sync.Mutex
+	closed      bool
+	failure     error
 }
 
 var _ api.GuestAgent = (*Agent)(nil)
@@ -41,7 +42,7 @@ func NewAgent(conn io.ReadWriteCloser, sessionKey []byte) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Agent{conn: conn, client: NewClient(codec)}, nil
+	return &Agent{conn: conn, client: NewClient(codec), requestGate: make(chan struct{}, 1)}, nil
 }
 
 func (a *Agent) Exec(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
@@ -104,11 +105,19 @@ func (a *Agent) Logs(ctx context.Context, dst io.Writer) error {
 }
 
 func (a *Agent) do(ctx context.Context, request Request) (Response, error) {
-	a.requestMu.Lock()
-	defer a.requestMu.Unlock()
+	select {
+	case a.requestGate <- struct{}{}:
+		defer func() { <-a.requestGate }()
+	case <-ctx.Done():
+		return Response{}, ctx.Err()
+	}
 	a.stateMu.Lock()
 	if a.closed {
+		failure := a.failure
 		a.stateMu.Unlock()
+		if failure != nil {
+			return Response{}, fmt.Errorf("%w: %w", ErrReconnectRequired, failure)
+		}
 		return Response{}, errors.New("guest transport: agent is closed")
 	}
 	a.stateMu.Unlock()
@@ -124,7 +133,35 @@ func (a *Agent) do(ctx context.Context, request Request) (Response, error) {
 			defer conn.SetDeadline(time.Time{}) //nolint:errcheck // best-effort reset
 		}
 	}
-	return a.client.Do(ctx, request)
+	stop := context.AfterFunc(ctx, func() { a.invalidate(ctx.Err()) })
+	defer stop()
+	response, err := a.client.Do(ctx, request)
+	var remote responseError
+	if err != nil && !errors.As(err, &remote) {
+		if ctx.Err() != nil {
+			err = errors.Join(err, ctx.Err())
+		}
+		a.invalidate(err)
+		return response, fmt.Errorf("%w: %w", ErrReconnectRequired, err)
+	}
+	return response, err
+}
+
+// ErrReconnectRequired marks an exchange whose byte/operation boundary is
+// uncertain. Never replay it automatically, especially Exec or Shutdown.
+var ErrReconnectRequired = errors.New("guest transport: agent is closed; reconnect with a new connection before retrying")
+
+func (a *Agent) invalidate(err error) {
+	a.stateMu.Lock()
+	if a.failure == nil {
+		a.failure = err
+	}
+	alreadyClosed := a.closed
+	a.closed = true
+	a.stateMu.Unlock()
+	if !alreadyClosed {
+		_ = a.conn.Close()
+	}
 }
 
 func (a *Agent) Close() error {

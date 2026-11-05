@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ import (
 	"github.com/CYPT71/platform-factory/internal/budget"
 	"github.com/CYPT71/platform-factory/internal/detect"
 	"github.com/CYPT71/platform-factory/internal/layout"
+	"github.com/CYPT71/platform-factory/internal/networking"
 	"github.com/CYPT71/platform-factory/internal/observability"
 	"github.com/CYPT71/platform-factory/internal/project"
 	runtimeapp "github.com/CYPT71/platform-factory/internal/runtime"
@@ -80,9 +82,17 @@ func runProjectContext(ctx context.Context, args []string, stdout, stderr io.Wri
 		maxMemory = flags.String("max-memory", "0", "maximum process heap, for example 512MiB (0 disables)")
 	}
 	watch := new(bool)
+	runDetach := new(bool)
+	runName := new(string)
+	var runPorts repeatedFlag
 	runtimeOverride := new(string)
 	if action == "run" || action == "launch" {
 		watch = flags.Bool("watch", false, "keep running, rebuilding and restarting the container whenever a source file changes")
+		flags.BoolVar(runDetach, "detach", false, "run the project container in the background; container ID is not a readiness guarantee")
+		flags.BoolVar(runDetach, "d", false, "alias for --detach")
+		flags.StringVar(runName, "name", "", "container name")
+		flags.Var(&runPorts, "port", "override project port mappings: [IP:]HOST:CONTAINER")
+		flags.Var(&runPorts, "p", "alias for --port")
 		runtimeOverride = flags.String("runtime", "", "container runtime: docker or podman (overrides the project config's runtime_engine)")
 	}
 	yes := new(bool)
@@ -100,6 +110,21 @@ func runProjectContext(ctx context.Context, args []string, stdout, stderr io.Wri
 		flags.Usage()
 		return 2
 	}
+	if *watch && (*runDetach || *runName != "" || len(runPorts) > 0) {
+		fmt.Fprintln(stderr, "platform-factory project run: --detach, --name and port overrides cannot be combined with --watch")
+		return 2
+	}
+	if *runName != "" && !validContainerName(*runName) {
+		fmt.Fprintln(stderr, "platform-factory project run: invalid container name")
+		return 2
+	}
+	for _, port := range runPorts {
+		if _, err := networking.ParseForward(port); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 2
+		}
+	}
+
 	var resourceBudget budget.Budget
 	if action == "build" {
 		memory, budgetErr := buildapp.ParseByteLimit(*maxMemory)
@@ -126,6 +151,13 @@ func runProjectContext(ctx context.Context, args []string, stdout, stderr io.Wri
 			return suggestProjectConfig(action, start, stderr)
 		}
 		return 1
+	}
+	if loaded.Config.Isolation == "microvm" && (*runDetach || *runName != "") {
+		fmt.Fprintln(stderr, "platform-factory project run: --detach and --name require container isolation")
+		return 2
+	}
+	if len(runPorts) > 0 {
+		loaded.Config.Ports = append([]string(nil), runPorts...)
 	}
 	if action == "build" && loaded.Config.DependencyManagement != nil {
 		switch loaded.Config.DependencyManagement.Mode {
@@ -192,7 +224,7 @@ func runProjectContext(ctx context.Context, args []string, stdout, stderr io.Wri
 			defer cancel()
 			return runConfiguredProjectWatch(watchCtx, loaded, plugins, stdout, stderr, execute, containerExecute, defaultWatchPollInterval)
 		}
-		return runConfiguredProject(ctx, loaded, plugins, stdout, stderr, execute, containerExecute, microVMExecute)
+		return runConfiguredProject(ctx, loaded, plugins, stdout, stderr, execute, containerExecute, microVMExecute, containerRunOptions{detach: *runDetach, name: *runName})
 	case "launch":
 		if *runtimeOverride != "" {
 			if *runtimeOverride != "docker" && *runtimeOverride != "podman" {
@@ -213,7 +245,7 @@ func runProjectContext(ctx context.Context, args []string, stdout, stderr io.Wri
 			defer cancel()
 			return runConfiguredProjectWatch(watchCtx, loaded, plugins, stdout, stderr, execute, containerExecute, defaultWatchPollInterval)
 		}
-		return runConfiguredProject(ctx, loaded, plugins, stdout, stderr, execute, containerExecute, microVMExecute)
+		return runConfiguredProject(ctx, loaded, plugins, stdout, stderr, execute, containerExecute, microVMExecute, containerRunOptions{detach: *runDetach, name: *runName})
 	}
 	return 2
 }
@@ -277,22 +309,9 @@ func explainProjectAction(loaded project.Loaded, plugins *pluginHost, action str
 	return 0
 }
 
-// rebuildProjectLayout removes any existing layout at loaded.Output()
-// before building - oci.Build refuses to write into a
-// directory that already exists (a deliberate anti-clobber safety for
-// pf project build's own direct use), so a caller that has already
-// decided a rebuild is warranted (loaded.Output() is missing or, per
-// projectapp.NeedsRebuild, stale) must clear the old one first. Removing a
-// path that doesn't exist is a harmless no-op.
-//
-// It also re-freezes automatically when the frozen inventory has gone
-// stale - unlike `pf project build`'s own direct use (which still fails
-// loudly and asks the caller to run `pf freeze` themselves, since that
-// command is often run deliberately, e.g. in CI, where silently
-// re-pinning dependencies without asking would hide real drift), pf
-// run/launch/--watch's whole point is a developer editing a real source
-// file and having it just work - the same file that made the freeze
-// stale in the first place is legitimate, not something to fail on.
+// rebuildProjectLayout builds a replacement beside the current layout, then
+// publishes it. Build failure leaves the previous layout untouched. A failed
+// publication restores the previous directory; no operation is replayed.
 func rebuildProjectLayout(ctx context.Context, loaded project.Loaded, plugins *pluginHost, stdout, stderr io.Writer, execute projectExecutor) int {
 	if projectapp.RequiresFrozenInputs(loaded) {
 		if err := loaded.VerifyFreezeInventory(); err != nil {
@@ -301,18 +320,64 @@ func rebuildProjectLayout(ctx context.Context, loaded project.Loaded, plugins *p
 			}
 		}
 	}
-	if err := os.RemoveAll(loaded.Output()); err != nil {
-		fmt.Fprintf(stderr, "platform-factory project run: remove stale output: %v\n", err)
+	parent := filepath.Dir(loaded.Output())
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		fmt.Fprintf(stderr, "platform-factory project run: prepare replacement: %v\n", err)
 		return 1
 	}
-	_, code := buildProjectContext(ctx, loaded, stdout, stderr, execute)
-	return code
+	transaction, err := os.MkdirTemp(parent, ".pf-rebuild-")
+	if err != nil {
+		fmt.Fprintf(stderr, "platform-factory project run: prepare replacement: %v\n", err)
+		return 1
+	}
+	defer func() {
+		if transaction != "" {
+			_ = os.RemoveAll(transaction)
+		}
+	}()
+	replacement := filepath.Join(transaction, "image")
+	var result bytes.Buffer
+	_, code := buildProjectContextWithBudget(ctx, loaded, &result, stderr, execute, budget.Budget{}, replacement)
+	if code != 0 {
+		return code
+	}
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintf(stderr, "platform-factory project run: replacement cancelled: %v\n", err)
+		return 1
+	}
+	previous := filepath.Join(transaction, "previous")
+	hadPrevious := true
+	if err := os.Rename(loaded.Output(), previous); errors.Is(err, os.ErrNotExist) {
+		hadPrevious = false
+	} else if err != nil {
+		fmt.Fprintf(stderr, "platform-factory project run: preserve previous output: %v\n", err)
+		return 1
+	}
+	if err := os.Rename(replacement, loaded.Output()); err != nil {
+		fmt.Fprintf(stderr, "platform-factory project run: publish replacement: %v\n", err)
+		if hadPrevious {
+			if restoreErr := os.Rename(previous, loaded.Output()); restoreErr != nil {
+				// Keep the backup when rollback itself fails.
+				preserved := transaction
+				transaction = ""
+				fmt.Fprintf(stderr, "platform-factory project run: restore failed: %v; previous image retained at %s\n", restoreErr, preserved)
+			}
+		}
+		return 1
+	}
+	_, _ = io.Copy(stdout, &result)
+	return 0
+}
+
+type containerRunOptions struct {
+	detach bool
+	name   string
 }
 
 // runConfiguredProject rebuilds loaded's layout when it is missing or
 // stale (see projectapp.NeedsRebuild), then runs it with the configured
 // isolation and runtime.
-func runConfiguredProject(ctx context.Context, loaded project.Loaded, plugins *pluginHost, stdout, stderr io.Writer, execute projectExecutor, containerExecute containerExecutor, microVMExecute microVMExecutor) int {
+func runConfiguredProject(ctx context.Context, loaded project.Loaded, plugins *pluginHost, stdout, stderr io.Writer, execute projectExecutor, containerExecute containerExecutor, microVMExecute microVMExecutor, options ...containerRunOptions) int {
 	rebuild, err := projectapp.NeedsRebuild(loaded)
 	if err != nil {
 		fmt.Fprintf(stderr, "platform-factory project run: stat image: %v\n", err)
@@ -335,6 +400,14 @@ func runConfiguredProject(ctx context.Context, loaded project.Loaded, plugins *p
 		network = "bridge"
 	}
 	runtimeArgs := []string{"--runtime", loaded.Config.RuntimeEngine, "--network", network}
+	if len(options) > 0 {
+		if options[0].detach {
+			runtimeArgs = append(runtimeArgs, "--detach")
+		}
+		if options[0].name != "" {
+			runtimeArgs = append(runtimeArgs, "--name", options[0].name)
+		}
+	}
 	for _, port := range loaded.Config.Ports {
 		runtimeArgs = append(runtimeArgs, "-p", port)
 	}
@@ -652,30 +725,9 @@ func freezeProjectWithBootPins(loaded project.Loaded, plugins *pluginHost, kerne
 		return 2
 	}
 	for _, step := range steps {
-		output := stderr
-		var outputFile *os.File
-		if step.output != "" {
-			filename := loaded.Resolve(step.output)
-			if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
-				fmt.Fprintf(stderr, "platform-factory project freeze: %v\n", err)
-				return 1
-			}
-			outputFile, err = os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-			if err != nil {
-				fmt.Fprintf(stderr, "platform-factory project freeze: %v\n", err)
-				return 1
-			}
-			output = outputFile
-		}
 		fmt.Fprintf(stderr, "platform-factory: freeze: %s\n", shellquote.Command(step.args[0], step.args[1:]))
-		commandErr := execute(step.args[0], step.args[1:], loaded.Root, output, stderr)
-		if outputFile != nil {
-			if closeErr := outputFile.Close(); commandErr == nil {
-				commandErr = closeErr
-			}
-		}
-		if commandErr != nil {
-			fmt.Fprintf(stderr, "platform-factory project freeze: %s failed: %v\n", step.args[0], commandErr)
+		if err := executeFreezeStep(loaded.Root, step, stderr, execute); err != nil {
+			fmt.Fprintf(stderr, "platform-factory project freeze: %s failed: %v\n", step.args[0], err)
 			return 1
 		}
 	}
@@ -819,7 +871,11 @@ func buildProjectContext(ctx context.Context, loaded project.Loaded, stdout, std
 	return buildProjectContextWithBudget(ctx, loaded, stdout, stderr, execute, budget.Budget{})
 }
 
-func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, stdout, stderr io.Writer, execute projectExecutor, resourceBudget budget.Budget) (string, int) {
+func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, stdout, stderr io.Writer, execute projectExecutor, resourceBudget budget.Budget, replacement ...string) (string, int) {
+	output := loaded.Output()
+	if len(replacement) > 0 {
+		output = replacement[0]
+	}
 	startedAt := time.Now()
 	if err := loaded.VerifyAdjacentLock(); err != nil {
 		fmt.Fprintf(stderr, "platform-factory project build: project lock preflight failed: %v\n", err)
@@ -936,10 +992,10 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 		created = time.Now()
 	}
 	digest, err := oci.Build(oci.Options{
-		Binary: binary, Output: loaded.Output(), Architecture: architecture, OS: osName,
+		Binary: binary, Output: output, Architecture: architecture, OS: osName,
 		Entrypoint: entrypoint, Profile: profile, ImageName: loaded.Config.Image,
 		Tag: loaded.Config.Tag, Created: created.UTC(), Args: loaded.Config.Args,
-		Env: loaded.Config.Env, User: loaded.Config.User, ExtraFiles: extraFiles,
+		Env: projectapp.RuntimeEnvironment(loaded.Config.Language, loaded.Config.Env, projectFiles), User: loaded.Config.User, ExtraFiles: extraFiles,
 		Compression: "fast", TraceID: observability.TraceIDFromContext(ctx),
 		SemanticLayers: loaded.Config.SemanticLayers, ExtraLayers: extraLayers,
 		Observer: cliObserver(stderr),
@@ -990,7 +1046,7 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 		fmt.Fprintf(stderr, "platform-factory project build: enforce configured build policy: %v\n", err)
 		return "", 1
 	}
-	verified, verifyErr := layout.Verify(loaded.Output())
+	verified, verifyErr := layout.Verify(output)
 	if verifyErr != nil {
 		fmt.Fprintf(stderr, "platform-factory project build: collect metrics: %v\n", verifyErr)
 		return "", 1

@@ -87,6 +87,18 @@ while its container retains PF's normal execution restrictions. Only the local
 loopback port is exposed. Detailed diagnostics remain in the displayed `/tmp`
 log files rather than adding logs to the application folder.
 
+For the current CLI, the equivalent launch is shorter:
+
+```bash
+pf build --yes
+pf run -d --runtime podman --name pf-fastapi-demo -p 127.0.0.1:8000:8000
+```
+
+Project mode selects the image and packaged Python dependency path automatically;
+an explicitly configured `PYTHONPATH` takes precedence. Detach prints a container
+ID; wait for a successful HTTP response before treating the service as ready.
+The recording above retains the commands used when it was captured.
+
 Once the server is ready, finish exactly as the recording does:
 
 ```bash

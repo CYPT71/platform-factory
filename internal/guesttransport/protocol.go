@@ -200,6 +200,11 @@ type Client struct {
 	seq   uint64
 }
 
+// responseError is an authenticated application error; it leaves framing intact.
+type responseError string
+
+func (e responseError) Error() string { return string(e) }
+
 func NewClient(codec *Codec) *Client { return &Client{codec: codec} }
 
 func (c *Client) Do(ctx context.Context, request Request) (Response, error) {
@@ -221,7 +226,7 @@ func (c *Client) Do(ctx context.Context, request Request) (Response, error) {
 		return Response{}, errors.New("guest transport: response sequence mismatch")
 	}
 	if response.Error != "" {
-		return response, errors.New(response.Error)
+		return response, responseError(response.Error)
 	}
 	return response, nil
 }
