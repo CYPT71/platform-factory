@@ -63,7 +63,7 @@ jobs:
           }
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
           "$hash  $archive" | Set-Content -LiteralPath "$archive.sha256" -Encoding ascii
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: package-${{ matrix.os }}-${{ matrix.arch }}
           path: |
@@ -109,7 +109,7 @@ jobs:
           tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
             -cf verified-layout.tar layout-amd64 layout-arm64 multiarch-layout \
             payload-amd64 payload-arm64 layout-checksums.sha256 release-validation.txt
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: verified-release-layout
           path: |
@@ -129,7 +129,7 @@ jobs:
       - name: Install the pinned Go toolchain
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with: {go-version-file: go.mod, cache: true}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: {name: verified-release-layout}
       - name: Unpack independently validated layout
         env: {GOTOOLCHAIN: local}
@@ -140,7 +140,7 @@ jobs:
           python3 scripts/ci/verify-oci-layout.py layout-arm64
           go run ./cmd/platform-factory verify multiarch-layout
       - name: Set up an attestation-capable BuildKit builder
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with: {driver: docker-container}
       - name: Publish the layout-derived image by digest
         env:
@@ -176,7 +176,7 @@ jobs:
           docker save --output platform-factory-image-arm64.tar "$IMAGE:$TAG-arm64"
           sha256sum platform-factory-image-amd64.tar platform-factory-image-arm64.tar > image-tar.sha256
           printf 'layout_archive_sha256=%s\npublished_image=%s@%s\n' "$(sha256sum verified-layout.tar | cut -d' ' -f1)" "$IMAGE" "$digest" > publication-link.txt
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: published-image-evidence
           path: |
@@ -199,7 +199,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: {name: published-image-evidence}
       - name: Log in to GHCR
         env:
@@ -223,7 +223,7 @@ jobs:
           digest=$(cat image.digest)
           cosign sign --yes "$IMAGE@$digest"
           cosign verify --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci-release.yml@" --certificate-oidc-issuer https://token.actions.githubusercontent.com "$IMAGE@$digest" | tee signature-verification.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signed-release-evidence
           path: |
@@ -248,9 +248,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: {name: signed-release-evidence}
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: package-*
           path: packages
