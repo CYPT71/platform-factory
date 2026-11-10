@@ -29,3 +29,15 @@ var (
 // RenderBox wraps body in the standard rounded-border single-screen box
 // a modal prompt's View() returns.
 func RenderBox(body string) string { return BoxStyle.Render(body) }
+
+// RenderPrompt wraps a prompt to the available terminal columns. Unknown
+// dimensions retain the original layout until Bubble Tea reports its size.
+func RenderPrompt(body string, width int) string {
+	if width <= 0 {
+		return RenderBox(body)
+	}
+	if width < 5 {
+		return lipgloss.NewStyle().Width(width).Render(body)
+	}
+	return BoxStyle.Width(width - BoxStyle.GetHorizontalFrameSize()).Render(body)
+}

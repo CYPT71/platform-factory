@@ -4,8 +4,8 @@
 // This is a deliberately minimal, honestly-scoped executor: it does not
 // namespace, chroot or otherwise isolate the child process. It only
 // supports stages whose declared network policy is "none" (there is no
-// network sandbox here, so a stage requesting any other policy is refused
-// rather than silently run unisolated) and it only enforces the one
+// network sandbox here: even "none" retains host networking; other policy
+// declarations are refused) and it only enforces the one
 // resource dimension it can safely and correctly approximate without
 // cgroups or root: a memory ceiling via RLIMIT_AS, and only on Linux (the
 // only OS this repo's CI runs on) — Darwin's kernel accepts the
@@ -172,39 +172,50 @@ func (e *Executor) Run(ctx context.Context, stage core.Stage) error {
 	return waitErr
 }
 
-// preparePlain builds the command for the minimal, unsandboxed
-// executor, refusing every policy it cannot enforce.
-func (e *Executor) preparePlain(ctx context.Context, stage core.Stage) (*exec.Cmd, error) {
+// ValidatePlainStage checks constraints supported by the unsandboxed executor.
+// It has no side effects and does not check executable availability. Accepting
+// network:none is historical compatibility, not enforcement of network isolation.
+func ValidatePlainStage(stage core.Stage) error {
 	if network := effectiveNetwork(stage.Network); network != core.NetworkNone {
-		return nil, fmt.Errorf(
-			"executor: stage %q requests network policy %q; this executor has no network sandbox and only honors %q",
+		return fmt.Errorf(
+			"executor: stage %q requests network policy %q; this executor has no network sandbox and only accepts the %q declaration (host networking remains accessible)",
 			stage.ID, network, core.NetworkNone)
 	}
 	if stage.Resources.CPUMilli > 0 {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"executor: stage %q requests a CPU limit; CPU millicores are a rate limit that requires cgroups, which this executor does not have",
 			stage.ID)
 	}
 	if stage.Resources.PIDs > 0 {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"executor: stage %q requests a process-count limit; RLIMIT_NPROC is scoped to the whole user, not this stage, so it is refused rather than approximated",
 			stage.ID)
 	}
 	if len(stage.Secrets) > 0 {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"executor: stage %q declares secrets; only the sandboxed executor can confine them to a private in-memory mount",
 			stage.ID)
 	}
 	if stage.Sandbox.ReadOnlyRoot || stage.Sandbox.NonRoot {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"executor: stage %q requests sandbox policies; this executor has no mount or user namespace to honor them",
 			stage.ID)
 	}
 	memoryBytes := stage.Resources.MemoryMiB << 20
 	if memoryBytes > 0 && !resourceLimitsSupported() {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"executor: stage %q requests a memory limit, which is not supported on this platform", stage.ID)
 	}
+
+	return nil
+}
+
+// preparePlain builds a command after checking its declared constraints.
+func (e *Executor) preparePlain(ctx context.Context, stage core.Stage) (*exec.Cmd, error) {
+	if err := ValidatePlainStage(stage); err != nil {
+		return nil, err
+	}
+	memoryBytes := stage.Resources.MemoryMiB << 20
 
 	cmd := exec.CommandContext(ctx, stage.Command.Executable, stage.Command.Args...)
 	cmd.Dir = MapPath(e.root, stage.Command.WorkingDir)

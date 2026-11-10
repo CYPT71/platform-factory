@@ -1,6 +1,6 @@
 # Stabilisation de toutes les fonctions expérimentales
 
-État des corrections et des validations locales au 5 novembre 2026.
+État des corrections et des validations locales au 10 novembre 2026.
 
 **Objectif : Stable pour toutes les fonctions expérimentales. Objectif non
 encore atteint.** Les corrections ci-dessous sont exécutées ; les critères
@@ -360,3 +360,80 @@ son image antérieure déconnectée, la pause à l'inactivité est réactivée e
 Windows retrouve son état arrêté initial. L'ISO des Tools monté en lecture
 seule sur le Mac est également démonté. Les mises à jour effectivement
 installées des Tools restent en place conformément à la réparation demandée.
+
+## Formulaires TUI et mesures — 10 novembre 2026
+
+Les formulaires de confirmation du build et de choix du runtime réagissent
+maintenant aux changements de largeur du terminal. Le cadre et les champs
+s'ajustent ; les textes longs reviennent à la ligne. Le champ actif du build
+porte `> Image` ou `> Tag`, pour rester identifiable sans couleur. Avant la
+correction, les nouveaux tests reproduisaient un cadre dépassant 40 colonnes.
+Ils passent après correction, avec la suite TUI complète sous détecteur de
+courses et `NO_COLOR=1`, le vet TUI et les tests CLI/architecture du module racine.
+
+La recette POSIX versionnée utilise un vrai pseudo-terminal 40 × 20 :
+
+```bash
+python3 scripts/validation/tui-project.py \
+  --pf /chemin/pf --binary /chemin/executable-linux-arm64 \
+  --results /tmp/pf-tui-resultats
+```
+
+Elle ne télécharge rien. La fixture compilée évite d'installer un gestionnaire
+de dépendances. Les trois cas réellement exercés sont : Tab puis Esc ; Tab puis
+Ctrl+C ; référence effacée et refusée, puis saisie correcte et image OCI vérifiée.
+Les annulations retournent un code non nul sans écrire `.platform-factory/`.
+Les sources et la configuration conservent leur hash. Les dossiers propres à
+l'essai sont supprimés et les captures terminal brutes restent dans les résultats.
+La série locale `tui-pty-01` passe les trois cas, sans séquence SGR de couleur.
+Ces tests ne remplacent pas une recette humaine du marketplace, des lecteurs
+d'écran, d'autres OS ou des terminaux de très faible hauteur.
+
+Le lanceur FastAPI enregistre désormais la durée de copie de la fixture, celle
+du gel jusqu'au premier HTTP 200, les commandes de projet et le nombre de
+fichiers créés. La durée d'installation des outils est `null` : elle est inconnue,
+puisqu'ils étaient déjà installés. Le compteur de confirmations automatiques
+ne mesure pas les décisions ni les difficultés d'une personne.
+
+La série `fastapi-run-08`, sur le CLI incluant cette correction, donne :
+
+| Mesure locale préparée | Résultat |
+| --- | --- |
+| Copie de la fixture | 0,4471 s |
+| Gel → premier HTTP 200 | 19,8705 s |
+| Commandes PF, deuxième lancement compris | 5 |
+| Fichiers nouveaux dans l'état interne | 593 |
+| Nouveaux fichiers à la racine applicative | 0 |
+| Parcours nominal puis relance | Réussis |
+| Pannes contrôlées | 8 sur 8 |
+| Référence Podman | 1 sur 1 |
+| Nettoyage et conteneurs préexistants conservés | Vérifiés |
+
+Ces nombres décrivent une seule répétition supplémentaire, avec un runtime
+et un wheelhouse préparés ; ce ne sont pas des médianes ni une installation
+froide. La tentative `fastapi-run-07` n'a pas atteint le premier parcours :
+son ancienne fixture `/tmp` avait disparu. Une copie d'une répétition locale
+conservée a servi à `08`, sans téléchargement. Le lanceur vérifie maintenant
+les fichiers requis avant de créer les résultats ; une fixture incomplète
+retourne une erreur de prérequis lisible, sans dossier de résultats vide.
+
+### Prévalidation des contraintes du worker — 10 novembre 2026
+
+Un pipeline comprenant un stage initial valide puis un stage aux contraintes
+non prises en charge pouvait télécharger ses entrées et exécuter le premier
+stage avant son refus. Le worker contrôle désormais tous les stages avant ces
+effets de bord, en partageant la validation avec l'exécuteur local. Les cas
+CPU, PIDs, secrets et politiques de sandbox reproduisent le défaut ; le réseau
+non pris en charge est aussi testé sur un stage racine valide dans le DAG.
+Les journaux locaux conservent le premier échec et la validation corrigée.
+
+Cette prévalidation ne constitue pas un confinement des processus. En particulier,
+`network: none` reste une déclaration acceptée par compatibilité sans blocage du
+réseau hôte dans l'exécuteur simple. Les limites et les besoins d'isolation externe
+restent documentés dans [les builds distribués](distributed-builds.md).
+
+Validation de cette reprise : `go test -race ./...` et `go vet ./...` réussis
+sur le module racine avec Go 1.26.10, téléchargements désactivés. Le module TUI
+séparé passe également sa suite avec `-race`, `NO_COLOR=1`, et `go vet`.
+Les journaux locaux sont conservés sous `.cache/local-validation/` ; ils ne
+constituent pas une exécution CI ni une revue indépendante.

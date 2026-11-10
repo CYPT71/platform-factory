@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/CYPT71/platform-factory/cmd/tui/kit"
 )
@@ -122,5 +124,24 @@ func TestCtrlCCancelsFromImageEditor(t *testing.T) {
 	_, cmd := m.Update(key("ctrl+c"))
 	if !m.done || m.result.Source != SourceSkip || cmd == nil {
 		t.Fatalf("Ctrl+C did not cancel: done=%v result=%+v", m.done, m.result)
+	}
+}
+
+func TestSmallTerminalFitsRuntimeChoicesAndImageInput(t *testing.T) {
+	m := newTestModel("/usr/bin/python3")
+	m.choices[0].label = strings.Repeat("long runtime location ", 5)
+	m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
+	for _, editing := range []bool{false, true} {
+		m.editingImage = editing
+		m.imageInput.SetValue("python@sha256:" + strings.Repeat("a", 64))
+		for _, line := range strings.Split(m.View(), "\n") {
+			if lipgloss.Width(line) > 40 {
+				t.Fatalf("view overflows: %q", line)
+			}
+		}
+	}
+	m.Update(key("ctrl+c"))
+	if !m.done || m.result.Source != SourceSkip {
+		t.Fatal("resize must preserve cancellation")
 	}
 }

@@ -23,7 +23,6 @@ var (
 	errorStyle = kit.ErrorStyle
 	focusStyle = kit.FocusStyle
 	helpStyle  = kit.HelpStyle
-	boxStyle   = kit.BoxStyle
 )
 
 // Result is what Confirm returns. Confirmed is false when the user
@@ -45,6 +44,7 @@ const (
 
 type model struct {
 	image, tag textinput.Model
+	width      int
 	focus      field
 	err        string
 	result     Result
@@ -95,6 +95,12 @@ func normalizedTag(tag string) string {
 }
 
 func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	if size, ok := message.(tea.WindowSizeMsg); ok {
+		m.width = size.Width
+		m.image.Width = max(1, min(40, size.Width-14))
+		m.tag.Width = m.image.Width
+	}
+
 	if key, ok := message.(tea.KeyMsg); ok {
 		if kit.IsCancelKey(message) {
 			m.result, m.done = Result{Confirmed: false}, true
@@ -144,11 +150,11 @@ func (m *model) View() string {
 	fmt.Fprintln(&b, titleStyle.Render("Confirm image reference"))
 	fmt.Fprintln(&b, dimStyle.Render("Embedded as org.opencontainers.image.ref.name."))
 	b.WriteString("\n")
-	imageLabel, tagLabel := "Image", "Tag  "
+	imageLabel, tagLabel := "  Image", "  Tag  "
 	if m.focus == fieldImage {
-		imageLabel = focusStyle.Render("Image")
+		imageLabel = focusStyle.Render("> Image")
 	} else {
-		tagLabel = focusStyle.Render("Tag  ")
+		tagLabel = focusStyle.Render("> Tag  ")
 	}
 	fmt.Fprintf(&b, "%s  %s\n", imageLabel, m.image.View())
 	fmt.Fprintf(&b, "%s  %s\n", tagLabel, m.tag.View())
@@ -158,5 +164,5 @@ func (m *model) View() string {
 		fmt.Fprintln(&b, errorStyle.Render(m.err))
 	}
 	fmt.Fprint(&b, helpStyle.Render("tab switch field  enter confirm  esc cancel"))
-	return boxStyle.Render(b.String())
+	return kit.RenderPrompt(b.String(), m.width)
 }

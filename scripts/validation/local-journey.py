@@ -49,10 +49,18 @@ def main():
     if min(args.runs, args.baseline_runs) < 1 or "@sha256:" not in args.base_image:
         parser.error("positive run counts and a digest-pinned base image are required")
     for name in ["pf", "fixture", "wheelhouse"]:
-        setattr(args, name, getattr(args, name).resolve(strict=True))
+        try:
+            setattr(args, name, getattr(args, name).resolve(strict=True))
+        except OSError as error:
+            parser.error(f"--{name}: {error}")
     args.python = args.python.absolute()
     if not args.python.is_file():
         parser.error("--python must name an existing executable")
+    for name in ["app.py", "requirements.txt", "requirements.lock", "pf.yaml", "pf.lock"]:
+        if not (args.fixture / name).is_file():
+            parser.error(f"prepared fixture is missing {name}; prepare it separately before running acceptance")
+    if not (args.fixture / ".platform-factory/deps/python/runtime").is_dir():
+        parser.error("prepared fixture is missing its staged Python runtime")
     args.results.mkdir(parents=True, exist_ok=False)
     args.results = args.results.resolve()
     token = uuid.uuid4().hex[:10]
@@ -157,9 +165,15 @@ def main():
         report["preexisting_container_ids"] = sorted(initial_ids)
         baseline_inputs = args.results / "baseline-inputs"
         for number in range(1, args.runs + 1):
+            preparation_started = time.monotonic()
             work = seed(f"trial-{number}")
+            preparation_seconds = time.monotonic() - preparation_started
+            initial_files = {str(p.relative_to(work)) for p in work.rglob("*") if p.is_file()}
             name = f"{prefix}-trial-{number}"
             trial = {"number": number, "passed": False, "cache": "prepared runtime and wheelhouse; new dependency target and OCI output"}
+            trial["fixture_copy_seconds"] = round(preparation_seconds, 4)
+            trial["tool_installation_seconds"] = None  # Already installed; never infer a cold-start cost.
+            trial["scripted_confirmation_decisions"] = 0
             started = time.monotonic()
             try:
                 trial["freeze_seconds"] = pf(work, "project", "freeze")["seconds"]
@@ -168,10 +182,13 @@ def main():
                 port = free_port()
                 trial["run_seconds"] = launch(work, name, port)["seconds"]
                 trial["http_ready_seconds"] = ready(port)
+                trial["first_http_from_freeze_seconds"] = round(time.monotonic() - started, 4)
                 value = inspect(name)
                 trial["image_bytes"] = json.loads(run([args.engine, "image", "inspect", value["Image"]])["stdout"])[0]["Size"]
                 trial["manifest_digest"] = json.loads((work / ".platform-factory/image/index.json").read_text())["manifests"][0]["digest"]
                 trial["root_entries"] = sorted(p.name for p in work.iterdir())
+                final_files = {str(p.relative_to(work)) for p in work.rglob("*") if p.is_file()}
+                trial["created_file_count"] = len(final_files - initial_files)
                 trial["passed"] = True
                 if number == 1:
                     baseline_inputs.mkdir()
@@ -191,6 +208,8 @@ def main():
             finally:
                 stop(name)
                 trial["total_seconds"] = round(time.monotonic() - started, 4)
+                entries = [json.loads(line) for line in (args.results / "commands.jsonl").read_text().splitlines()]
+                trial["project_command_count"] = sum(entry["cwd"] == str(work) for entry in entries)
                 report["trials"].append(trial)
                 save()
                 print("Trial", number, "PASS" if trial["passed"] else "FAIL", flush=True)

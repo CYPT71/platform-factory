@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/CYPT71/platform-factory/internal/cache"
+	"github.com/CYPT71/platform-factory/internal/core"
 )
 
 func TestExecutorRunsARealStage(t *testing.T) {
@@ -185,5 +186,67 @@ func TestExecutorPullsVerifiedCASInput(t *testing.T) {
 	}
 	if data, err := os.ReadFile(filepath.Join(root, "lease-cas", "artifact")); err != nil || string(data) != "from-cas" {
 		t.Fatalf("artifact=%q err=%v", data, err)
+	}
+}
+
+// An unsupported later stage must not allow earlier commands or CAS fetches.
+func TestExecutorPreflightsEveryStageBeforeMaterialization(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stage core.Stage
+	}{
+		{"network", core.Stage{Network: core.NetworkFull}},
+		{"cpu", core.Stage{Resources: core.ResourceLimits{CPUMilli: 100}}},
+		{"pids", core.Stage{Resources: core.ResourceLimits{PIDs: 10}}},
+		{"secrets", core.Stage{Secrets: []core.SecretReference{{ID: "token", Target: "/run/token"}}}},
+		{"read-only", core.Stage{Sandbox: core.SandboxPolicy{ReadOnlyRoot: true}}},
+		{"non-root", core.Stage{Sandbox: core.SandboxPolicy{NonRoot: true}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := cache.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			descriptor, err := store.Put(strings.NewReader("input"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pulls := 0
+			execute, err := Executor(root, store, func(context.Context, cache.Descriptor) error { pulls++; return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			stage := tc.stage
+			stage.ID = "unsupported"
+			stage.DependsOn = []string{"first"}
+			if stage.Network == core.NetworkFull {
+				stage.DependsOn = nil // Network-enabled stages must be DAG roots.
+			}
+			stage.Command.Executable = "sh"
+			definition, err := json.Marshal(core.Pipeline{APIVersion: core.PipelineAPIVersion, Name: "preflight", Stages: []core.Stage{
+				{ID: "first", Command: core.Command{Executable: "sh", Args: []string{"-c", "printf changed > marker"}}}, stage,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(LeasePayload{APIVersion: LeaseAPIVersion, Workdir: "lease", Pipeline: definition, Blobs: []LeaseBlob{{Descriptor: descriptor, Target: "input"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := execute(context.Background(), string(raw)); err == nil || !strings.Contains(err.Error(), "unsupported") {
+				t.Fatalf("expected unsupported-stage error, got %v", err)
+			}
+			if pulls != 0 {
+				t.Errorf("unsupported pipeline fetched %d blobs", pulls)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("unsupported pipeline modified execution root: %v", entries)
+			}
+		})
 	}
 }

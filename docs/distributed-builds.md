@@ -86,7 +86,7 @@ do not use it as a private tenant boundary. Bound disk capacity operationally.
 | Boundary | Implemented behavior and limit |
 | --- | --- |
 | Payload | Strict decoding and a 1 MiB limit. Workspace/blob paths reject parent traversal before materialization. Directory and file operations use `os.Root` to reject symlink escapes; existing workspaces are refused. This protects materialization, not the stage process's host access. |
-| Execution | Uses `executor.New`, without namespaces or chroot. `network: none` is accepted but does **not** block host networking in this executor; secrets and unsupported sandbox policies are refused. Isolate the worker host separately. |
+| Execution | Uses `executor.New`, without namespaces or chroot. `network: none` is accepted but does **not** block host networking in this executor; secrets and unsupported sandbox/resource policies are refused across all stages before creating a lease workspace, fetching CAS inputs or running any stage. Isolate the worker host separately. |
 | CAS | `-cas-dir DIR` enables persistent shared blobs at `/cas/blobs/`; leave it unset to disable that route. GET/PUT require a verified mTLS client, and PUT checks digest and length (maximum 1 GiB). This is a shared CA trust domain, not per-tenant storage isolation or a disk quota. Worker `-cache-dir` alone does not enable the server route. |
 | Snapshots | `-state-file` enables scheduler restart recovery; it is not high availability. |
 | Audit | `-audit-file` enables a hash-chained lifecycle journal, checked before appending after restart. It is separate from the scheduler snapshot. |

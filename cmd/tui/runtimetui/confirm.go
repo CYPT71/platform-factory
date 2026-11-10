@@ -23,7 +23,6 @@ var (
 	errorStyle = kit.ErrorStyle
 	focusStyle = kit.FocusStyle
 	helpStyle  = kit.HelpStyle
-	boxStyle   = kit.BoxStyle
 )
 
 // Source is which of the two provisioning options the user picked.
@@ -52,6 +51,7 @@ type choice struct {
 }
 
 type model struct {
+	width         int
 	language      string
 	hostCandidate string
 	hostArch      string
@@ -89,6 +89,11 @@ func Confirm(language, hostCandidate, hostArch string) (Result, error) {
 func (m *model) Init() tea.Cmd { return textinput.Blink }
 
 func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	if size, ok := message.(tea.WindowSizeMsg); ok {
+		m.width = size.Width
+		m.imageInput.Width = max(1, min(50, size.Width-6))
+	}
+
 	if kit.IsQuitKey(message) {
 		m.result, m.done = Result{Source: SourceSkip}, true
 		return m, tea.Quit
@@ -166,7 +171,7 @@ func (m *model) View() string {
 			fmt.Fprintln(&b, errorStyle.Render(m.err))
 		}
 		fmt.Fprint(&b, helpStyle.Render("enter confirm  esc back"))
-		return boxStyle.Render(b.String())
+		return kit.RenderPrompt(b.String(), m.width)
 	}
 	for index, option := range m.choices {
 		line := option.label
@@ -178,5 +183,5 @@ func (m *model) View() string {
 		fmt.Fprintln(&b, line)
 	}
 	fmt.Fprint(&b, helpStyle.Render("up/down select  enter confirm  esc skip"))
-	return boxStyle.Render(b.String())
+	return kit.RenderPrompt(b.String(), m.width)
 }

@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/CYPT71/platform-factory/cmd/tui/kit"
 )
@@ -137,5 +139,26 @@ func TestEmptyTagPreviewMatchesConfirmedDefault(t *testing.T) {
 	m.Update(key("enter"))
 	if m.result.Tag != "latest" {
 		t.Fatalf("tag=%q", m.result.Tag)
+	}
+}
+
+func TestSmallTerminalKeepsReferenceAndFocusReadable(t *testing.T) {
+	m := newTestModel(strings.Repeat("repository", 12), "latest")
+	m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
+	for _, line := range strings.Split(m.View(), "\n") {
+		if lipgloss.Width(line) > 40 {
+			t.Fatalf("view overflows a 40-column terminal: %q", line)
+		}
+	}
+	if !strings.Contains(m.View(), "> Image") {
+		t.Fatal("focused image field needs a text marker without color")
+	}
+	m.Update(key("tab"))
+	if !strings.Contains(m.View(), "> Tag") {
+		t.Fatal("focused tag field needs a text marker without color")
+	}
+	m.Update(key("esc"))
+	if !m.done || m.result.Confirmed {
+		t.Fatal("resize must preserve cancellation")
 	}
 }

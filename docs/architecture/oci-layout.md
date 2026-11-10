@@ -67,3 +67,40 @@ See also [`internal/layout`](../../internal/layout) for the verifier that
 reads this shape back, and the
 [compatibility matrix](../reference/compatibility.md) for which
 OS/architecture/runtime combinations actually consume it in CI.
+
+## Scheduling and guest-device scope
+
+Decision for the current local reliability work, 2026-11-10: keep distributed
+lease scheduling in the control-plane process, and keep stage scheduling in
+`internal/scheduler`. Do not add a third scheduler executable or additional
+virtio devices to complete a feature checklist. This fixes the current scope;
+it does not qualify the existing distributed or hypervisor backends as Stable.
+
+The [control-plane startup](../../cmd/platform-factory-control-plane/main.go)
+already restores lease state and quota usage before serving requests. The
+[server](../../cmd/platform-factory-control-plane/server.go) owns admission and
+lease transitions. Separating the scheduler now would introduce another
+identity, protocol, deployment unit and cross-process recovery boundary. The
+measured local packaging/FastAPI journeys exercise neither that process split
+nor a guest device; they provide no evidence that such an expansion would
+remove a user blocker.
+
+| Alternative | Consequence and current decision |
+| --- | --- |
+| Keep lease scheduling with the control plane | Retains the existing snapshot/admission boundary and two distributed executables. It couples scheduler lifetime and scaling to the control plane; this constraint remains explicit. Selected for the current scope. |
+| Extract a scheduler executable now | Could allow independent deployment or scaling, but requires a versioned lease ownership/leadership protocol, authentication, idempotent recovery and partition tests. Deferred until a measured case needs independent scaling or failure isolation. |
+| Add generic virtio device helpers now | Adds code and advertised surface without proving a bootable device/backend combination. Deferred until a named guest workload requires it. |
+| Extend a backend for a concrete guest requirement | Requires a device contract, feature negotiation, queues, bounds checks, reset/interrupt handling and boot/I/O/recovery tests on the native target. This is the route for any future device work. |
+
+The [virtio package](../../internal/hypervisor/virtio) contains minimal helpers.
+Its existence is not a promise that every backend implements each device.
+KVM queues and block/network handling belong to the concrete
+[KVM backend](../../internal/hypervisor/kvm); HVF uses its native adapter. Keep
+those implementation boundaries and their individual maturity levels.
+
+Reopen this decision when a recorded workload demonstrates a scheduler
+capacity/failure-isolation limit, or a guest cannot perform an essential task
+with the existing devices. Before implementation, record the triggering
+workload, expected observable behavior, responsible maintainer, supported
+platform and acceptance/failure cases. No new executable or device is selected
+by this decision, so no unimplemented contract is advertised as delivered.

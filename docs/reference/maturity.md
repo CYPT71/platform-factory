@@ -78,7 +78,7 @@ before relying on a label.
 | `internal/errors` (typed error model) | Alpha | Used by `internal/policy`, `internal/scheduler` and `cmd/platform-factory-worker`; this remains a partial adoption rather than a shared contract enforced across every component. |
 | mTLS component authentication, scheduling by platform/capability/load/cache-locality, idempotent lease/event/cancellation distribution, worker-loss build resumption, CAS replication with verify-before-accept, workload-identity provenance signing | Beta | Each checked `[x]` under v5's own exit criteria in the implementation roadmap as of 2026-08-04, but new enough this cycle that this doc doesn't call them Stable yet (no cross-release compatibility history) |
 | Per-tenant quotas/priorities/fairness | Alpha | The v5 exit criterion itself ("quotas, priorités, fairness et limites par tenant") is still unchecked; `internal/quota` exists and is wired opt-in into the control-plane, but not to the full bar the milestone sets |
-| Separate control-plane/scheduler/worker binaries | Alpha | Explicitly unchecked in the roadmap; scheduler logic is not yet split into its own binary |
+| Separate control-plane and worker binaries | Alpha | Lease scheduling remains inside the control plane. A third scheduler executable is deferred by the [current scope decision](../architecture/oci-layout.md#scheduling-and-guest-device-scope); this does not qualify multi-node recovery or isolation |
 
 ## Third-party review status (separate axis, not a maturity label)
 

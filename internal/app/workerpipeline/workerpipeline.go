@@ -88,6 +88,13 @@ func Executor(root string, store cache.ContentStore, pull func(context.Context, 
 		if err != nil {
 			return "", fmt.Errorf("worker: decode pipeline: %w", err)
 		}
+		// Reject unsupported constraints across the entire pipeline before any
+		// input fetch, workspace creation, or earlier stage can have side effects.
+		for _, stage := range definition.Stages {
+			if err := executor.ValidatePlainStage(stage); err != nil {
+				return "", fmt.Errorf("worker: unsupported stage constraints: %w", err)
+			}
+		}
 		rootDir, err := os.OpenRoot(absolute)
 		if err != nil {
 			return "", fmt.Errorf("worker: open execution root: %w", err)
