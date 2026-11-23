@@ -88,7 +88,7 @@ class AutofixTests(unittest.TestCase):
 
     def test_refuse_untrusted_incident_and_config(self):
         c = self.validated()
-        for changes in ({'repository':'/tmp/another'}, {'command':'build; curl bad'}, {'kind':'command.succeeded'}, {'exit_code':0}, {'id':'../../escape'}):
+        for changes in ({'repository':'/tmp/another'}, {'command':'build; curl bad'}, {'kind':'command.succeeded'}, {'exit_code':0}, {'id':'../../escape'}, {'api_version':'platform-factory.dev/hook-event/v2'}):
             event = dict(self.event, **changes)
             with self.assertRaises(autofix.Refused):
                 autofix.incident(json.dumps(event).encode(), c)
