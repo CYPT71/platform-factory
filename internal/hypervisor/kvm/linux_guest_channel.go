@@ -158,7 +158,15 @@ func (d *linuxGuestSerialDevice) handle(direction byte, size uint64, port uint16
 		return true, errors.New("vmm: guest serial transport requires byte I/O")
 	}
 	if err := d.transportError(); err != nil {
-		return true, err
+		// A dead control channel must not end the VM - see
+		// RunLinuxWithOptions' GuestChannel doc comment: unlike
+		// SerialWriter, it carries no "a writer error stops the VM"
+		// contract. Degrade to the same absent-device behavior used when
+		// no channel is configured at all, so a guest shutdown sequence
+		// that still pokes these registers (an 8250 driver's own teardown
+		// commonly does) after the host side tore down the connection
+		// never aborts the run the console is still reporting on.
+		return handleLinuxAbsentGuestChannelIO(direction, size, port, data)
 	}
 	register := port - linuxGuestSerialPortBase
 	if direction == linuxIODirectionOut {
