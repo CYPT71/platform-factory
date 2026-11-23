@@ -220,11 +220,19 @@ func RunLinuxWithOptions(ctx context.Context, memoryBytes uint64, kernel, initrd
 	}
 	startNotifier := linuxRunStartNotifier{callback: options.OnStarted}
 	for result.Exits < maxExits {
-		if guestChannel != nil {
-			if err := guestChannel.transportError(); err != nil {
-				return result, err
-			}
-		}
+		// GuestChannel (COM2) carries only the optional control-plane RPC
+		// protocol; unlike SerialWriter/COM1 (see LinuxRunOptions' doc
+		// comment: "A writer error stops the VM"), its failure must not end
+		// the run. The guest legitimately races its own poweroff against
+		// acknowledging an in-flight control request - e.g. a relayed
+		// shutdown signal - and routinely wins: closing GuestChannel on that
+		// benign, expected race would abort KVM_RUN here before COM1 ever
+		// gets to report the guest's real terminal status, silently
+		// discarding the exit metrics that status report carries. A broken
+		// GuestChannel still surfaces as an I/O error if the guest actually
+		// touches its ports again (handleLinuxPortIO below); it just never
+		// pre-empts the console/ctx-cancellation path that is the sole
+		// authority for ending this run.
 		setKVMImmediateExit(runControl, false)
 		if err := ctx.Err(); err != nil {
 			return result, err
