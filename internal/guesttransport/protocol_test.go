@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 var testKey = bytes.Repeat([]byte{0x5a}, 32)
@@ -163,5 +164,48 @@ func TestClientHonorsAlreadyCancelledContext(t *testing.T) {
 	_, err := NewClient(codec).Do(ctx, Request{Operation: OpState})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestClientRejectsCorrelationMismatchedResponse proves Client.Do correlates
+// a response to the request that actually solicited it, not merely to
+// "the next authenticated frame": the Codec's own monotonic-sequence check
+// only rejects replay/reordering, it never knows which seq a Client is
+// waiting for. A confused or compromised peer answering with a stale or
+// out-of-order seq must surface as an error, never as a silently
+// misattributed result.
+func TestClientRejectsCorrelationMismatchedResponse(t *testing.T) {
+	host, guest := net.Pipe()
+	defer guest.Close()
+	codec, err := NewCodec(host, host, testKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := NewClient(codec)
+	done := make(chan error, 1)
+	go func() {
+		guestCodec, err := NewCodec(guest, guest, testKey)
+		if err != nil {
+			done <- err
+			return
+		}
+		var request Request
+		if _, err := guestCodec.Read(&request); err != nil {
+			done <- err
+			return
+		}
+		// The client's first request carries seq 1; answer with an
+		// unrelated, higher seq instead - still valid and strictly
+		// increasing from the Codec's point of view, but not the one this
+		// exchange was waiting for.
+		done <- guestCodec.Write(5, Response{State: "running"})
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := client.Do(ctx, Request{Operation: OpState}); err == nil || !strings.Contains(err.Error(), "sequence mismatch") {
+		t.Fatalf("correlation error = %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
