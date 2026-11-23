@@ -52,28 +52,36 @@ Sur la révision [`4c16589`](https://github.com/CYPT71/platform-factory/commit/4
   supportées avec dépendances externes, gestionnaire indisponible, cache incomplet
   et lock obsolète. **Terminé si :** gel et construction sont reproductibles et
   les erreurs/reprises sont vérifiées pour chaque langage annoncé comme supporté.
-- [ ] **Formats et migrations.** Prioriser configuration projet, lock, plan,
-  événements et couches sémantiques ; figer les fixtures historiques et documenter
-  les changements permis. **Terminé si :** lecture ancienne/nouvelle, migration,
-  refus de version inconnue et retour arrière passent sur les versions ciblées.
-  **État par sous-domaine** (preuve sur
-  [`9040167`](https://github.com/CYPT71/platform-factory/commit/9040167)/
-  [`3b24b7c`](https://github.com/CYPT71/platform-factory/commit/3b24b7c),
-  PR [#18](https://github.com/CYPT71/platform-factory/pull/18)) :
+- [x] **Formats et migrations.** Configuration projet, lock, plan, événements
+  et couches sémantiques audités un par un. Preuve sur PR
+  [#18](https://github.com/CYPT71/platform-factory/pull/18) :
   - Configuration projet : déjà couvert avant ce lot
     (`internal/project/migrate.go` + `migrate_test.go` : ajout de version
     implicite, refus de version future, préservation des champs/commentaires).
   - Lock : trou réel trouvé et corrigé — `pf freeze` laissait un lock v1
     inchangé pour toujours (ni la branche v2 ni la branche
     « fichier absent » ne le prenaient en charge), sans aucune erreur. Il
-    migre maintenant vers v2 en place. Lecture ancienne/nouvelle et refus de
-    version future étaient déjà testés (`internal/project/lock_test.go`).
+    migre maintenant vers v2 en place (`cmd/platform-factory/project.go`).
+    Lecture ancienne/nouvelle et refus de version future étaient déjà testés
+    (`internal/project/lock_test.go`).
   - Plan (pipeline v1alpha1/v1beta1/v1) : lecture ancienne/nouvelle déjà
     prouvée sur de vraies fixtures JSON (`internal/pipeline/compat_test.go`).
-    Trou de test trouvé et comblé — aucun test n'envoyait une version
-    réellement inconnue ; ajouté dans `sdk/pipeline/pipeline_test.go`.
-  - Événements et couches sémantiques : **pas encore audités** dans ce lot ;
-    prochaine étape concrète avant de cocher cet item.
+    Trou de test comblé — aucun test n'envoyait une version réellement
+    inconnue ; ajouté dans `sdk/pipeline/pipeline_test.go`.
+  - Événements (journal de provenance, incidents de hook) : la nouvelle
+    identité `platform-factory.dev/journal/v1` n'était testée qu'à travers
+    son alias historique `secure-oci.dev/journal/v1` ; aucun test n'envoyait
+    une version inconnue dans l'un ou l'autre format
+    (`internal/provenance/journal_test.go`, `internal/hooks/test_autofix.py`).
+    Les deux trous sont comblés.
+  - Couches sémantiques (catégories de dépendances) : déjà couvert avant ce
+    lot (`internal/project/config_test.go` :
+    `TestConfigRejectsUnknownDependencyCategory`).
+  - Retour arrière : pour chaque format, une version plus récente que celle
+    comprise par ce binaire est refusée explicitement plutôt qu'interprétée
+    au hasard — c'est ce qui rend un retour à une version antérieure de
+    platform-factory sûr sur un document déjà écrit par une version plus
+    récente.
   Voir [la compatibilité](docs/api-compatibility.md).
 - [ ] **Installation et mises à jour.** Tester installation propre, mise à jour,
   interruption et retour arrière des archives et plugins sur chaque OS supporté.
