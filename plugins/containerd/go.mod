@@ -4,7 +4,7 @@ go 1.26.10
 
 require (
 	github.com/containerd/containerd/api v1.10.0
-	github.com/containerd/containerd/v2 v2.2.9
+	github.com/containerd/containerd/v2 v2.2.10
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/plugin v1.0.0
 	github.com/containerd/ttrpc v1.2.8
