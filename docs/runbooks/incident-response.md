@@ -1,7 +1,16 @@
 # Incident Response Runbook
 
 This document provides step-by-step procedures for responding to incidents in the
-platform-factory project.
+platform-factory project, using the diagnostics the CLI actually ships. It assumes
+no external monitoring stack (no Grafana, no Prometheus, no PagerDuty, no systemd
+units) unless your own deployment added one — platform-factory does not install or
+require any of those. If your team layers alerting or a dashboard on top of the
+commands below, add that detail to a local copy of this file; don't assume it here.
+
+Every `platform-factory` command accepts `--verbose`, which prints the command's
+`trace_id` to stderr before it runs. Structured log lines carry the same
+`trace_id` (and `span_id`/`parent_id` for nested operations) as fields - that is
+the correlation mechanism to reach for first, in place of a dashboard.
 
 ## Table of Contents
 
@@ -19,20 +28,19 @@ platform-factory project.
 When an incident is detected:
 
 ```bash
-# 1. Acknowledge the alert
-#    - In Alertmanager: Acknowledge the alert
-#    - In PagerDuty: Acknowledge the page
-#    - In GitHub: Comment on the issue
+# 1. Acknowledge wherever the report came from (GitHub issue, PR comment,
+#    CI failure notification) - there is no built-in paging system.
 
 # 2. Start the incident timer
 INCIDENT_START=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-# 3. Create an incident channel (if using Slack/Discord)
-#    - Name: incident-<type>-<date>
-#    - Example: incident-build-2026-08-02
+# 3. Capture the trace_id for the failing command/run, if known - every
+#    structured log line and every --verbose invocation carries one, and
+#    it is the one identifier that ties CLI, build, and MicroVM evidence
+#    together.
 
-# 4. Identify the incident commander
-#    - Primary on-call or most available maintainer
+# 4. Identify who is investigating (there is one maintainer, @CYPT71;
+#    see MAINTAINERS.md for area ownership)
 
 # 5. Begin investigation
 ```
@@ -40,20 +48,20 @@ INCIDENT_START=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 ### 2. Investigation
 
 ```bash
-# Check system status
-./scripts/health-check.sh
+# Non-mutating project dashboard: build, evidence, publication, deployment
+# state, and the one safe next command
+platform-factory status --format json
 
-# Check recent logs
-journalctl -u platform-factory-* --since "1 hour ago" -f
+# Environment/toolchain/sandbox/hypervisor health
+platform-factory doctor --json
 
-# Check metrics dashboard
-# Open Grafana dashboard: https://grafana.platform-factory.dev
+# Recent structured logs and events (correlate by trace_id)
+platform-factory logs --tail 200
+platform-factory events --tail 200
 
-# Check recent deployments
+# Check recent commits and whether CI passed on them
 git log --oneline --since="24 hours ago"
-
-# Check CI/CD status
-# Open GitHub Actions: https://github.com/CYPT71/platform-factory/actions
+gh run list --branch main --limit 10   # or open the Actions tab directly
 ```
 
 ### 3. Mitigation
@@ -61,23 +69,22 @@ git log --oneline --since="24 hours ago"
 ```bash
 # If the issue is identified and can be fixed quickly:
 # 1. Implement the fix
-# 2. Verify the fix resolves the issue
-# 3. Monitor for recurrence
+# 2. Verify locally: go build ./..., go vet ./..., go test ./...
+# 3. Open a PR; do not push a hotfix directly to main outside an emergency
+# 4. Monitor the next few CI runs for recurrence
 
 # If the issue requires more investigation:
-# 1. Implement a temporary workaround if available
+# 1. Note a workaround in the issue/PR if one exists
 # 2. Continue investigation
-# 3. Escalate if needed
+# 3. Escalate per MAINTAINERS.md if you cannot resolve it
 ```
 
 ### 4. Resolution
 
 ```bash
-# Verify the fix is working
-./scripts/verify-fix.sh
-
-# Monitor for at least 30 minutes
-watch -n 30 ./scripts/health-check.sh
+# Re-run the dashboard/health checks and confirm they're clean
+platform-factory status --format json
+platform-factory doctor --json
 
 # Document the resolution
 INCIDENT_END=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -88,10 +95,9 @@ echo "Incident duration: $DURATION seconds"
 ### 5. Post-Incident
 
 ```bash
-# 1. Schedule post-mortem meeting
-# 2. Write incident report (see template in SLO.md)
-# 3. Identify and assign action items
-# 4. Update runbooks if needed
+# 1. Open a GitHub issue capturing what happened and the trace_id(s) involved
+# 2. Identify and assign action items
+# 3. Update this runbook if a step above was wrong, missing, or unclear
 ```
 
 ---
@@ -105,137 +111,117 @@ echo "Incident duration: $DURATION seconds"
 - Increased build failure rate
 - Specific stages failing
 
+platform-factory does not write build logs to a file or run as a daemon: a build
+is a single `platform-factory build`/`platform-factory project build` invocation,
+and its structured log lines go to stderr (or wherever your CI captures stdio),
+tagged with the run's `trace_id`.
+
 **Immediate Actions:**
 
 ```bash
-# Check build logs
-cat /var/log/platform-factory/build.log | tail -100
+# Re-run with --verbose to capture the trace_id and full command line
+platform-factory build --verbose [EXECUTABLE]
+platform-factory project build --verbose
 
-# Check for specific error patterns
-grep -i "error\|fail\|panic" /var/log/platform-factory/build.log | tail -50
+# Explain the build plan without executing it (dry run)
+platform-factory build --dry-run [EXECUTABLE]
+platform-factory project build --dry-run
 
-# Check disk space
-df -h /var/lib/platform-factory
+# Check available disk space for the build cache
+df -h ~/.cache/platform-factory
 
 # Check memory usage
-free -h
-
-# Check for resource exhaustion
-lsof | wc -l
+free -h   # macOS: vm_stat
 ```
 
 **Common Causes and Solutions:**
 
 1. **Disk Space Exhaustion**
    ```bash
-   # Check disk usage
-   du -sh /var/lib/platform-factory/* | sort -h
-   
-   # Clean up old build artifacts
-   find /var/lib/platform-factory/cache -mtime +7 -delete
-   
-   # Clean up old logs
-   find /var/log/platform-factory -name "*.log" -mtime +7 -delete
+   # Check cache size
+   du -sh ~/.cache/platform-factory/* | sort -h
+
+   # The content-addressed cache is safe to delete entirely; the next
+   # build repopulates it
+   rm -rf ~/.cache/platform-factory
    ```
 
-2. **Memory Exhaustion**
+2. **Memory/CPU Exhaustion**
    ```bash
-   # Check memory usage by process
-   ps aux --sort=-%mem | head -20
-   
-   # Increase memory limits (temporary)
-   # Edit systemd service file
-   sudo systemctl edit platform-factory-builder
-   # Add: MemoryLimit=8G
-   sudo systemctl daemon-reload
-   sudo systemctl restart platform-factory-builder
+   # project build accepts resource ceilings; a build that runs away
+   # fails closed instead of taking down the host
+   platform-factory project build --max-memory 2GiB --max-cpu 5m --max-wall-clock 10m
    ```
 
-3. **Network Issues**
+3. **Network Issues (fetching toolchains/dependencies during freeze)**
    ```bash
    # Check network connectivity
-   ping google.com
    curl -v https://registry-1.docker.io
-   
+
    # Check DNS resolution
-   nslookup registry-1.docker.io
    dig registry-1.docker.io
-   
+
    # Check proxy settings
    env | grep -i proxy
    ```
 
-4. **Dependency Issues**
+4. **Dependency/Toolchain Issues**
    ```bash
-   # Check if dependencies are available
-   go mod download
-   
-   # Check Go toolchain
+   # Toolchain and sandbox checks in one place
+   platform-factory doctor --json
+
+   # Go-specific toolchain check, if the project is Go
    go version
-   
-   # Verify GOTOOLCHAIN
-   echo $GOTOOLCHAIN
+   echo "$GOTOOLCHAIN"
    ```
 
 ### Slow Builds
 
 **Symptoms:**
-- Builds taking longer than SLO targets
+- Builds taking longer than expected
 - Specific stages are slow
+
+There is no built-in `--profile`/`--timing` flag or pprof hook in the build
+path; time stages manually and correlate with `trace_id`.
 
 **Immediate Actions:**
 
 ```bash
-# Profile build times
-./platform-factory build --profile=build.prof project.yaml
+# Time the whole build, or a single project action
+time platform-factory build [EXECUTABLE]
+time platform-factory project freeze
+time platform-factory project build
 
-# Analyze profile
-go tool pprof build.prof
-
-# Check resource usage during build
-top -c
-htop
+# Host resource usage during the build
+top -c   # or htop if installed
 ```
 
 **Common Causes and Solutions:**
 
 1. **Inefficient Build Steps**
-   ```bash
-   # Identify slow stages
-   ./platform-factory build --timing project.yaml
-   
-   # Optimize Dockerfile
-   # - Use multi-stage builds
-   # - Leverage build cache
-   # - Minimize layers
-   ```
+   - Review the project's `freeze_command` and language-specific freeze
+     steps (`platform-factory project freeze --dry-run` explains them
+     without running anything).
 
 2. **Network Latency**
    ```bash
-   # Test download speeds
-   time curl -o /dev/null https://example.com/large-file
-   
-   # Use local mirrors if available
-   # Configure in .config/platform-factory/config.yaml
+   # Test download speed to the registries/mirrors actually in use
+   time curl -o /dev/null https://registry-1.docker.io/v2/
    ```
 
 3. **Resource Contention**
    ```bash
-   # Limit concurrent builds
-   ./platform-factory build --parallelism=2 project.yaml
-   
-   # Check CPU throttling
-   cat /proc/cpuinfo | grep -i throttl
+   # Cap concurrent/parallel work explicitly via the same budget flags
+   # used for exhaustion above
+   platform-factory project build --max-cpu 5m
    ```
 
-4. **Cache Misses**
-   ```bash
-   # Check cache hit rate
-   ./platform-factory cache stats
-   
-   # Force cache rebuild if needed
-   ./platform-factory cache rebuild
-   ```
+4. **Cold Cache**
+   - Caching is automatic and content-addressed under
+     `~/.cache/platform-factory`; a cold cache (first build, or after
+     deleting it per the disk-space case above) is the usual explanation
+     for an unusually slow run. There is no separate `cache stats`/`cache
+     rebuild` command - inspect the directory directly.
 
 ---
 
@@ -244,133 +230,102 @@ htop
 ### Push Failures
 
 **Symptoms:**
-- Images failing to push
+- `platform-factory publish` failing to push
 - Push timeouts
 - Authentication errors
+
+platform-factory has no `registry login`/`check-token`/`refresh-token`
+subcommands and no stored token store of its own. Registry credentials come
+from `PLATFORM_FACTORY_REGISTRY_USERNAME` / `PLATFORM_FACTORY_REGISTRY_PASSWORD`
+(checked by `doctor`) or are passed explicitly to commands that take
+`-username`/`-password`.
 
 **Immediate Actions:**
 
 ```bash
-# Check registry connectivity
-curl -v https://ghcr.io
+# Confirm the registry is reachable and credentials resolve
+platform-factory doctor --json --registry ghcr.io
 
-# Check authentication
-cat ~/.config/platform-factory/registry-auth.json
+# Verbose publish to see exactly what was attempted and its trace_id
+platform-factory publish --verbose [LAYOUT] IMAGE:TAG
 
-# Check network connectivity to registry
+# Check network connectivity to the registry
+curl -v https://ghcr.io/v2/
 nc -zv ghcr.io 443
-
-# Check for rate limiting
-curl -I https://ghcr.io
 ```
 
 **Common Causes and Solutions:**
 
 1. **Authentication Issues**
    ```bash
-   # Re-authenticate
-   ./platform-factory registry login ghcr.io
-   
-   # Check token validity
-   ./platform-factory registry check-token ghcr.io
-   
-   # Renew token if expired
-   ./platform-factory registry refresh-token ghcr.io
+   # Confirm the expected env vars are actually set in this shell/CI job
+   env | grep PLATFORM_FACTORY_REGISTRY
+
+   # doctor's registry-access check reports exactly why a probe failed
+   platform-factory doctor --json --registry ghcr.io
    ```
 
 2. **Network Connectivity**
    ```bash
-   # Check firewall rules
-   sudo iptables -L -n
-   
-   # Check for corporate proxy
+   # Check for a corporate proxy
    env | grep -i proxy
-   
-   # Temporarily disable firewall for testing
-   sudo iptables -F
+
+   # Check firewall rules (Linux)
+   sudo iptables -L -n
    ```
 
 3. **Registry Rate Limiting**
    ```bash
-   # Check rate limit headers
-   curl -I https://ghcr.io | grep -i rate
-   
-   # Wait and retry
-   sleep 60
-   ./platform-factory push image:tag
-   
-   # Use different registry if available
-   ./platform-factory push --registry=custom.registry.io image:tag
+   # Check rate-limit response headers directly
+   curl -I https://ghcr.io/v2/
+
+   # Retry after a backoff; there is no built-in retry/backoff flag on
+   # publish today
+   sleep 60 && platform-factory publish [LAYOUT] IMAGE:TAG
    ```
 
 4. **Large Image Issues**
+   - There is no `--chunk-size` or `image optimize` command. Inspect the
+     layout directly instead:
    ```bash
-   # Check image size
-   ./platform-factory image inspect image:tag | grep Size
-   
-   # Push in smaller chunks
-   ./platform-factory push --chunk-size=10M image:tag
-   
-   # Compress image before push
-   ./platform-factory image optimize image:tag
+   platform-factory inspect LAYOUT
    ```
 
 ### Pull Failures
 
 **Symptoms:**
-- Images failing to pull
-- Pull timeouts
+- `platform-factory import`/the deploying runtime failing to pull
 - Digest mismatches
 
 **Immediate Actions:**
 
 ```bash
-# Check image exists
-./platform-factory registry catalog ghcr.io/owner
+# Inspect the published manifest/digest by reference
+platform-factory registry inspect IMAGE@sha256:DIGEST
 
-# Check image manifest
-./platform-factory manifest inspect ghcr.io/owner/repo:tag
-
-# Check local cache
-ls -la ~/.cache/platform-factory/blobs/sha256/
+# Confirm the layout's own digest before it was ever pushed
+platform-factory inspect LAYOUT
 ```
 
 **Common Causes and Solutions:**
 
-1. **Image Not Found**
+1. **Image Not Found / Typo in Reference**
    ```bash
-   # Verify image exists
-   ./platform-factory registry catalog ghcr.io/owner
-   
-   # Check for typos in image name
-   # Retry with correct name
+   platform-factory registry inspect IMAGE@sha256:DIGEST
+   # a 404 here means the reference, not the client, is wrong
    ```
 
 2. **Digest Mismatch**
    ```bash
-   # Verify image integrity
-   ./platform-factory image verify image:tag
-   
-   # Re-pull with force
-   ./platform-factory pull --force image:tag
-   
-   # Clean local cache
-   ./platform-factory cache clean
+   # Re-verify the release evidence against the digest actually deployed
+   platform-factory verify-release --evidence evidence.json LAYOUT
+
+   # Re-publish from the original layout rather than hand-editing a tag
+   platform-factory publish [LAYOUT] IMAGE:TAG
    ```
 
 3. **Network Issues**
-   ```bash
-   # Same troubleshooting as push failures
-   ```
-
-4. **Storage Issues**
-   ```bash
-   # Check local storage
-   df -h ~/.cache/platform-factory
-   
-   # Clean old blobs
-   ./platform-factory cache gc
-   ```
+   - Same troubleshooting as push failures above.
 
 ---
 
@@ -386,63 +341,51 @@ ls -la ~/.cache/platform-factory/blobs/sha256/
 **Immediate Actions:**
 
 ```bash
-# Check MicroVM logs
-journalctl -u platform-factory-microvm -f
+# Hypervisor/sandbox capability check - this is the first thing to run
+platform-factory doctor --json
 
-# Check for KVM/HVF support
-lsmod | grep kvm
-kextstat | grep hvf
+# MicroVM-specific status and logs (replace <id> with the container/VM id)
+platform-factory microvm status <id>
+platform-factory microvm logs <id>
 
-# Check virtualization support
-virt-host-validate
-
-# Check for nested virtualization
-grep -E 'vmx|svm' /proc/cpuinfo
+# Raw virtualization support, if doctor's native-hypervisor check fails
+lsmod | grep kvm                      # Linux/KVM
+sw_vers                               # macOS, to check HVF eligibility
+grep -E 'vmx|svm' /proc/cpuinfo       # Linux: hardware virtualization present
 ```
 
 **Common Causes and Solutions:**
 
-1. **Virtualization Not Enabled**
+1. **Virtualization Not Enabled / Not Available**
    ```bash
-   # Check BIOS settings
-   sudo dmidecode | grep -i virtual
-   
-   # Enable virtualization in BIOS/UEFI
-   # Reboot required
+   # doctor's native-hypervisor check (kvm-device, kvm-extensions,
+   # hyper-v, virtualization-framework) explains exactly what is missing
+   platform-factory doctor --json
    ```
 
 2. **KVM Not Available (Linux)**
    ```bash
-   # Check KVM modules
    lsmod | grep kvm
-   
-   # Load KVM modules
    sudo modprobe kvm
    sudo modprobe kvm_intel  # or kvm_amd
-   
-   # Install KVM packages
-   sudo apt-get install qemu-kvm libvirt-daemon-system
+   ls -l /dev/kvm           # permissions: the invoking user needs rw access
    ```
 
 3. **HVF Not Available (macOS)**
    ```bash
-   # Check HVF kernel extension
-   kextstat | grep hvf
-   
-   # Enable HVF
-   sudo kextload /Library/Extensions/HVF.kext
-   
-   # Check for macOS version compatibility
    sw_vers
+   # HVF is a framework entitlement, not a loadable kext on current
+   # macOS; doctor's virtualization-framework check is authoritative here
    ```
 
 4. **Resource Issues**
    ```bash
-   # Check available memory
    free -h
-   
-   # Reduce MicroVM memory allocation
-   ./platform-factory run --memory=2G image:tag
+   # Direct, low-level native-MicroVM invocation (memory in MiB, not GiB)
+   platform-factory microvm run --memory-mib 2048 ...
+   # A pf.yaml project instead launches with isolation: microvm already
+   # set in its config; adjust memory/vcpus there, then:
+   platform-factory launch --isolation=microvm
    ```
 
 ### MicroVM Performance Issues
@@ -455,46 +398,26 @@ grep -E 'vmx|svm' /proc/cpuinfo
 **Immediate Actions:**
 
 ```bash
-# Check MicroVM resource usage
-./platform-factory microvm ps
-./platform-factory microvm stats <id>
+platform-factory microvm status <id>
+platform-factory microvm logs <id>
 
-# Check host resource usage
-top -c
-htop
-
-# Check for CPU throttling
-mpstat -P ALL 1
+top -c      # or htop
+mpstat -P ALL 1   # Linux: per-CPU, to spot throttling/contention
 ```
 
 **Common Causes and Solutions:**
 
-1. **CPU Contention**
+1. **CPU/Memory Pressure**
    ```bash
-   # Limit CPU usage
-   ./platform-factory run --cpus=2 image:tag
-   
-   # Use CPU pinning
-   ./platform-factory run --cpus=0-1 image:tag
+   platform-factory microvm run --vcpus 2 --memory-mib 4096 ...
    ```
 
-2. **Memory Pressure**
+2. **Disk I/O Bottleneck**
    ```bash
-   # Check memory usage
-   ./platform-factory microvm memory <id>
-   
-   # Increase memory
-   ./platform-factory run --memory=4G image:tag
-   ```
-
-3. **Disk I/O Bottleneck**
-   ```bash
-   # Use faster storage
-   ./platform-factory run --storage=/mnt/ssd image:tag
-   
-   # Check disk performance
    iostat -x 1
    ```
+   There is no built-in `--storage` override; this is a host/placement
+   decision, not a platform-factory flag.
 
 ---
 
@@ -503,113 +426,84 @@ mpstat -P ALL 1
 ### Signing Failures
 
 **Symptoms:**
-- Signing operations failing
+- `platform-factory publish --sign` failing
 - Signature verification failures
 - Key-related errors
+
+platform-factory has no `key generate`/`key import`/`trust add` subcommands.
+Local signing uses a `signing.FileKeyStore` directory passed with
+`--key-dir`/`--key-name`; production releases sign keylessly through GitHub
+Actions OIDC/Fulcio (see SECURITY.md) - there is no long-lived private key to
+manage for those.
 
 **Immediate Actions:**
 
 ```bash
-# Check signing logs
-journalctl -u platform-factory-signer -f
+# Verbose publish/verify-release to see exactly which key material was
+# loaded and from where
+platform-factory publish --verbose --sign --key-dir KEYDIR --key-name NAME [LAYOUT] IMAGE:TAG
+platform-factory verify-release --verbose --key-dir KEYDIR --key-name NAME --evidence evidence.json LAYOUT
 
-# Check key availability
-ls -la ~/.config/platform-factory/keys/
-
-# Check key permissions
-ls -la ~/.config/platform-factory/keys/ | grep -v "drwx"
+# Check the key directory exists and has sane permissions
+ls -la KEYDIR
 ```
 
 **Common Causes and Solutions:**
 
-1. **Missing Keys**
+1. **Missing or Misnamed Key**
    ```bash
-   # Generate new key
-   ./platform-factory key generate my-key
-   
-   # Import existing key
-   ./platform-factory key import my-key.pem
-   
-   # Check default key
-   ./platform-factory config get signing.key
+   ls KEYDIR
+   # --key-name defaults to "release"; confirm the file matches
    ```
 
 2. **Key Permissions**
    ```bash
-   # Fix permissions
-   chmod 600 ~/.config/platform-factory/keys/*.pem
-   
-   # Check directory permissions
-   chmod 700 ~/.config/platform-factory/keys
+   chmod 600 KEYDIR/*
+   chmod 700 KEYDIR
    ```
 
-3. **Key Corruption**
-   ```bash
-   # Verify key integrity
-   ./platform-factory key verify my-key
-   
-   # Backup and remove corrupted key
-   mv ~/.config/platform-factory/keys/my-key.pem{,.bak}
-   
-   # Generate new key
-   ./platform-factory key generate my-key
-   ```
-
-4. **Algorithm Not Supported**
-   ```bash
-   # Check supported algorithms
-   ./platform-factory key algorithms
-   
-   # Use supported algorithm
-   ./platform-factory key generate --algorithm=ed25519 my-key
-   ```
+3. **CI (keyless) Signing Identity Issues**
+   - See SECURITY.md's "Signing identity and rotation" section: there is
+     no key to rotate for CI releases, only trusted workflow identity,
+     repository access, and token permissions to review.
 
 ### Verification Failures
 
 **Symptoms:**
-- Signature verification failing
-- Images rejected due to invalid signatures
+- `platform-factory verify-release` failing
+- Deploys refused due to policy/evidence mismatch
 
 **Immediate Actions:**
 
 ```bash
-# Verify specific image
-./platform-factory image verify image:tag
+platform-factory verify-release --verbose --evidence evidence.json --policy policy.json LAYOUT
 
-# Check image signature
-./platform-factory image inspect --show-signature image:tag
-
-# Check public key
-./platform-factory key show my-key --public
+# Inspect what the layout and its SBOM actually contain
+platform-factory inspect LAYOUT
+platform-factory sbom LAYOUT
 ```
 
 **Common Causes and Solutions:**
 
-1. **Image Modified After Signing**
+1. **Layout Changed After Signing**
    ```bash
-   # Re-sign the image
-   ./platform-factory image sign image:tag
-   
-   # Verify before pushing
-   ./platform-factory image verify --strict image:tag
+   # Re-run the full publish (which re-signs) rather than editing
+   # anything by hand
+   platform-factory publish --sign [LAYOUT] IMAGE:TAG
    ```
 
-2. **Wrong Public Key**
+2. **Wrong Certificate/Key**
    ```bash
-   # Check expected public key
-   ./platform-factory trust show
-   
-   # Add correct public key
-   ./platform-factory trust add owner-key.pem
+   # Pass the exact certificate chain verify-release expects
+   platform-factory verify-release --certificate cert.pem --intermediate-certificate chain.pem ...
    ```
 
-3. **Signature Expired**
+3. **Evidence/Journal Mismatch**
    ```bash
-   # Check signature timestamp
-   ./platform-factory image inspect --show-signature image:tag | grep Timestamp
-   
-   # Re-sign with current timestamp
-   ./platform-factory image sign --force image:tag
+   # --journal requires the provenance to match the pipeline journal
+   # exactly; regenerate the journal from the same run rather than reusing
+   # an older one
+   platform-factory verify-release --journal journal.json ...
    ```
 
 ---
@@ -626,41 +520,33 @@ ls -la ~/.config/platform-factory/keys/ | grep -v "drwx"
 **Immediate Actions:**
 
 ```bash
-# 1. DO NOT discuss in public channels
-# 2. Create a private incident channel
-# 3. Limit access to incident responders
+# 1. DO NOT discuss in public issues, PRs, or Discussions
+# 2. Use GitHub's private security advisory reporting for
+#    CYPT71/platform-factory - this is the one real, documented channel
+#    (see SECURITY.md); there is no separate PagerDuty/Slack flow
+# 3. Limit discussion to the advisory and anyone explicitly added to it
 
 # Acknowledge the report (if external)
 # "Thank you for your report. We are investigating and will respond shortly."
-
-# Begin investigation in private
 ```
 
-**Response Procedure:**
+**Response Procedure:** follows SECURITY.md directly - receipt acknowledged
+within three business days, an initial assessment targeted within seven;
+confirmed issues are coordinated privately until a fix and advisory are ready.
+Those are operational goals, not contractual SLAs.
 
-1. **Triage** (Within 1 hour)
-   - Assess the severity and impact
-   - Determine if it's a valid vulnerability
-   - Identify affected components
+1. **Triage** - assess severity/impact, confirm it reproduces, identify
+   affected components.
+2. **Containment** - if there's an ongoing exploit, revoke whatever
+   credential or access enabled it (GitHub tokens, registry credentials,
+   signing identities) before anything else.
+3. **Remediation** - fix, test, and prepare the fix for release.
+4. **Disclosure** - coordinate with the reporter, prepare the advisory,
+   release the fix and the advisory together.
 
-2. **Containment** (Within 2 hours)
-   - If exploit is ongoing, contain it
-   - Revoke compromised credentials
-   - Isolate affected systems
-
-3. **Remediation** (Within 24 hours for critical)
-   - Develop a fix
-   - Test the fix thoroughly
-   - Prepare the fix for release
-
-4. **Disclosure** (According to severity)
-   - Coordinate with reporter (if external)
-   - Prepare security advisory
-   - Release fix and advisory simultaneously
-
-**Contact:**
-- **Security Team**: security@platform-factory.dev
-- **On-Call**: [On-call contact]
+**Contact:** GitHub private security advisory on this repository. See
+SECURITY.md for the current supported-versions and disclosure policy, and
+MAINTAINERS.md for area ownership.
 
 ---
 
@@ -668,59 +554,54 @@ ls -la ~/.config/platform-factory/keys/ | grep -v "drwx"
 
 If you cannot resolve an incident:
 
-1. **First Level**: Contact the on-call maintainer
-2. **Second Level**: Contact the project lead (Cyprien @CYPT71)
-3. **Third Level**: Contact all maintainers via maintainers@platform-factory.dev
-4. **Fourth Level**: For critical security issues, contact security@platform-factory.dev
+1. Comment on the relevant issue/PR, or open a new issue, with the
+   `trace_id` and what you've already ruled out.
+2. For anything security-sensitive, use GitHub's private security advisory
+   flow instead of a public issue (see above).
+3. This is currently a single-maintainer project (@CYPT71, see
+   MAINTAINERS.md) - there is no multi-tier on-call rotation to escalate
+   through beyond that.
 
 ---
 
 ## Tools and Commands Reference
 
-### Health Checks
+### Health and Status
 
 ```bash
-# Full health check
-./scripts/health-check.sh
+# Non-mutating project dashboard
+platform-factory status --format json
 
-# Build system health
-./scripts/health-check.sh build
-
-# Registry health
-./scripts/health-check.sh registry
-
-# Execution health
-./scripts/health-check.sh execution
-
-# Signing health
-./scripts/health-check.sh signing
+# Environment/toolchain/sandbox/hypervisor/registry checks
+platform-factory doctor --json
+platform-factory doctor --json --registry ghcr.io
+platform-factory doctor --json --policy policy.json
 ```
 
-### Log Collection
+### Logs and Events
 
 ```bash
-# Collect all logs
-./scripts/collect-logs.sh
+platform-factory logs --tail 200
+platform-factory logs --follow
 
-# Collect build logs
-./scripts/collect-logs.sh build
-
-# Collect registry logs
-./scripts/collect-logs.sh registry
-
-# Collect MicroVM logs
-./scripts/collect-logs.sh microvm
+platform-factory events --tail 200
+platform-factory events --follow
 ```
 
-### Metrics
+### MicroVM Diagnostics
 
 ```bash
-# View Prometheus metrics
-curl http://localhost:9090/metrics
-
-# Query specific metric
-curl -G http://localhost:9090/api/v1/query --data-urlencode 'query=build_success_rate'
+platform-factory microvm status <id>
+platform-factory microvm logs <id>
+platform-factory microvm restart <id>
+platform-factory microvm stop <id>
 ```
+
+There is no metrics-scrape endpoint (no `:9090/metrics`, no built-in
+Prometheus exporter) in platform-factory itself; `--verbose` plus the
+structured `trace_id`-correlated log lines are the actual instrumentation
+this project ships today. Exporting them to a metrics/tracing backend of
+your choice is left to your own deployment.
 
 ---
 
@@ -728,9 +609,9 @@ curl -G http://localhost:9090/api/v1/query --data-urlencode 'query=build_success
 
 This runbook should be updated:
 - After each incident (add lessons learned)
+- When commands referenced here change or are removed
 - When new features are added (add new incident types)
-- When procedures change
 - Quarterly (review and update)
 
-**Last Updated**: 2026-08-02
+**Last Updated**: 2026-11-23
 **Owner**: @CYPT71
