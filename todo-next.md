@@ -44,11 +44,30 @@ Sur la révision [`4c16589`](https://github.com/CYPT71/platform-factory/commit/4
   avec dépendances passe init, gel, build et exécution depuis un environnement
   propre, avec refus explicite des plateformes et dépendances non supportées.
   Voir [les plugins de langage](docs/language-plugin-layers.md).
+  **Constat vérifié :** `plugins/lang-python/main.go` enregistre bien une
+  commande `runtime` (`runtime.go`) ; `plugins/lang-node` et
+  `plugins/lang-dotnet` n'en ont aucune. `TestPFInitPythonNodeAndDotnetExperience`
+  (`cmd/platform-factory/init_e2e_test.go`) le confirme : pour les trois
+  langages, `pf build` échoue volontairement à un préflight actionnable
+  (« pf plugin provision-runtime ») faute de runtime empaqueté — c'est le
+  comportement attendu documenté, pas un bug. Ce n'est donc pas une
+  correction ponctuelle : c'est une fonctionnalité neuve par langage (choisir
+  et épingler une source de runtime Linux Node/.NET, vérifier sa fermeture de
+  bibliothèques, la rendre réutilisable) qui mérite une décision de conception
+  avant implémentation plutôt qu'un choix unilatéral.
 - [ ] **Parcours projet complet.** Vérifier la continuité entre construction,
   publication, déploiement, état, logs et rollback, en réutilisant le digest et
   l'état persisté du projet. **Terminé si :** un scénario Python réel rejoint le
   niveau du [parcours compilé sur cluster](docs/local-kubernetes-acceptance.md),
   avec panne, nouvelle tentative et rollback, sans manifeste recopié à la main.
+  **Constat vérifié :** `tests/kind/test-kind-signed-lifecycle.sh` (le script
+  derrière ce document) fixe `language: compiled` — le scénario build→publish→
+  deploy→scale→rollback→redeploy→rollback sur un vrai cluster kind existe déjà
+  à ce niveau de rigueur, mais uniquement pour un binaire précompilé, jamais
+  pour un projet Python construit depuis sa source via `pf init`/`pf freeze`/
+  `pf build`. C'est précisément l'écart que cet item nomme. `kind` et `podman`
+  sont disponibles sur cette machine ; prochaine étape : un script frère pour
+  un projet Python, pas une réécriture de celui-ci.
 - [ ] **Recette de la TUI.** Mesurer le parcours installation → initialisation →
   résultat avec des utilisateurs découvrant le projet ; couvrir clavier seul,
   petit terminal, absence de couleur, annulation et reprise après erreur.
