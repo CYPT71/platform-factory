@@ -208,6 +208,7 @@ func realMainChild(child childProcess, sigCh <-chan os.Signal, stdout, stderr io
 	reaped := reapExitedChildren(stderr)
 	fmt.Fprintf(stdout, "level=INFO component=microvm-init operation=supervise phase=reap reaped=%d\n", reaped)
 	fmt.Fprintf(stdout, "level=INFO component=microvm-init operation=supervise phase=child-exit exit_code=%d action=poweroff\n", code)
+	drainConsole(stdout)
 	if err := poweroffFn(); err != nil {
 		fmt.Fprintf(stderr, "level=ERROR component=microvm-init operation=supervise phase=poweroff error=%q\n", err)
 	}

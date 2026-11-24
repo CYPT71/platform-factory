@@ -16,10 +16,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/CYPT71/platform-factory/internal/guesttransport"
 	"github.com/CYPT71/platform-factory/internal/hypervisor/sandbox"
 )
 
@@ -1142,5 +1144,169 @@ func TestShutdownLogWatcherPublishesCompleteExitCode(t *testing.T) {
 	}
 	if got := fmt.Sprint(codes); got != "[23]" {
 		t.Fatalf("codes=%s output=%q", got, output.String())
+	}
+}
+
+func TestGuestConsoleWatcherSignalsReadyAndExitOnce(t *testing.T) {
+	var output bytes.Buffer
+	readyCount := 0
+	var codes []uint32
+	watcher := newGuestConsoleWatcher(
+		&output,
+		func() { readyCount++ },
+		func(code uint32) { codes = append(codes, code) },
+	)
+	stream := "boot line\r\n" +
+		"level=INFO component=microvm-init operation=guest-agent phase=ready\r\n" +
+		"level=INFO component=microvm-init operation=guest-agent phase=ready\r\n" +
+		"{\"component\":\"example-service\"}\r\n" +
+		"level=INFO component=microvm-init operation=supervise phase=child-exit exit_code=143 action=poweroff\r\n" +
+		"level=INFO component=microvm-init operation=supervise phase=child-exit exit_code=0 action=poweroff\r\n"
+	for i := 0; i < len(stream); i++ {
+		if _, err := watcher.Write([]byte{stream[i]}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if readyCount != 1 || fmt.Sprint(codes) != "[143]" {
+		t.Fatalf("readyCount=%d codes=%v", readyCount, codes)
+	}
+}
+
+type testGuestHandler func(context.Context, guesttransport.Request) guesttransport.Response
+
+func (f testGuestHandler) Handle(ctx context.Context, req guesttransport.Request) guesttransport.Response {
+	return f(ctx, req)
+}
+
+// TestHeartbeatWaitsForGuestReadinessSoSlowBootPreservesStopMetrics proves a
+// slow kernel boot (longer than multiple heartbeat intervals) never triggers a
+// premature probe timeout that invalidates the single COM2 Agent, so stop
+// signals still reach the guest and terminal VMMMetrics are persisted.
+func TestHeartbeatWaitsForGuestReadinessSoSlowBootPreservesStopMetrics(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	state, err := store.Create(ctx, "slow-boot-metrics", testBundle(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetStatus(ctx, state.ID, "running"); err != nil {
+		t.Fatal(err)
+	}
+
+	hostChannel, guestChannel := net.Pipe()
+	defer guestChannel.Close()
+	key := bytes.Repeat([]byte{0x42}, 32)
+	agent, err := guesttransport.NewAgent(hostChannel, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+
+	guestReady := make(chan struct{})
+	var readyOnce sync.Once
+	var console bytes.Buffer
+	watcher := newGuestConsoleWatcher(
+		&console,
+		func() { readyOnce.Do(func() { close(guestReady) }) },
+		func(code uint32) {
+			if err := store.SetExited(context.Background(), state.ID, code, time.Now()); err != nil {
+				t.Errorf("SetExited: %v", err)
+			}
+			cancel()
+		},
+	)
+
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		runHeartbeatWhenReady(ctx, guestReady, agent, 25*time.Millisecond, 3, nil)
+	}()
+
+	// Simulate kernel boot taking well over 3x the heartbeat interval before
+	// microvm-init opens /dev/ttyS1 and logs guest-agent readiness.
+	time.Sleep(90 * time.Millisecond)
+
+	codec, err := guesttransport.NewCodec(guestChannel, guestChannel, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signaled := make(chan struct{}, 1)
+	guestDone := make(chan struct{})
+	go func() {
+		defer close(guestDone)
+		for {
+			gotSignal := false
+			err := guesttransport.ServeOne(ctx, codec, testGuestHandler(func(_ context.Context, req guesttransport.Request) guesttransport.Response {
+				switch req.Operation {
+				case guesttransport.OpState:
+					return guesttransport.Response{State: "running"}
+				case guesttransport.OpSignal:
+					gotSignal = true
+					return guesttransport.Response{}
+				default:
+					return guesttransport.Response{Error: "unexpected operation"}
+				}
+			}))
+			if err != nil {
+				return
+			}
+			if gotSignal {
+				signaled <- struct{}{}
+				return
+			}
+		}
+	}()
+
+	if _, err := watcher.Write([]byte("level=INFO component=microvm-init operation=guest-agent phase=ready\r\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Let at least one post-ready heartbeat probe run to confirm it succeeds
+	// without damaging the transport.
+	time.Sleep(40 * time.Millisecond)
+
+	sigCtx, sigCancel := context.WithTimeout(ctx, time.Second)
+	defer sigCancel()
+	if err := agent.Signal(sigCtx, "TERM"); err != nil {
+		t.Fatalf("agent.Signal(TERM) after slow boot: %v", err)
+	}
+	<-signaled
+	if _, err := watcher.Write([]byte("level=INFO component=microvm-init operation=supervise phase=child-exit exit_code=143 action=poweroff\r\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown watcher did not observe child-exit")
+	}
+	_ = hostChannel.Close()
+	_ = guestChannel.Close()
+	<-heartbeatDone
+	<-guestDone
+
+	// Mirror ServeSupervisor's deferred SetStatus("stopped") to prove it
+	// preserves the terminal VMMMetrics written by SetExited.
+	if err := store.SetStatus(context.Background(), state.ID, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	terminal, found, err := store.Get(context.Background(), state.ID)
+	if err != nil || !found {
+		t.Fatalf("terminal Get found=%t err=%v", found, err)
+	}
+	if terminal.Status != "stopped" || terminal.ExitStatus == nil || *terminal.ExitStatus != 143 {
+		t.Fatalf("terminal state=%+v", terminal)
+	}
+	if terminal.Metrics == nil || terminal.Metrics.APIVersion != "platform-factory.dev/vmm-metrics/v1" ||
+		terminal.Metrics.Backend != "kvm-native" || terminal.Metrics.Architecture != "amd64" ||
+		terminal.Metrics.MemoryMiB != 128 || terminal.Metrics.VCPUs != 1 || terminal.Metrics.ExitStatus != 143 {
+		t.Fatalf("terminal metrics=%+v", terminal.Metrics)
 	}
 }

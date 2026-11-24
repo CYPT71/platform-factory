@@ -2,7 +2,10 @@
 
 package main
 
-import "errors"
+import (
+	"errors"
+	"io"
+)
 
 // prepareConsole is unsupported outside Linux; this binary only ever runs
 // as a Linux kernel's PID 1, but the package must still build and test on
@@ -26,3 +29,5 @@ func prepareContainerEnv() error {
 func prepareSharedMemory() error {
 	return errors.New("prepareSharedMemory is only supported on linux")
 }
+
+func drainConsole(io.Writer) {}

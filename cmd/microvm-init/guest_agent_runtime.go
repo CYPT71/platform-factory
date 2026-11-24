@@ -73,6 +73,7 @@ func runWithOptionalGuestEndpoint(
 						defer clear(key)
 						endpointDone <- serveGuestEndpoint(ctx, conn, key, handler)
 					}()
+					fmt.Fprintln(out, "level=INFO component=microvm-init operation=guest-agent phase=ready")
 				}
 			}
 			if err != nil {
@@ -82,7 +83,14 @@ func runWithOptionalGuestEndpoint(
 		}
 	}
 
-	code := realMainChild(tracked, sigCh, out, errOut, poweroffFn)
+	wrappedPoweroff := func() error {
+		drainConsole(stdout)
+		if poweroffFn == nil {
+			return nil
+		}
+		return poweroffFn()
+	}
+	code := realMainChild(tracked, sigCh, out, errOut, wrappedPoweroff)
 	cancel()
 	if endpointStarted {
 		if err := <-endpointDone; err != nil && !errors.Is(err, context.Canceled) {
