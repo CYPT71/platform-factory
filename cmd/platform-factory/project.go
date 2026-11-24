@@ -737,7 +737,24 @@ func freezeProjectWithBootPins(loaded project.Loaded, plugins *pluginHost, kerne
 		return 1
 	}
 	lockPath := loaded.AdjacentLockPath()
-	if lock, lockErr := project.LoadLock(lockPath); lockErr == nil && lock.Version == project.CurrentLockVersion {
+	if lock, lockErr := project.LoadLock(lockPath); lockErr == nil {
+		if lock.Version != project.CurrentLockVersion {
+			// A legacy lock carries no pins worth preserving - v1 has none -
+			// so freezing it is exactly how it gains them: migrate it to the
+			// current schema in place, anchored to the manifest as it reads
+			// right now, same as a brand-new lock from `pf init` would be.
+			raw, readErr := os.ReadFile(loaded.File)
+			if readErr != nil {
+				fmt.Fprintf(stderr, "platform-factory project freeze: read project manifest: %v\n", readErr)
+				return 1
+			}
+			digest, digestErr := project.CanonicalManifestDigest(raw)
+			if digestErr != nil {
+				fmt.Fprintf(stderr, "platform-factory project freeze: plan digest: %v\n", digestErr)
+				return 1
+			}
+			lock = project.Lock{Version: project.CurrentLockVersion, GitCommit: lock.GitCommit, PlanDigest: digest}
+		}
 		sources, toolchains, pinErr := loaded.FrozenInputPins()
 		if pinErr != nil {
 			fmt.Fprintf(stderr, "platform-factory project freeze: lock pins: %v\n", pinErr)

@@ -184,6 +184,48 @@ func TestFreezeProjectWritesToolOutputInventoryAndV2Pins(t *testing.T) {
 	}
 }
 
+// TestFreezeMigratesLegacyV1LockToV2 proves a project left on a legacy v1
+// lock is not a dead end: freezing it produces a current-schema lock pinned
+// to the manifest as it reads today, with the pre-existing git_commit
+// carried forward, instead of silently leaving the v1 file untouched and
+// unpinned forever.
+func TestFreezeMigratesLegacyV1LockToV2(t *testing.T) {
+	loaded := loadProjectTest(t, "language: python\nruntime: python\ninclude:\n  - {source: python, destination: /runtime/python, category: toolchain}\n")
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "requirements.txt"), "example==1.0\n", 0o644)
+	writeProjectTestFile(t, filepath.Join(loaded.Root, "python"), "runtime", 0o755)
+	legacyLock, err := json.Marshal(project.Lock{Version: 1, GitCommit: "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeProjectTestFile(t, loaded.AdjacentLockPath(), string(legacyLock), 0o600)
+	execute := func(_ string, args []string, _ string, stdout, _ io.Writer) error {
+		if strings.Contains(strings.Join(args, " "), "pip freeze") {
+			_, _ = io.WriteString(stdout, "example==1.0\n")
+		}
+		return nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := freezeProject(loaded, nil, &stdout, &stderr, execute); code != 0 {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
+	}
+	migrated, err := project.LoadLock(loaded.AdjacentLockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Version != project.CurrentLockVersion {
+		t.Fatalf("version=%d, want %d", migrated.Version, project.CurrentLockVersion)
+	}
+	if migrated.GitCommit != "abc123" {
+		t.Fatalf("git_commit=%q, want preserved abc123", migrated.GitCommit)
+	}
+	if len(migrated.Sources) == 0 || len(migrated.Toolchains) != 1 || migrated.Toolchains[0].Name != "python" {
+		t.Fatalf("migrated lock=%+v", migrated)
+	}
+	if err := loaded.VerifyAdjacentLock(); err != nil {
+		t.Fatalf("migrated lock does not verify against the current manifest: %v", err)
+	}
+}
+
 func TestFreezePinsMicroVMKernelAndInitramfs(t *testing.T) {
 	loaded := loadProjectTest(t, "language: compiled\nartifact: app\nisolation: microvm\n")
 	writeProjectTestFile(t, filepath.Join(loaded.Root, "kernel"), "kernel-v1", 0o600)

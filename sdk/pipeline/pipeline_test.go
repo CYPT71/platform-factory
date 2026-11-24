@@ -59,6 +59,27 @@ func TestExternalConsumerGetsTypedValidationErrors(t *testing.T) {
 	}
 }
 
+// TestExternalConsumerCannotDecodeAnUnknownAPIVersion proves a document
+// stamped with a version this build has never shipped - not a typo, a
+// genuinely future or foreign wire version - is rejected as a validation
+// issue rather than silently accepted (encoding/json would otherwise
+// happily decode it: api_version is just a string field). A version this
+// build does not recognize must never be guessed at.
+func TestExternalConsumerCannotDecodeAnUnknownAPIVersion(t *testing.T) {
+	_, _, err := pipeline.Decode(strings.NewReader(`{
+		"api_version":"platform-factory.dev/v99","name":"sdk-example",
+		"stages":[{"id":"build","command":{"executable":"/bin/build"}}]
+	}`))
+	var validation *public.ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("error = %T %v, want *pipeline.ValidationError", err, err)
+	}
+	if len(validation.Issues) != 1 || validation.Issues[0].Path != "api_version" ||
+		validation.Issues[0].Message != "unsupported API version" {
+		t.Fatalf("issues = %#v", validation.Issues)
+	}
+}
+
 func TestExternalConsumerCanFingerprintWithoutMutation(t *testing.T) {
 	definition := pipeline.Pipeline{APIVersion: pipeline.APIVersion, Name: "sdk-example", Stages: []pipeline.Stage{{
 		ID: "build", Command: pipeline.Command{Executable: "/bin/build"}, Env: map[string]string{"B": "2", "A": "1"},
