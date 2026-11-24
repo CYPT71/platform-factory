@@ -749,10 +749,18 @@ func EndWithError(span *Span, err error) {
 	DefaultTracer().FinishWithError(span, err)
 }
 
-// AddSpanEvent adds an event to a span.
+// AddSpanEvent adds an event to a span, redacting any sensitive tag values.
 func AddSpanEvent(span *Span, name string, tags map[string]any) {
 	if span == nil {
 		return
+	}
+
+	var sanitized map[string]any
+	if len(tags) > 0 {
+		sanitized = make(map[string]any, len(tags))
+		for k, v := range tags {
+			sanitized[k] = redactField(k, v)
+		}
 	}
 
 	span.mu.Lock()
@@ -761,11 +769,11 @@ func AddSpanEvent(span *Span, name string, tags map[string]any) {
 	span.Events = append(span.Events, SpanEvent{
 		Timestamp: time.Now().UTC(),
 		Name:      name,
-		Tags:      tags,
+		Tags:      sanitized,
 	})
 }
 
-// AddSpanTag adds a tag to a span.
+// AddSpanTag adds a tag to a span, redacting sensitive keys or embedded secrets.
 func AddSpanTag(span *Span, key string, value any) {
 	if span == nil {
 		return
@@ -777,7 +785,7 @@ func AddSpanTag(span *Span, key string, value any) {
 	if span.Tags == nil {
 		span.Tags = make(map[string]any)
 	}
-	span.Tags[key] = value
+	span.Tags[key] = redactField(key, value)
 }
 
 // Metrics types
