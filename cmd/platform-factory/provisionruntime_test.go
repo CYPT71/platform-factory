@@ -132,7 +132,7 @@ func TestAutoProvisionRuntimeIsANoOpWithoutARealTerminal(t *testing.T) {
 	writeProjectTestFile(t, filepath.Join(dir, "pf.yaml"), "version: 1\nlanguage: python\nprofile: \"python\"\nartifact: main.py\n", 0o644)
 	writeProjectTestFile(t, filepath.Join(dir, "main.py"), "print('hi')\n", 0o644)
 	var stdout, stderr bytes.Buffer
-	autoProvisionRuntime(context.Background(), dir, "python", &stdout, &stderr)
+	autoProvisionRuntime(context.Background(), dir, "python", false, &stdout, &stderr)
 	loaded, err := project.Discover(dir, "")
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +151,7 @@ func TestAutoProvisionRuntimeIsANoOpForCompiledLanguages(t *testing.T) {
 	writeProjectTestFile(t, filepath.Join(dir, "pf.yaml"), "version: 1\nlanguage: compiled\nprofile: \"static\"\nartifact: app\n", 0o644)
 	writeProjectTestFile(t, filepath.Join(dir, "app"), "binary", 0o755)
 	var stdout, stderr bytes.Buffer
-	autoProvisionRuntime(context.Background(), dir, "compiled", &stdout, &stderr)
+	autoProvisionRuntime(context.Background(), dir, "compiled", false, &stdout, &stderr)
 	if stdout.String() != "" || stderr.String() != "" {
 		t.Fatalf("expected no output for a compiled-language project, stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -167,7 +167,7 @@ func TestAutoProvisionRuntimeWarnsWhenTheLanguagePluginIsNotInstalled(t *testing
 	writeProjectTestFile(t, filepath.Join(dir, "pf.yaml"), "version: 1\nlanguage: node\nprofile: \"node\"\nartifact: app.js\n", 0o644)
 	writeProjectTestFile(t, filepath.Join(dir, "app.js"), "console.log('hi')\n", 0o644)
 	var stdout, stderr bytes.Buffer
-	autoProvisionRuntime(context.Background(), dir, "node", &stdout, &stderr)
+	autoProvisionRuntime(context.Background(), dir, "node", false, &stdout, &stderr)
 	if !strings.Contains(stderr.String(), "isn't installed") {
 		t.Fatalf("expected a warning about the missing plugin, stderr=%q", stderr.String())
 	}
@@ -234,5 +234,15 @@ func TestProvisionRuntimeCommandUsesExplicitPullAndReportsFailures(t *testing.T)
 				}
 			}
 		})
+	}
+}
+
+func TestAutoProvisionRuntimeSkipsPromptUnderAssumeYes(t *testing.T) {
+	loaded := loadRuntimeTestProject(t)
+	loadFakeLanguagePlugin(t, "python")
+	var stdout, stderr bytes.Buffer
+	autoProvisionRuntime(context.Background(), loaded.Root, "python", true, &stdout, &stderr)
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("expected silent no-op under --yes, got stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }

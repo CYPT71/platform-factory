@@ -62,6 +62,10 @@ func runPluginProvisionRuntimeWithService(ctx context.Context, args []string, st
 		fmt.Fprintln(stderr, "platform-factory plugin provision-runtime: --language and --image are required")
 		return 2
 	}
+	if *architecture != "amd64" && *architecture != "arm64" {
+		fmt.Fprintf(stderr, "platform-factory plugin provision-runtime: unsupported target architecture %q (supported: amd64, arm64)\n", *architecture)
+		return 2
+	}
 
 	loaded, err := project.Discover(*dir, "")
 	if err != nil {
@@ -133,7 +137,7 @@ func runPluginProvisionRuntimeWithService(ctx context.Context, args []string, st
 // doesn't implement "runtime", a pull failing, ...) is reported to
 // stderr and simply falls through to the same "run it manually later"
 // guidance init already gives - it never fails init itself.
-func autoProvisionRuntime(ctx context.Context, dir, language string, stdout, stderr io.Writer) {
+func autoProvisionRuntime(ctx context.Context, dir, language string, assumeYes bool, stdout, stderr io.Writer) {
 	loaded, err := project.Discover(dir, "")
 	if err != nil {
 		return
@@ -155,7 +159,7 @@ func autoProvisionRuntime(ctx context.Context, dir, language string, stdout, std
 		fmt.Fprintln(stderr, "  next: install the plugin, then rerun `pf init` to be offered runtime provisioning again, or set the runtime field in pf.yaml by hand - `pf build` will fail until one is provided")
 		return
 	}
-	if !isatty.IsTerminal(os.Stdin.Fd()) || !isatty.IsTerminal(os.Stdout.Fd()) {
+	if assumeYes || !isatty.IsTerminal(os.Stdin.Fd()) || !isatty.IsTerminal(os.Stdout.Fd()) {
 		return
 	}
 	_, architecture, ok := strings.Cut(loaded.Config.Platform, "/")

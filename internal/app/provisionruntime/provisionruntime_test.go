@@ -129,8 +129,8 @@ func noLangpluginResolve(string) (string, error) {
 
 func TestResolveHostCandidateReportsNoneForAnUnsupportedLanguage(t *testing.T) {
 	svc := New(noLangpluginResolve)
-	if got := svc.ResolveHostCandidate("node", "amd64"); got != "" {
-		t.Fatalf("got=%q, want empty - no language plugin implements a runtime subcommand for node yet", got)
+	if got := svc.ResolveHostCandidate("ruby", "amd64"); got != "" {
+		t.Fatalf("got=%q, want empty - no language plugin implements a runtime subcommand for ruby yet", got)
 	}
 }
 

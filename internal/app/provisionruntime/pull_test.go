@@ -240,6 +240,101 @@ func TestPullImageRootfsRejectsAnInvalidReferenceBeforeAnyNetworkCall(t *testing
 	}
 }
 
+func TestPullImageRootfsWithCacheReusesVerifiedBlobsAndRecoversCorruption(t *testing.T) {
+	manifestDigest, manifestBytes, configBytes, layerBytes, layerDigest, configDigest := buildFakeSingleLayerImage(t)
+	const repository = "registry.example/team/image"
+
+	requests := 0
+	transport := imagePullRoundTripFunc(func(request *http.Request) *http.Response {
+		requests++
+		path := request.URL.Path
+		var body []byte
+		switch {
+		case strings.HasSuffix(path, "/manifests/"+manifestDigest):
+			body = manifestBytes
+		case strings.HasSuffix(path, "/blobs/"+configDigest):
+			body = configBytes
+		case strings.HasSuffix(path, "/blobs/"+layerDigest):
+			body = layerBytes
+		default:
+			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found")), Header: http.Header{}}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+			ContentLength: int64(len(body)), Header: http.Header{},
+		}
+	})
+	client := &registry.Client{Scheme: "https", HTTP: &http.Client{Transport: transport}}
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+
+	// First pull populates the cache.
+	if _, err := pullImageRootfsWithCache(context.Background(), client, repository+"@"+manifestDigest, "amd64", filepath.Join(t.TempDir(), "r1"), cacheDir); err != nil {
+		t.Fatalf("first pull: %v", err)
+	}
+	if requests == 0 {
+		t.Fatal("expected first pull to fetch from registry")
+	}
+
+	// Second pull must succeed with zero HTTP requests (offline cache reuse).
+	offlineTransport := imagePullRoundTripFunc(func(request *http.Request) *http.Response {
+		t.Fatalf("unexpected network call on cached pull: %s", request.URL.Path)
+		return nil
+	})
+	offlineClient := &registry.Client{Scheme: "https", HTTP: &http.Client{Transport: offlineTransport}}
+	dest2 := filepath.Join(t.TempDir(), "r2")
+	if _, err := pullImageRootfsWithCache(context.Background(), offlineClient, repository+"@"+manifestDigest, "amd64", dest2, cacheDir); err != nil {
+		t.Fatalf("cached pull: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dest2, "hello.txt")); err != nil || string(got) != "hello from a fake pulled image\n" {
+		t.Fatalf("cached rootfs content=%q err=%v", got, err)
+	}
+
+	// Corrupt a cached blob; cache reader must reject it and re-fetch cleanly.
+	hexDigest := strings.TrimPrefix(layerDigest, "sha256:")
+	cachedLayer := filepath.Join(cacheDir, "blobs", "sha256", hexDigest)
+	if err := os.Chmod(cachedLayer, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachedLayer, []byte("corrupted"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	before := requests
+	if _, err := pullImageRootfsWithCache(context.Background(), client, repository+"@"+manifestDigest, "amd64", filepath.Join(t.TempDir(), "r3"), cacheDir); err != nil {
+		t.Fatalf("recovery pull after cache corruption: %v", err)
+	}
+	if requests <= before {
+		t.Fatal("expected corrupted cache entry to trigger re-fetch")
+	}
+}
+
+func TestPullImageRootfsRejectsMismatchedSinglePlatform(t *testing.T) {
+	manifestDigest, manifestBytes, configBytes, layerBytes, layerDigest, configDigest := buildFakeSingleLayerImage(t)
+	const repository = "registry.example/team/image"
+	transport := imagePullRoundTripFunc(func(request *http.Request) *http.Response {
+		path := request.URL.Path
+		var body []byte
+		switch {
+		case strings.HasSuffix(path, "/manifests/"+manifestDigest):
+			body = manifestBytes
+		case strings.HasSuffix(path, "/blobs/"+configDigest):
+			body = configBytes
+		case strings.HasSuffix(path, "/blobs/"+layerDigest):
+			body = layerBytes
+		default:
+			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found")), Header: http.Header{}}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(body)),
+			ContentLength: int64(len(body)), Header: http.Header{},
+		}
+	})
+	client := &registry.Client{Scheme: "https", HTTP: &http.Client{Transport: transport}}
+	_, err := pullImageRootfsWithClient(context.Background(), client, repository+"@"+manifestDigest, "arm64", filepath.Join(t.TempDir(), "rootfs"))
+	if err == nil || !strings.Contains(err.Error(), "targets linux/amd64, expected linux/arm64") {
+		t.Fatalf("expected arch mismatch error, got %v", err)
+	}
+}
+
 func TestPullImageRootfsAgainstRealDockerHub(t *testing.T) {
 	if os.Getenv("PLATFORM_FACTORY_TEST_LIVE_REGISTRY") != "1" {
 		t.Skip("set PLATFORM_FACTORY_TEST_LIVE_REGISTRY=1 to pull python:3.12-slim from the real Docker Hub")

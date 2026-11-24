@@ -2,6 +2,8 @@ package provisionruntime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +13,86 @@ import (
 	"github.com/CYPT71/platform-factory/internal/registry"
 	"github.com/CYPT71/platform-factory/internal/rootfs"
 )
+
+// defaultRuntimeCacheDir returns the reusable content-addressed OCI blob cache
+// directory for runtime provisioning, or "" when explicitly disabled.
+func defaultRuntimeCacheDir() string {
+	if override := strings.TrimSpace(os.Getenv("PLATFORM_FACTORY_RUNTIME_CACHE_DIR")); override != "" {
+		if strings.EqualFold(override, "off") || strings.EqualFold(override, "none") {
+			return ""
+		}
+		return override
+	}
+	if base := strings.TrimSpace(os.Getenv("PLATFORM_FACTORY_CACHE_DIR")); base != "" {
+		return filepath.Join(base, "runtime-oci")
+	}
+	dir, err := os.UserCacheDir()
+	if err != nil || dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "platform-factory", "runtime-oci")
+}
+
+func readVerifiedCache(cacheDir, digest string) ([]byte, bool) {
+	if cacheDir == "" {
+		return nil, false
+	}
+	hexDigest, ok := strings.CutPrefix(digest, "sha256:")
+	if !ok || len(hexDigest) != 64 {
+		return nil, false
+	}
+	path := filepath.Join(cacheDir, "blobs", "sha256", hexDigest)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != hexDigest {
+		_ = os.Remove(path)
+		return nil, false
+	}
+	return data, true
+}
+
+func writeVerifiedCache(cacheDir, digest string, data []byte) {
+	if cacheDir == "" {
+		return
+	}
+	hexDigest, ok := strings.CutPrefix(digest, "sha256:")
+	if !ok || len(hexDigest) != 64 {
+		return
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != hexDigest {
+		return
+	}
+	dir := filepath.Join(cacheDir, "blobs", "sha256")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dir, ".blob-*")
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := tmp.Chmod(0o444); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := os.Rename(tmpPath, filepath.Join(dir, hexDigest)); err != nil {
+		_ = os.Remove(tmpPath)
+	}
+}
 
 // pullImageRootfs pulls imageRef (registry.ParsePullReference: a
 // digest-pinned reference, e.g. "python@sha256:..." or
@@ -25,7 +107,7 @@ import (
 // single-platform manifest digest, so callers can record exactly what was
 // pulled.
 func pullImageRootfs(ctx context.Context, imageRef, architecture, destDir string) (string, error) {
-	return pullImageRootfsWithClient(ctx, &registry.Client{Scheme: "https", FollowBlobRedirects: true}, imageRef, architecture, destDir)
+	return pullImageRootfsWithCache(ctx, &registry.Client{Scheme: "https", FollowBlobRedirects: true}, imageRef, architecture, destDir, defaultRuntimeCacheDir())
 }
 
 // pullImageRootfsWithClient is pullImageRootfs with an injectable
@@ -34,11 +116,38 @@ func pullImageRootfs(ctx context.Context, imageRef, architecture, destDir string
 // test point at a fake in-process transport instead of the real Docker
 // Hub. pullImageRootfs itself is the only production caller.
 func pullImageRootfsWithClient(ctx context.Context, client *registry.Client, imageRef, architecture, destDir string) (string, error) {
+	return pullImageRootfsWithCache(ctx, client, imageRef, architecture, destDir, "")
+}
+
+func pullImageRootfsWithCache(ctx context.Context, client *registry.Client, imageRef, architecture, destDir, cacheDir string) (string, error) {
 	target, digest, err := registry.ParsePullReference(imageRef)
 	if err != nil {
 		return "", err
 	}
-	manifestBytes, _, err := client.GetManifest(ctx, target, digest)
+	fetchManifest := func(d string) ([]byte, error) {
+		if cached, ok := readVerifiedCache(cacheDir, d); ok {
+			return cached, nil
+		}
+		raw, _, fetchErr := client.GetManifest(ctx, target, d)
+		if fetchErr != nil {
+			return nil, fetchErr
+		}
+		writeVerifiedCache(cacheDir, d, raw)
+		return raw, nil
+	}
+	fetchBlob := func(d string) ([]byte, error) {
+		if cached, ok := readVerifiedCache(cacheDir, d); ok {
+			return cached, nil
+		}
+		raw, fetchErr := client.GetBlob(ctx, target, d)
+		if fetchErr != nil {
+			return nil, fetchErr
+		}
+		writeVerifiedCache(cacheDir, d, raw)
+		return raw, nil
+	}
+
+	manifestBytes, err := fetchManifest(digest)
 	if err != nil {
 		return "", fmt.Errorf("pull manifest: %w", err)
 	}
@@ -66,7 +175,7 @@ func pullImageRootfsWithClient(ctx context.Context, client *registry.Client, ima
 		if !found {
 			return "", fmt.Errorf("%s has no manifest for linux/%s", imageRef, architecture)
 		}
-		manifestBytes, _, err = client.GetManifest(ctx, target, selectedDigest)
+		manifestBytes, err = fetchManifest(selectedDigest)
 		if err != nil {
 			return "", fmt.Errorf("pull platform manifest: %w", err)
 		}
@@ -81,6 +190,24 @@ func pullImageRootfsWithClient(ctx context.Context, client *registry.Client, ima
 	}
 	if err := json.Unmarshal(manifestBytes, &doc); err != nil || len(doc.Layers) == 0 {
 		return "", fmt.Errorf("%s: invalid or empty manifest", imageRef)
+	}
+
+	configBytes, err := fetchBlob(doc.Config.Digest)
+	if err != nil {
+		return "", fmt.Errorf("pull config: %w", err)
+	}
+	var imgCfg struct {
+		OS           string `json:"os"`
+		Architecture string `json:"architecture"`
+	}
+	if err := json.Unmarshal(configBytes, &imgCfg); err != nil {
+		return "", fmt.Errorf("%s: decode image config: %w", imageRef, err)
+	}
+	if imgCfg.OS != "" && imgCfg.OS != "linux" {
+		return "", fmt.Errorf("%s targets unsupported OS %q (expected linux/%s)", imageRef, imgCfg.OS, architecture)
+	}
+	if imgCfg.Architecture != "" && imgCfg.Architecture != architecture {
+		return "", fmt.Errorf("%s targets linux/%s, expected linux/%s", imageRef, imgCfg.Architecture, architecture)
 	}
 
 	layoutDir, err := os.MkdirTemp("", "platform-factory-pull-layout-*")
@@ -104,15 +231,11 @@ func pullImageRootfsWithClient(ctx context.Context, client *registry.Client, ima
 	if err := writeBlob(selectedDigest, manifestBytes); err != nil {
 		return "", err
 	}
-	configBytes, err := client.GetBlob(ctx, target, doc.Config.Digest)
-	if err != nil {
-		return "", fmt.Errorf("pull config: %w", err)
-	}
 	if err := writeBlob(doc.Config.Digest, configBytes); err != nil {
 		return "", err
 	}
 	for _, layer := range doc.Layers {
-		blob, err := client.GetBlob(ctx, target, layer.Digest)
+		blob, err := fetchBlob(layer.Digest)
 		if err != nil {
 			return "", fmt.Errorf("pull layer %s: %w", layer.Digest, err)
 		}

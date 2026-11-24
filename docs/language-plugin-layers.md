@@ -21,11 +21,11 @@ from each module's `main.go`; inspection alone does not imply runtime support.
 
 | Plugin | `freeze` / `build-layer` | `scaffold` | `runtime` |
 | --- | --- | --- | --- |
-| Go | No | No | No |
+| Go | Yes | No | No |
 | Python | Yes | Yes | Yes |
-| Node.js | Yes | Yes | No |
+| Node.js | Yes | Yes | Yes |
 | PHP | Yes | Yes | No |
-| .NET | Yes | Yes | No |
+| .NET | Yes | Yes | Yes |
 | Java, Ruby, Rust | Yes | No | No |
 
 `pf init` delegates source-language inspection to these executables. It
@@ -85,10 +85,10 @@ and limits of 4 GiB and 200,000 entries per layer. The shared tar writer fixes
 ordering and timestamps. See [`oci/extralayers.go`](../oci/extralayers.go) and
 [`LanguagePluginLayer`](../internal/app/project/language_plugin.go).
 
-## Provision a Python runtime
+## Provision an interpreted Linux runtime
 
-An interpreted build needs a packaged Linux interpreter. The official Python
-plugin implements the `runtime` command used by:
+An interpreted build needs a packaged Linux interpreter. The official Python,
+Node.js, and .NET plugins implement the `runtime` command used by:
 
 ```sh
 pf plugin provision-runtime --language python \
@@ -96,16 +96,20 @@ pf plugin provision-runtime --language python \
   --dir ./my-app --arch amd64
 ```
 
-Replace the placeholder with a reviewed, real digest-pinned image. The native
-Registry client selects the Linux platform and verifies content before rootfs
-extraction. The plugin stages its runtime closure; the host validates and
-records `runtime`, application arguments and includes, then refreshes the
-adjacent lock. An existing `runtime` field makes this explicit command fail.
+Replace the placeholder with a reviewed, real digest-pinned image (for example
+`python@sha256:...`, `node@sha256:...`, or
+`mcr.microsoft.com/dotnet/runtime@sha256:...`). The native Registry client
+selects the requested Linux architecture (`amd64` or `arm64`), rejects
+mismatched OS/architecture images, caches verified SHA-256 blobs locally for
+reuse, and verifies content before rootfs extraction. The plugin stages its
+verified ELF closure; the host validates and records `runtime`, application
+arguments and includes, then refreshes the adjacent lock. An existing `runtime`
+field makes this explicit command fail.
 
 Interactive `pf init` can offer provisioning from a matching Linux host
 interpreter or an image. Skipping that offer leaves the requirement unresolved.
-Builds never start provisioning themselves. Other interpreted profiles
-currently need explicitly supplied runtimes rather than this Python adapter.
+Builds never start provisioning themselves. Other interpreted profiles (such as
+PHP, Java, or Ruby) currently need explicitly supplied runtimes.
 
 ## Diagnose and verify
 
