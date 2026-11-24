@@ -33,15 +33,32 @@ func declaresKubeconfigSecret(permissions PluginPermissions) bool {
 // deploy plugin) has any legitimate use for them - every other plugin,
 // including one that somehow also got host network access, still cannot
 // locate or read them.
+func isSensitiveEnvName(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, marker := range []string{"PASSWORD", "PASSWD", "SECRET", "TOKEN", "PRIVATE_KEY", "API_KEY", "CREDENTIAL", "AUTH"} {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func filterPluginEnvironment(env []string, permissions PluginPermissions) []string {
 	needsKubeconfig := declaresKubeconfigSecret(permissions)
 	var filtered []string
 	for _, e := range env {
+		key, _, hasEq := strings.Cut(e, "=")
+		if !hasEq {
+			continue
+		}
 		if strings.HasPrefix(e, "PATH=") {
 			filtered = append(filtered, e)
 			continue
 		}
 		if strings.HasPrefix(e, "PLATFORM_FACTORY_") {
+			if isSensitiveEnvName(key) {
+				continue
+			}
 			filtered = append(filtered, e)
 			continue
 		}

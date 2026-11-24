@@ -1,6 +1,39 @@
 package mtls
 
-import "crypto/x509"
+import (
+	"crypto/x509"
+	"regexp"
+	"strings"
+)
+
+var tenantIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+
+// TenantID extracts a verified tenant identifier from a client certificate.
+// Tenants are encoded either as an OrganizationalUnit entry "tenant:<id>" or as
+// a SPIFFE URI SAN ending in "/tenant/<id>". Returns "" when the certificate
+// carries no valid tenant claim.
+func TenantID(leaf *x509.Certificate) string {
+	if leaf == nil {
+		return ""
+	}
+	for _, ou := range leaf.Subject.OrganizationalUnit {
+		if id, ok := strings.CutPrefix(strings.TrimSpace(ou), "tenant:"); ok && tenantIDPattern.MatchString(id) {
+			return id
+		}
+	}
+	for _, uri := range leaf.URIs {
+		if uri == nil || uri.Scheme != "spiffe" {
+			continue
+		}
+		if _, after, ok := strings.Cut(uri.Path, "/tenant/"); ok {
+			id, _, _ := strings.Cut(after, "/")
+			if tenantIDPattern.MatchString(id) {
+				return id
+			}
+		}
+	}
+	return ""
+}
 
 // HasRole reports whether leaf's Subject Organization values include
 // role.
