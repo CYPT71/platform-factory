@@ -24,11 +24,20 @@ Sur la révision [`4c16589`](https://github.com/CYPT71/platform-factory/commit/4
 
 ## Prochain lot — fiabilité et parcours principal
 
-- [ ] **Reprise du transport invité après timeout.** Reproduire les coupures au
-  milieu d'un en-tête, d'une trame et d'une réponse dans `internal/guesttransport`.
-  Définir quand reprendre et quand fermer/reconnecter, sans accepter de réponse
-  désynchronisée. **Terminé si :** tests déterministes des lectures/écritures
-  partielles, du rejeu, de la corrélation et de la reprise sur un vrai transport.
+- [x] **Reprise du transport invité après timeout.** Coupures au milieu d'un
+  en-tête, d'une trame et d'une réponse testées de façon déterministe dans
+  `internal/guesttransport` (`recovery_test.go`), avec rejet explicite de toute
+  réponse désynchronisée (`protocol_test.go`). Fermé sur
+  [`d0095a9`](https://github.com/CYPT71/platform-factory/commit/d0095a9) :
+  `TestPartialExchangesRequireANewConnection` (4 points de coupure),
+  `TestCodecRejectsTamperingReplayAndOversizedFrames` (rejeu),
+  `TestClientRejectsCorrelationMismatchedResponse` (corrélation réponse/requête),
+  `TestRecoveryHoldsOverARealOSBackedTransport` (reprise sur un vrai socket Unix
+  du noyau, pas `net.Pipe`). Un biais de ce même point avait aussi provoqué une
+  régression concrète côté hyperviseur (fermeture précoce de `GuestChannel`
+  avortant tout le run KVM avant que la console n'observe l'arrêt réel du
+  guest) ; corrigé sur [`97242da`](https://github.com/CYPT71/platform-factory/commit/97242da),
+  PR [#17](https://github.com/CYPT71/platform-factory/pull/17).
 - [ ] **Runtime Linux des langues interprétées.** Partir du chemin Python déjà
   présent, puis couvrir Node.js et .NET avec des sources épinglées, une fermeture
   de bibliothèques vérifiée et des caches réutilisables. **Terminé si :** un projet

@@ -162,6 +162,26 @@ func TestLinuxGuestSerialDeviceReportsHostFailure(t *testing.T) {
 	}
 }
 
+// TestLinuxGuestSerialDeviceDegradesToAbsentOnTransportFailure proves handle
+// never turns a dead host-side connection into a fatal error for the VM: a
+// guest that still pokes these ports after the channel broke (its own 8250
+// driver teardown, for instance) gets the same absent-device behavior as a
+// VM with no control channel configured at all, not an abort.
+func TestLinuxGuestSerialDeviceDegradesToAbsentOnTransportFailure(t *testing.T) {
+	device := newLinuxGuestSerialDevice(&failingReadWriteCloser{}, nil)
+	defer device.Close()
+	eventually(t, func() bool { return device.transportError() != nil })
+
+	data := []byte{0x00}
+	if handled, err := device.handle(0, 1, linuxGuestSerialPortBase, data, nil); err != nil || !handled || data[0] != 0xff {
+		t.Fatalf("read after transport failure: handled=%t err=%v data=%x", handled, err, data)
+	}
+	write := []byte{0x41}
+	if handled, err := device.handle(linuxIODirectionOut, 1, linuxGuestSerialPortBase, write, nil); err != nil || !handled {
+		t.Fatalf("write after transport failure: handled=%t err=%v", handled, err)
+	}
+}
+
 func TestLinuxGuestSerialDeviceCoversControlAndStatusRegisters(t *testing.T) {
 	device := &linuxGuestSerialDevice{
 		rx: make(chan byte, 4), tx: make(chan byte, 4), done: make(chan struct{}),
