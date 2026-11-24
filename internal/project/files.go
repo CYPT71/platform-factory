@@ -95,19 +95,28 @@ func hasSource(dependencies []Dependency, candidate string, loaded Loaded) bool 
 }
 
 // generatedPlatformFactoryDirs are .platform-factory/<name> subdirectories
-// this tool itself writes as build/publish/deploy evidence - never a real
-// project input. Sweeping them into ImageFiles() (and therefore into
-// WriteFreezeInventory/VerifyFreezeInventory's hashed input set) meant every
-// build invalidated its own freeze: build writes .platform-factory/release/
-// provenance.json, the next build's frozen-input check sees that file
-// changed and refuses to proceed until `pf freeze` runs again, which the
-// very next build then invalidates the same way. .platform-factory/deps -
-// the resolved runtime pf freeze itself pins - is deliberately not in this
-// list; it is a real frozen input, not build output.
+// this tool itself writes as build/publish/deploy evidence or holds local
+// signing keys in - never a real container image input. Sweeping them into
+// ImageFiles() (and therefore into WriteFreezeInventory/VerifyFreezeInventory's
+// hashed input set) meant every build invalidated its own freeze, and sweeping
+// .platform-factory/keys leaked private signing material (required by
+// policies/build.json's require_signature) straight into interpreted-project
+// image layers. .platform-factory/deps - the resolved runtime pf freeze itself
+// pins - is deliberately not in this list; it is a real frozen input, not
+// build output.
 var generatedPlatformFactoryDirs = map[string]bool{
 	".platform-factory/release":     true,
 	".platform-factory/publication": true,
 	".platform-factory/deployment":  true,
+	".platform-factory/keys":        true,
+}
+
+var generatedPlatformFactoryFiles = map[string]bool{
+	".platform-factory/freeze.lock.json": true,
+	".platform-factory/published.json":   true,
+	".platform-factory/deployed.json":    true,
+	"pf.lock":                            true,
+	"platform-factory.lock":              true,
 }
 
 func collectTree(source, destination, output, category string) ([]ExtraFile, error) {
@@ -143,10 +152,10 @@ func collectTree(source, destination, output, category string) ([]ExtraFile, err
 			return err
 		}
 		relativeSlash := filepath.ToSlash(relative)
-		if relativeSlash == ".platform-factory/freeze.lock.json" || relativeSlash == "pf.lock" || relativeSlash == "platform-factory.lock" {
+		if generatedPlatformFactoryFiles[relativeSlash] {
 			return nil
 		}
-		if entry.IsDir() && generatedPlatformFactoryDirs[relativeSlash] {
+		if entry.IsDir() && (generatedPlatformFactoryDirs[relativeSlash] || relativeSlash == "node_modules/.bin") {
 			return filepath.SkipDir
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -248,6 +257,18 @@ func (loaded Loaded) VerifyFreezeInventory() error {
 		if size != frozen.Size || hex.EncodeToString(hash.Sum(nil)) != frozen.SHA256 {
 			return fmt.Errorf("frozen file %s changed after `pf freeze`; run `pf freeze` again", frozen.Path)
 		}
+	}
+	if len(inventory.Files) != len(expected) {
+		frozenSet := make(map[string]bool, len(inventory.Files))
+		for _, frozen := range inventory.Files {
+			frozenSet[frozen.Path] = true
+		}
+		for key := range expected {
+			if !frozenSet[key] {
+				return fmt.Errorf("unfrozen file %s added after `pf freeze`; run `pf freeze` again", key)
+			}
+		}
+		return errors.New("freeze inventory is out of sync with project files; run `pf freeze` again")
 	}
 	return nil
 }

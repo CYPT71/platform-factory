@@ -974,7 +974,8 @@ func buildProjectContextWithBudget(ctx context.Context, loaded project.Loaded, s
 		// also matching - and wrongly dropping - the legitimate
 		// explicit include entries, which share the same source tree
 		// but never land under /app/.
-		return file.Dest == primaryDestination || strings.Contains(source, "/.platform-factory/build/") ||
+		return file.Dest == primaryDestination ||
+			(loaded.Config.Runtime == "" && strings.Contains(source, "/.platform-factory/build/")) ||
 			strings.Contains(source, "/.platform-factory/artifacts/") ||
 			(strings.HasPrefix(file.Dest, "/app/.platform-factory/deps/") && strings.Contains(file.Dest, "/runtime/"))
 	})
