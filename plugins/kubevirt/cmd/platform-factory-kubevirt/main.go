@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/CYPT71/platform-factory/plugins/kubevirt"
 	microvm "github.com/CYPT71/platform-factory/sdk/microvm"
@@ -53,11 +54,39 @@ func runCommand(ctx context.Context, name string, args []string, stdin []byte) (
 	if stdin != nil {
 		command.Stdin = bytes.NewReader(stdin)
 	}
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
-	command.Stderr = os.Stderr
+	command.Stderr = &stderr
 	err := command.Run()
-	return stdout.Bytes(), err
+	if stderr.Len() > 0 {
+		_, _ = os.Stderr.Write(stderr.Bytes())
+	}
+	if err != nil {
+		return stdout.Bytes(), classifyClusterError(name, err, stderr.String())
+	}
+	return stdout.Bytes(), nil
+}
+
+// classifyClusterError preserves actionable degraded-condition categories
+// (insufficient RBAC, API server disconnection/timeout, context cancellation)
+// across the JSON-RPC boundary instead of collapsing them to "exit status 1".
+func classifyClusterError(tool string, err error, stderr string) error {
+	trimmed := strings.TrimSpace(stderr)
+	lower := strings.ToLower(trimmed)
+	switch {
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("%s interrupted (%w): %s", tool, err, trimmed)
+	case strings.Contains(lower, "forbidden") || strings.Contains(lower, "unauthorized"):
+		return fmt.Errorf("rbac_forbidden: %s: %s (%w)", tool, trimmed, err)
+	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "was refused") || strings.Contains(lower, "i/o timeout") ||
+		strings.Contains(lower, "unable to connect") || strings.Contains(lower, "service unavailable") ||
+		strings.Contains(lower, "eof"):
+		return fmt.Errorf("api_unavailable: %s: %s (%w)", tool, trimmed, err)
+	case trimmed != "":
+		return fmt.Errorf("%s: %s (%w)", tool, trimmed, err)
+	default:
+		return err
+	}
 }
 
 func main() {
