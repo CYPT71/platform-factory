@@ -80,6 +80,17 @@ Sur la révision [`4c16589`](https://github.com/CYPT71/platform-factory/commit/4
   supportées avec dépendances externes, gestionnaire indisponible, cache incomplet
   et lock obsolète. **Terminé si :** gel et construction sont reproductibles et
   les erreurs/reprises sont vérifiées pour chaque langage annoncé comme supporté.
+  **Sondage partiel effectué** (node/npm, cargo, bundle réellement installés et
+  exécutés, pas simulés) : gestionnaire indisponible (npm absent du PATH) échoue
+  proprement avec un message clair ; lock obsolète pour Rust est déjà intercepté
+  par `cargo fetch --locked`/`cargo check --locked` lui-même. `FrozenInputPins`
+  (`internal/project/files.go`) n'épingle que les fichiers listés dans `include:`/
+  `shared_deps:` de pf.yaml — vérifié non-bug : c'est le contrat documenté
+  (`docs/cli-guide.md:312-316`, « Any project using these additional sources
+  must run `pf freeze`; `pf build` recomputes size and SHA-256 for every
+  frozen file »). Les scénarios "cache incomplet" et les 5 langages restants
+  (PHP, Java, .NET, et les cas gestionnaire-indisponible/lock-obsolète pour
+  node/ruby) ne sont pas encore sondés.
 - [x] **Formats et migrations.** Configuration projet, lock, plan, événements
   et couches sémantiques audités un par un. Preuve sur PR
   [#18](https://github.com/CYPT71/platform-factory/pull/18) :
