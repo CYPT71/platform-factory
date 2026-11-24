@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -341,9 +342,18 @@ func ServeSupervisor(ctx context.Context, store *Store, id string, readyFD int) 
 	// Best-effort liveness observability, not a correctness mechanism: a
 	// stuck guest is logged, never acted on automatically (no forced
 	// kill/restart) - see guesttransport.RunHeartbeat's own doc comment
-	// for why a single missed probe isn't "confirmed" stuck. Stops on its
-	// own once runContext is canceled above.
-	go guesttransport.RunHeartbeat(runContext, agent, 5*time.Second, 3, func(stuck bool, consecutiveMisses int) {
+	// for why a single missed probe isn't "confirmed" stuck. Wait until
+	// microvm-init reports that /dev/ttyS1 is open in raw mode and serving
+	// before starting probes: probing during kernel boot races 8250 startup
+	// (which flushes RX on open) and causes the first probe timeout to
+	// trigger Agent.invalidate(), permanently closing COM2 and breaking
+	// subsequent stop signal delivery and exit-metrics capture.
+	guestAgentReady := make(chan struct{})
+	var guestAgentReadyOnce sync.Once
+	markGuestAgentReady := func() {
+		guestAgentReadyOnce.Do(func() { close(guestAgentReady) })
+	}
+	go runHeartbeatWhenReady(runContext, guestAgentReady, agent, 5*time.Second, 3, func(stuck bool, consecutiveMisses int) {
 		fields := observability.Fields{"container_id": id, "consecutive_misses": consecutiveMisses}
 		if stuck {
 			observability.Warn("guest heartbeat missed repeatedly; guest may be stuck", fields)
@@ -377,8 +387,10 @@ func ServeSupervisor(ctx context.Context, store *Store, id string, readyFD int) 
 			// after this point - the guest's own scheduler is already gone
 			// by the time it reaches machine_halt(), so nothing in it can
 			// answer a request over the guest-transport channel anymore.
-			SerialWriter: newShutdownLogWatcher(os.Stdout, func(exitCode uint32) {
-				_ = store.SetExited(context.Background(), id, exitCode, time.Now())
+			SerialWriter: newGuestConsoleWatcher(os.Stdout, markGuestAgentReady, func(exitCode uint32) {
+				if setErr := store.SetExited(context.Background(), id, exitCode, time.Now()); setErr != nil {
+					fmt.Fprintf(os.Stderr, "oci runtime: persist terminal exit state: %v\n", setErr)
+				}
 				cancelRun()
 			}),
 			OnStarted: func() error {
@@ -538,38 +550,86 @@ func writeSignalResponse(connection io.Writer, state State, incarnation string, 
 	return nil
 }
 
-const shutdownMarker = "component=microvm-init operation=supervise phase=child-exit"
+const (
+	shutdownMarker        = "component=microvm-init operation=supervise phase=child-exit"
+	guestAgentReadyMarker = "component=microvm-init operation=guest-agent phase=ready"
+)
+
+func runHeartbeatWhenReady(
+	ctx context.Context,
+	ready <-chan struct{},
+	agent *guesttransport.Agent,
+	interval time.Duration,
+	missedThreshold int,
+	onStatusChange func(stuck bool, consecutiveMisses int),
+) {
+	select {
+	case <-ready:
+	case <-ctx.Done():
+		return
+	}
+	guesttransport.RunHeartbeat(ctx, agent, interval, missedThreshold, onStatusChange)
+}
 
 // newShutdownLogWatcher observes the guest's final child-exit record.
 func newShutdownLogWatcher(underlying io.Writer, exited func(uint32)) io.Writer {
-	return &shutdownLogWatcher{underlying: underlying, exited: exited}
+	return newGuestConsoleWatcher(underlying, nil, exited)
+}
+
+// newGuestConsoleWatcher observes microvm-init's COM1 lifecycle markers:
+// guest-agent readiness (once /dev/ttyS1 is open in raw mode) and the final
+// child-exit record before poweroff.
+func newGuestConsoleWatcher(underlying io.Writer, onReady func(), exited func(uint32)) io.Writer {
+	return &shutdownLogWatcher{underlying: underlying, onReady: onReady, exited: exited}
 }
 
 type shutdownLogWatcher struct {
-	underlying io.Writer
-	exited     func(uint32)
-	tail       []byte
-	triggered  bool
+	underlying     io.Writer
+	onReady        func()
+	exited         func(uint32)
+	tail           []byte
+	readyTriggered bool
+	triggered      bool
 }
 
 func (w *shutdownLogWatcher) Write(p []byte) (int, error) {
 	n, err := w.underlying.Write(p)
-	if !w.triggered {
-		w.tail = append(w.tail, p...)
-		if excess := len(w.tail) - 2*len(shutdownMarker); excess > 0 {
+	if w.triggered && (w.onReady == nil || w.readyTriggered) {
+		return n, err
+	}
+	const maxPartialLine = 2 * len(shutdownMarker)
+	remaining := p
+	for len(remaining) != 0 {
+		if lineEnd := bytes.IndexByte(remaining, '\n'); lineEnd >= 0 {
+			line := append(w.tail, remaining[:lineEnd]...)
+			w.tail = w.tail[:0]
+			w.inspectLine(line)
+			remaining = remaining[lineEnd+1:]
+			continue
+		}
+		w.tail = append(w.tail, remaining...)
+		if excess := len(w.tail) - maxPartialLine; excess > 0 {
 			w.tail = w.tail[excess:]
 		}
-		if lineEnd := bytes.LastIndexByte(w.tail, '\n'); lineEnd >= 0 {
-			if match := shutdownExitPattern.FindSubmatch(w.tail[:lineEnd]); len(match) == 2 {
-				code, parseErr := strconv.ParseUint(string(match[1]), 10, 8)
-				if parseErr == nil {
-					w.triggered = true
-					w.exited(uint32(code))
-				}
+		break
+	}
+	return n, err
+}
+
+func (w *shutdownLogWatcher) inspectLine(line []byte) {
+	if !w.readyTriggered && w.onReady != nil && bytes.Contains(line, []byte(guestAgentReadyMarker)) {
+		w.readyTriggered = true
+		w.onReady()
+	}
+	if !w.triggered && w.exited != nil {
+		if match := shutdownExitPattern.FindSubmatch(line); len(match) == 2 {
+			code, parseErr := strconv.ParseUint(string(match[1]), 10, 8)
+			if parseErr == nil {
+				w.triggered = true
+				w.exited(uint32(code))
 			}
 		}
 	}
-	return n, err
 }
 
 var shutdownExitPattern = regexp.MustCompile(regexp.QuoteMeta(shutdownMarker) + ` exit_code=([0-9]{1,3})(?: |$)`)

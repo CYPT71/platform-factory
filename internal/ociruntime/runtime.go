@@ -626,6 +626,7 @@ func (s *Store) SetExited(ctx context.Context, id string, status uint32, exitedA
 	}
 	exitedAt = exitedAt.UTC()
 	return s.update(ctx, id, func(state *State) {
+		_ = os.Remove(s.controlSocketPath(*state))
 		state.Status = "stopped"
 		state.PID = 0
 		state.PIDStartTicks = 0
@@ -647,7 +648,6 @@ func (s *Store) SetExited(ctx context.Context, id string, status uint32, exitedA
 			APIVersion: "platform-factory.dev/vmm-metrics/v1", Backend: "kvm-native", Architecture: runtime.GOARCH,
 			RuntimeMS: runtimeMS, MemoryMiB: memoryMiB, VCPUs: vcpus, ExitStatus: status,
 		}
-		_ = os.Remove(s.controlSocketPath(*state))
 	})
 }
 

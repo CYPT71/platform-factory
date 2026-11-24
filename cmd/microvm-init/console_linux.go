@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"syscall"
 )
@@ -111,4 +112,18 @@ func dup2(oldfd, newfd int) error {
 		return nil
 	}
 	return syscall.Dup3(oldfd, newfd, 0)
+}
+
+const ioctlTCSBRK = 0x5409
+
+// drainConsole waits for the kernel's TTY transmit buffer to empty so final
+// shutdown diagnostics (including phase=child-exit) reach COM1 before
+// poweroff() halts the guest. Non-TTY writers ignore ENOTTY.
+func drainConsole(w io.Writer) {
+	type fdProvider interface{ Fd() uintptr }
+	file, ok := w.(fdProvider)
+	if !ok {
+		return
+	}
+	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, file.Fd(), ioctlTCSBRK, 1)
 }
