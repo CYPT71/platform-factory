@@ -181,13 +181,30 @@ func (s *taskService) state(id string) (ociState, error) {
 }
 
 func (s *taskService) Create(ctx context.Context, r *taskapi.CreateTaskRequest) (*taskapi.CreateTaskResponse, error) {
+	rootfsDir := filepath.Join(r.GetBundle(), "rootfs")
+	mountedRootfs := false
+	createdRuntime := false
+	succeeded := false
+	defer func() {
+		if succeeded {
+			return
+		}
+		if createdRuntime {
+			_, _ = runtimeCommand("delete", r.GetID())
+		}
+		if mountedRootfs {
+			_ = mount.UnmountRecursive(rootfsDir, 0)
+		}
+	}()
+
 	if len(r.GetRootfs()) != 0 {
-		if err := os.MkdirAll(filepath.Join(r.GetBundle(), "rootfs"), 0o711); err != nil {
+		if err := os.MkdirAll(rootfsDir, 0o711); err != nil {
 			return nil, fmt.Errorf("platform-factory-shim: create rootfs mountpoint: %w", err)
 		}
-		if err := mount.All(mount.FromProto(r.GetRootfs()), filepath.Join(r.GetBundle(), "rootfs")); err != nil {
+		if err := mount.All(mount.FromProto(r.GetRootfs()), rootfsDir); err != nil {
 			return nil, fmt.Errorf("platform-factory-shim: mount rootfs: %w", err)
 		}
+		mountedRootfs = true
 	}
 	stdout, closeStdout, err := openContainerIO(r.GetStdout())
 	if err != nil {
@@ -204,6 +221,7 @@ func (s *taskService) Create(ctx context.Context, r *taskapi.CreateTaskRequest) 
 	if err := runtimeCreateCommand(stdout, stderr, "create", "--bundle", r.GetBundle(), "--pid-file", pidFile, r.GetID()); err != nil {
 		return nil, err
 	}
+	createdRuntime = true
 	state, err := s.state(r.GetID())
 	if err != nil {
 		return nil, err
@@ -211,6 +229,7 @@ func (s *taskService) Create(ctx context.Context, r *taskapi.CreateTaskRequest) 
 	s.mu.Lock()
 	s.tasks[r.GetID()] = &taskState{bundle: r.GetBundle()}
 	s.mu.Unlock()
+	succeeded = true
 	return &taskapi.CreateTaskResponse{Pid: uint32(state.PID)}, nil
 }
 
@@ -232,16 +251,28 @@ func (s *taskService) Delete(ctx context.Context, r *taskapi.DeleteRequest) (*ta
 	if r.GetExecID() != "" {
 		return nil, errdefs.ErrNotImplemented
 	}
-	exitStatus, exitedAt := s.waitExit(ctx, r.GetID())
-	if _, err := runtimeCommand("delete", r.GetID()); err != nil {
-		return nil, err
-	}
+	// Recover bundle path from runtime state if this shim restarted and lost
+	// its in-memory tasks map, so rootfs unmount still runs cleanly.
 	s.mu.Lock()
-	bundle := s.tasks[r.GetID()]
+	tracked := s.tasks[r.GetID()]
+	s.mu.Unlock()
+	bundleDir := ""
+	if tracked != nil {
+		bundleDir = tracked.bundle
+	} else if st, stErr := s.state(r.GetID()); stErr == nil && st.Bundle != "" {
+		bundleDir = st.Bundle
+	}
+
+	exitStatus, exitedAt := s.waitExit(ctx, r.GetID())
+	_, deleteErr := runtimeCommand("delete", r.GetID())
+	s.mu.Lock()
 	delete(s.tasks, r.GetID())
 	s.mu.Unlock()
-	if bundle != nil {
-		_ = mount.UnmountRecursive(filepath.Join(bundle.bundle, "rootfs"), 0)
+	if bundleDir != "" {
+		_ = mount.UnmountRecursive(filepath.Join(bundleDir, "rootfs"), 0)
+	}
+	if deleteErr != nil {
+		return nil, deleteErr
 	}
 	return &taskapi.DeleteResponse{
 		ExitStatus: exitStatus,
