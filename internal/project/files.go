@@ -249,6 +249,16 @@ func (loaded Loaded) VerifyFreezeInventory() error {
 			return fmt.Errorf("frozen file %s changed after `pf freeze`; run `pf freeze` again", frozen.Path)
 		}
 	}
+	// Every inventory.Files entry was just proven to be both declared (in
+	// expected) and unique (the strict frozen.Path <= previous ordering check
+	// above rejects a repeat), so the loop walked a subset of expected with
+	// no repeats. A size mismatch here is therefore only possible in one
+	// direction: expected contains a path inventory.Files never visited - a
+	// file `pf freeze` never saw, added to an include/shared_deps source
+	// after the fact. Nothing above this line would ever have hashed it.
+	if len(inventory.Files) != len(expected) {
+		return errors.New("project inputs changed after `pf freeze`; run `pf freeze` again")
+	}
 	return nil
 }
 
