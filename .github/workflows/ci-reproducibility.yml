@@ -1,8 +1,11 @@
 name: reproducibility
 on:
-  push:
+  push: {branches: [main]}
   pull_request:
   schedule: [{cron: '23 4 * * 1'}]
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
 permissions: {contents: read}
 jobs:
   portable-rebuild:

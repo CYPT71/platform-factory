@@ -1,9 +1,12 @@
 name: oci-tool-compatibility
 on:
-  push:
+  push: {branches: [main]}
   pull_request:
   schedule: [{cron: '37 4 * * 1'}]
   workflow_dispatch:
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
 permissions: {contents: read}
 jobs:
   docker-containerd-skopeo:
