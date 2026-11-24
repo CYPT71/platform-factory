@@ -15,6 +15,7 @@ func main() {
 	err := langplugin.Dispatch(os.Args[1:], map[string]langplugin.Handler{
 		"inspect": runInspect, "scaffold": runScaffold,
 		"freeze": runFreeze, "build-layer": runBuildLayer,
+		"runtime": runRuntime,
 	})
 	if err == langplugin.ErrUsage {
 		usage()
@@ -59,10 +60,11 @@ func runScaffold(args []string) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: platform-factory-lang-dotnet <inspect|freeze|build-layer> [OPTIONS]")
+	fmt.Fprintln(os.Stderr, "usage: platform-factory-lang-dotnet <inspect|freeze|build-layer|runtime> [OPTIONS]")
 	fmt.Fprintln(os.Stderr, "  inspect --root DIR")
 	fmt.Fprintln(os.Stderr, "  freeze --root DIR")
 	fmt.Fprintln(os.Stderr, "  build-layer --root DIR --output TAR --dest PREFIX")
+	fmt.Fprintln(os.Stderr, "  runtime --root DIR --image-root DIR [--interpreter PATH]")
 }
 
 func runInspect(args []string) error {
