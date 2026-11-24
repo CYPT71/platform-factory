@@ -1,12 +1,39 @@
 package langplugin
 
 import (
+	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// buildRealELF cross-compiles a trivial Go program into a genuine Linux ELF
+// binary at dest, the same way TestResolveRuntimeClosureAndArchMismatchOnRealELF
+// below does - FindSharedObjects and FindLibrariesByPrefix both call elf.Open
+// to validate a candidate, so a placeholder byte string will never satisfy
+// them regardless of its filename.
+func buildRealELF(t *testing.T, dest string) {
+	t.Helper()
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not on PATH")
+	}
+	srcDir := t.TempDir()
+	mainGo := filepath.Join(srcDir, "main.go")
+	if err := os.WriteFile(mainGo, []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("go", "build", "-o", dest, mainGo)
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build real ELF: %v\n%s", err, out)
+	}
+}
 
 func TestParseRuntimeFlagsRequiresRootAndImageRoot(t *testing.T) {
 	if _, _, _, err := ParseRuntimeFlags(nil); err == nil {
@@ -129,5 +156,79 @@ func TestResolveRuntimeClosureAndArchMismatchOnRealELF(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "architecture mismatch") {
 		t.Fatalf("expected architecture mismatch error, got %v", err)
+	}
+}
+
+func TestWriteRuntimeManifestPrintsTheExactManifestAsJSON(t *testing.T) {
+	manifest := RuntimeManifest{
+		Runtime: "/usr/bin/python3.12",
+		Include: []RuntimeIncludeEntry{{Source: "/usr/lib/libpython3.12.so.1.0", Destination: "/usr/lib/libpython3.12.so.1.0"}},
+	}
+	original := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	writeErr := WriteRuntimeManifest(manifest)
+	w.Close()
+	os.Stdout = original
+	if writeErr != nil {
+		t.Fatalf("WriteRuntimeManifest: %v", writeErr)
+	}
+	printed, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded RuntimeManifest
+	if err := json.Unmarshal(printed, &decoded); err != nil {
+		t.Fatalf("printed output is not valid JSON: %v\n%s", err, printed)
+	}
+	if decoded.Runtime != manifest.Runtime || len(decoded.Include) != 1 || decoded.Include[0] != manifest.Include[0] {
+		t.Fatalf("decoded=%+v, want %+v", decoded, manifest)
+	}
+}
+
+func TestFindSharedObjectsFindsRealELFAndSkipsNonSharedObjects(t *testing.T) {
+	imageRoot := t.TempDir()
+	buildRealELF(t, filepath.Join(imageRoot, "opt", "app", "lib", "libfoo.so.1"))
+	if err := os.WriteFile(filepath.Join(imageRoot, "opt", "app", "lib", "readme.txt"), []byte("not a library"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	found, err := FindSharedObjects(filepath.Join(imageRoot, "opt", "app"), imageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 1 || found[0].ImagePath != "/opt/app/lib/libfoo.so.1" {
+		t.Fatalf("found=%+v", found)
+	}
+}
+
+func TestFindLibrariesByPrefixMatchesOnlyDeclaredPrefixesInStandardDirs(t *testing.T) {
+	imageRoot := t.TempDir()
+	libDir := filepath.Join(imageRoot, "lib", "x86_64-linux-gnu")
+	buildRealELF(t, filepath.Join(libDir, "libicuuc.so.74"))
+	buildRealELF(t, filepath.Join(libDir, "libunrelated.so.1"))
+	found, err := FindLibrariesByPrefix(imageRoot, []string{"libicuuc.so."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 1 || found[0].ImagePath != "/lib/x86_64-linux-gnu/libicuuc.so.74" {
+		t.Fatalf("found=%+v", found)
+	}
+	if again, err := FindLibrariesByPrefix(imageRoot, []string{"libicuuc.so."}); err != nil || len(again) != 1 {
+		t.Fatalf("repeat scan not idempotent: found=%+v err=%v", again, err)
+	}
+}
+
+func TestRelRuntimePathReturnsSlashesAndFallsBackOnError(t *testing.T) {
+	if got := RelRuntimePath("/image/root", "/image/root/usr/lib/libc.so.6"); got != "usr/lib/libc.so.6" {
+		t.Fatalf("got=%q", got)
+	}
+	// filepath.Rel refuses a relative root against an absolute target; the
+	// fallback must still return a usable, slash-normalized path rather
+	// than propagating that error.
+	if got := RelRuntimePath("relative/root", "/absolute/target"); got != "/absolute/target" {
+		t.Fatalf("fallback got=%q", got)
 	}
 }
