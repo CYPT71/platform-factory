@@ -133,6 +133,11 @@ jobs:
           # validate_test.go's own os/exec import is exec.LookPath only
           # (skipping a govulncheck-dependent test when the tool is not on
           # PATH) - it never executes anything itself.
+          # project_freeze_output.go's own os/exec import is exec.LookPath
+          # and exec.ErrNotFound only, to retry a built-in freeze step under
+          # `python3` when `python` is absent from PATH - the actual process
+          # launch is still the caller-supplied, already-allowlisted
+          # projectExecutor, never a direct exec.Command here.
           # Reviewed subprocesses: disk parser self-exec with bounded I/O,
           # capability LookPath probes, and fixture/crash/Apple VM tests.
           # Process execution remains forbidden elsewhere.
@@ -226,6 +231,7 @@ jobs:
             ! -path 'cmd/platform-factory/marketplace_e2e_test.go' \
             ! -path 'cmd/platform-factory/main_test.go' \
             ! -path 'internal/shellquote/shellquote.go' \
+            ! -path 'cmd/platform-factory/project_freeze_output.go' \
             -exec grep -nE 'os/exec|exec\.Command' {} + || true)"
           test -z "$(find cmd internal -name '*.go' -type f \
             -exec grep -n 'InsecureSkipVerify' {} + || true)"
