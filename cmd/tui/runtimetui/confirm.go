@@ -117,14 +117,15 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch key.String() {
 		case "enter":
 			ref := strings.TrimSpace(m.imageInput.Value())
-			if ref == "" {
-				m.err = "image reference must not be empty"
+			if errMsg := validatePinnedImageRef(ref, m.language); errMsg != "" {
+				m.err = errMsg
 				return m, nil
 			}
 			m.err = ""
 			m.result, m.done = Result{Source: SourceImage, Image: ref}, true
 			return m, tea.Quit
 		}
+		m.err = ""
 		var command tea.Cmd
 		m.imageInput, command = m.imageInput.Update(message)
 		return m, command
@@ -154,6 +155,29 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+func validatePinnedImageRef(ref, language string) string {
+	if ref == "" {
+		return "image reference must not be empty"
+	}
+	if strings.ContainsAny(ref, " \t\r\n\x00") {
+		return "image reference must not contain whitespace"
+	}
+	name, digest, ok := strings.Cut(ref, "@sha256:")
+	if !ok || name == "" || len(digest) != 64 {
+		example := language
+		if example == "" {
+			example = "python"
+		}
+		return "image reference must be digest-pinned (e.g. " + example + "@sha256:<64-hex>)"
+	}
+	for _, r := range digest {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return "image digest must be 64 lowercase hexadecimal characters"
+		}
+	}
+	return ""
 }
 
 func (m *model) View() string {

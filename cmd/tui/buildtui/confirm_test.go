@@ -63,6 +63,27 @@ func TestEnterRejectsAnImageContainingWhitespace(t *testing.T) {
 	}
 }
 
+func TestEnterRejectsTagWithWhitespaceAndAllowsRetry(t *testing.T) {
+	m := newTestModel("myimage", "v1 beta")
+	updated, _ := m.Update(key("enter"))
+	got := updated.(*model)
+	if got.done || !strings.Contains(got.err, "tag") {
+		t.Fatalf("expected tag validation error, got done=%v err=%q", got.done, got.err)
+	}
+	// Switch to tag, clear invalid value, type valid tag, and confirm on retry.
+	updated, _ = got.Update(key("tab"))
+	got = updated.(*model)
+	if got.err != "" {
+		t.Fatalf("expected error cleared on navigation, got %q", got.err)
+	}
+	got.tag.SetValue("v1-beta")
+	updated, _ = got.Update(key("enter"))
+	got = updated.(*model)
+	if !got.done || !got.result.Confirmed || got.result.Tag != "v1-beta" {
+		t.Fatalf("expected confirmation after retry, got done=%v result=%+v", got.done, got.result)
+	}
+}
+
 func TestTabSwitchesFocusBetweenImageAndTag(t *testing.T) {
 	m := newTestModel("myimage", "v1")
 	if m.focus != fieldImage || !m.image.Focused() || m.tag.Focused() {
