@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -114,5 +115,24 @@ func TestExtensionsUsageAndErrors(t *testing.T) {
 		if code := runExtensions(args, &out, &diagnostics); code == 0 {
 			t.Fatalf("accepted %v", args)
 		}
+	}
+}
+
+func TestExtensionJSONSurfacesEncodeErrors(t *testing.T) {
+	var out, diagnostics bytes.Buffer
+	if code := extensionJSON(&out, &diagnostics, map[string]any{"value": func() {}}); code != 1 {
+		t.Fatalf("code=%d, want 1 for an unencodable value", code)
+	}
+	if diagnostics.Len() == 0 {
+		t.Fatal("expected the encode error to be written to stderr")
+	}
+
+	out.Reset()
+	diagnostics.Reset()
+	if code := extensionJSON(&out, &diagnostics, map[string]any{"ok": true}); code != 0 {
+		t.Fatalf("code=%d, want 0 for an encodable value; stderr=%s", code, diagnostics.String())
+	}
+	if !strings.Contains(out.String(), `"ok":true`) {
+		t.Fatalf("unexpected output: %s", out.String())
 	}
 }
