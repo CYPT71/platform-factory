@@ -141,6 +141,13 @@ jobs:
           # `python3` when `python` is absent from PATH - the actual process
           # launch is still the caller-supplied, already-allowlisted
           # projectExecutor, never a direct exec.Command here.
+          # live_local_registry_test.go shells only the fixed `podman`/
+          # `docker` binary (exec.LookPath-discovered, never a
+          # caller-controlled name) with explicit argument arrays, no
+          # shell, to run and tear down a throwaway local registry:2
+          # container for its own live push/pull test - the same
+          # allowlisted shape as internal/dockersave/cliclient.go above.
+          # It skips entirely unless PLATFORM_FACTORY_TEST_LIVE_LOCAL_REGISTRY=1.
           # Reviewed subprocesses: disk parser self-exec with bounded I/O,
           # capability LookPath probes, and fixture/crash/Apple VM tests.
           # Process execution remains forbidden elsewhere.
@@ -235,6 +242,7 @@ jobs:
             ! -path 'cmd/platform-factory/main_test.go' \
             ! -path 'internal/shellquote/shellquote.go' \
             ! -path 'cmd/platform-factory/project_freeze_output.go' \
+            ! -path 'internal/registry/live_local_registry_test.go' \
             -exec grep -nE 'os/exec|exec\.Command' {} + || true)"
           test -z "$(find cmd internal -name '*.go' -type f \
             -exec grep -n 'InsecureSkipVerify' {} + || true)"
