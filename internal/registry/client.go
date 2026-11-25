@@ -222,14 +222,15 @@ func (c *Client) followBlobRedirect(ctx context.Context, response *http.Response
 		if target.Scheme != "https" {
 			return nil, fmt.Errorf("registry: blob redirect to non-https URL refused")
 		}
-		if err := checkRedirectHostSafe(ctx, target.Hostname()); err != nil {
+		safeIP, err := checkRedirectHostSafe(ctx, target.Hostname())
+		if err != nil {
 			return nil, fmt.Errorf("registry: blob redirect: %w", err)
 		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 		if err != nil {
 			return nil, err
 		}
-		response, err = c.httpClient().Do(request)
+		response, err = c.pinnedDialClient(safeIP).Do(request)
 		if err != nil {
 			return nil, fmt.Errorf("registry: follow blob redirect: %w", err)
 		}
@@ -239,33 +240,78 @@ func (c *Client) followBlobRedirect(ctx context.Context, response *http.Response
 	}
 }
 
+// pinnedDialClient returns an http.Client that behaves exactly like
+// c.httpClient() except its Transport connects directly to ip instead of
+// independently re-resolving the request's hostname when it dials. A
+// validate-the-hostname-then-let-the-transport-connect-to-the-hostname
+// sequence (checkRedirectHostSafe's return value otherwise discarded)
+// leaves a DNS-rebinding TOCTOU window open even though the validating
+// lookup itself is real, not a string match: a malicious authoritative
+// server for the redirect target's hostname can answer the validating
+// lookup with a public address and a second, independent lookup - the
+// one net/http's own dialer would make when it actually connects - with
+// a private or loopback one. Pinning the one IP this function already
+// validated closes that window; it does not change which hostname the
+// TLS handshake authenticates against (DialContext only controls the raw
+// socket, not SNI/certificate validation, both still driven by the
+// request's own URL).
+//
+// Falls back to the unpinned client when the configured Transport is not
+// a *http.Transport: a test double that mocks a RoundTripper directly
+// makes no real DNS lookup or socket connection in the first place, so
+// pinning does not apply.
+func (c *Client) pinnedDialClient(ip net.IP) *http.Client {
+	client := c.httpClient()
+	transport := client.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	base, ok := transport.(*http.Transport)
+	if !ok {
+		return client
+	}
+	pinned := base.Clone()
+	pinned.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+	client.Transport = pinned
+	return client
+}
+
 // checkRedirectHostSafe resolves host via a real DNS lookup and rejects
 // any resolved address that is not a globally-routable unicast address -
 // the network-returned redirect target is untrusted content, unlike an
-// operator-configured registry endpoint.
-func checkRedirectHostSafe(ctx context.Context, host string) error {
+// operator-configured registry endpoint. The returned IP is the exact
+// address the caller must connect to (see pinnedDialClient): re-resolving
+// host a second time at connect time would reopen the DNS-rebinding
+// window validating it here is meant to close.
+func checkRedirectHostSafe(ctx context.Context, host string) (net.IP, error) {
 	if host == "" {
-		return errors.New("redirect target has no host")
+		return nil, errors.New("redirect target has no host")
 	}
 	if literal := net.ParseIP(host); literal != nil {
 		if isBlockedRedirectIP(literal) {
-			return fmt.Errorf("redirect target %s resolves to a blocked address", host)
+			return nil, fmt.Errorf("redirect target %s resolves to a blocked address", host)
 		}
-		return nil
+		return literal, nil
 	}
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
-		return fmt.Errorf("resolve redirect target %s: %w", host, err)
+		return nil, fmt.Errorf("resolve redirect target %s: %w", host, err)
 	}
 	if len(addrs) == 0 {
-		return fmt.Errorf("redirect target %s did not resolve", host)
+		return nil, fmt.Errorf("redirect target %s did not resolve", host)
 	}
 	for _, addr := range addrs {
 		if isBlockedRedirectIP(addr.IP) {
-			return fmt.Errorf("redirect target %s resolves to a blocked address (%s)", host, addr.IP)
+			return nil, fmt.Errorf("redirect target %s resolves to a blocked address (%s)", host, addr.IP)
 		}
 	}
-	return nil
+	return addrs[0].IP, nil
 }
 
 func isBlockedRedirectIP(ip net.IP) bool {
