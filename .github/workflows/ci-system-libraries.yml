@@ -1,9 +1,13 @@
 name: system-library-scan
 
 on:
-  push:
+  push: {branches: [main]}
   pull_request:
   schedule: [{cron: '47 4 * * 2'}]
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
 
 permissions: {contents: read}
 

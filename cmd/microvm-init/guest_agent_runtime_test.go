@@ -41,9 +41,9 @@ func TestOptedInGuestEndpointControlsTrackedChild(t *testing.T) {
 	var closeOnce sync.Once
 	opened := make(chan struct{})
 	done := make(chan int, 1)
-	var stderr bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	go func() {
-		done <- runWithOptionalGuestEndpoint(child, make(chan os.Signal), io.Discard, &stderr, func() error { return nil },
+		done <- runWithOptionalGuestEndpoint(child, make(chan os.Signal), &stdout, &stderr, func() error { return nil },
 			func(path string) (guestEndpointConfig, error) {
 				if path != guestAgentConfigPath {
 					t.Errorf("config path=%q", path)
@@ -94,6 +94,9 @@ func TestOptedInGuestEndpointControlsTrackedChild(t *testing.T) {
 	_ = host.Close()
 	if len(child.signals) != 1 || child.signals[0] != syscall.SIGTERM {
 		t.Fatalf("signals=%v", child.signals)
+	}
+	if !strings.Contains(stdout.String(), "component=microvm-init operation=guest-agent phase=ready") {
+		t.Fatalf("missing guest-agent readiness marker in stdout=%q", stdout.String())
 	}
 }
 
