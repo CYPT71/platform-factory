@@ -1,8 +1,11 @@
 name: sandbox
 on:
-  push:
+  push: {branches: [main]}
   pull_request:
   schedule: [{cron: '53 4 * * 1'}]
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
 permissions: {contents: read}
 jobs:
   sandbox:

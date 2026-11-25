@@ -206,6 +206,34 @@ func TestImageFilesIncludesProjectAndSharedDependencies(t *testing.T) {
 	}
 }
 
+// TestVerifyFreezeInventoryRejectsAddedInput proves a file added to an
+// include/shared_deps source after `pf freeze` is refused, not silently
+// baked into the next build. VerifyFreezeInventory's main loop only walks
+// the already-frozen file list checking it against the current filesystem;
+// on its own that direction can never notice a file that exists now but
+// didn't exist (or wasn't covered) when the inventory was written.
+func TestVerifyFreezeInventoryRejectsAddedInput(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "pf.yaml"),
+		"version: 1\nlanguage: compiled\nartifact: app\ninclude:\n  - {source: deps, destination: /opt/deps, category: dependencies}\n", 0o644)
+	writeTestFile(t, filepath.Join(root, "app"), "app", 0o755)
+	writeTestFile(t, filepath.Join(root, "deps", "file1.txt"), "original", 0o644)
+	loaded, err := Load(filepath.Join(root, "pf.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loaded.WriteFreezeInventory(); err != nil {
+		t.Fatal(err)
+	}
+	if err := loaded.VerifyFreezeInventory(); err != nil {
+		t.Fatalf("fresh inventory did not verify: %v", err)
+	}
+	writeTestFile(t, filepath.Join(root, "deps", "file2-added.txt"), "added after freeze", 0o644)
+	if err := loaded.VerifyFreezeInventory(); err == nil || !strings.Contains(err.Error(), "changed after") {
+		t.Fatalf("added input was accepted: %v", err)
+	}
+}
+
 func TestVerifyFreezeInventoryRejectsTraversalAndUnknownFields(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "pf.yaml"), "version: 1\nlanguage: go\nartifact: app\n", 0o644)
