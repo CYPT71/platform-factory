@@ -423,5 +423,8 @@ See [MAINTAINERS.md](MAINTAINERS.md) for information on becoming a maintainer.
 
 ## License
 
-By contributing to this project, you agree to license your contribution under the
-[Apache License 2.0](LICENSE).
+The project is licensed under the [Business Source License 1.1](LICENSE) —
+see [docs/licensing.md](docs/licensing.md) for what that means in practice.
+By contributing, you agree to license your contribution to the project
+under those same terms, so it can be distributed as part of the Licensed
+Work on the same basis as the rest of the codebase.
