@@ -331,6 +331,49 @@ func TestProjectRootRequirementFailsClosedUnlessPolicyAllowsDegradation(t *testi
 	defer client.Close()
 }
 
+// TestNetworkPolicyAllowlistIsNotYetEnforcedAtTheSandboxBoundary is a
+// deliberate, documented negative result, not a regression test: it proves
+// from inside a genuinely separate plugin subprocess that a plugin granted
+// a single narrow Permissions.Network destination can still reach an
+// entirely different, undeclared real address today. hostNetworkGranted's
+// own doc comment (sandbox_linux.go) already says this plainly -
+// Permissions.Network is a coarse any-network-or-none gate, not a
+// per-destination enforcement boundary; NetworkPolicy/SafeDialContext
+// (network_policy.go) compile and validate correctly but have no caller
+// anywhere in this module that wires them into a plugin's actual network
+// path. This test exists so that gap cannot silently regress into looking
+// closed (todo-next.md's "Isolation des plugins et workers" prose, read on
+// its own, could otherwise be mistaken for per-destination enforcement
+// actually shipping) - the day real enforcement (a veth pair plus an
+// nftables allowlist, per that same doc comment) lands, this test's
+// expectation flips to "denied" and must be rewritten, not deleted.
+func TestNetworkPolicyAllowlistIsNotYetEnforcedAtTheSandboxBoundary(t *testing.T) {
+	binary, err := sandboxProbePluginPath()
+	if err != nil {
+		t.Fatalf("build sandbox probe plugin: %v", err)
+	}
+	// A real, resolvable address nowhere in the declared allowlist below.
+	const undeclaredDestination = "1.1.1.1:53"
+
+	client, err := StartWithManifest(context.Background(), binary, nil, nil,
+		PluginFamilyRuntime, PluginPermissions{Network: []string{"example.invalid"}})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer client.Close()
+
+	var result map[string]string
+	if err := client.Call(context.Background(), "v1.observe.net-probe-destination",
+		map[string]string{"address": undeclaredDestination}, &result); err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if result["result"] != "reached" {
+		t.Fatalf("got %q for an undeclared destination with a narrow allowlist - "+
+			"if this now fails, per-destination enforcement has been wired in: "+
+			"update this test's expectation and todo-next.md instead of deleting it", result["result"])
+	}
+}
+
 // filterPluginEnvironment and declaresKubeconfigSecret now live in the
 // cross-platform pluginenv.go, and their direct unit tests moved with them
 // to pluginenv_test.go so they run on every platform, not just Linux. This

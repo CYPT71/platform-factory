@@ -416,3 +416,34 @@ func TestPullImageRootfsAgainstRealDockerHub(t *testing.T) {
 		t.Fatalf("expected an executable interpreter at %s: %v", interpreter, err)
 	}
 }
+
+// TestPullImageRootfsAgainstRealGHCR proves this package's registry
+// interop against a second real, independently-operated OCI registry -
+// not just Docker Hub (TestPullImageRootfsAgainstRealDockerHub). GHCR's
+// anonymous pull still requires a real bearer-token exchange
+// (WWW-Authenticate challenge -> POST to the realm it names), unlike some
+// registries that serve public blobs with no auth round-trip at all, so
+// this exercises authorize/parseAuthParameters against a provider whose
+// challenge response shape Docker Hub's own token service does not
+// necessarily match byte-for-byte.
+func TestPullImageRootfsAgainstRealGHCR(t *testing.T) {
+	if os.Getenv("PLATFORM_FACTORY_TEST_LIVE_REGISTRY") != "1" {
+		t.Skip("set PLATFORM_FACTORY_TEST_LIVE_REGISTRY=1 to pull a real public image from ghcr.io")
+	}
+	dest := filepath.Join(t.TempDir(), "rootfs")
+	// ghcr.io/oras-project/oras is ORAS's own published CLI image - public,
+	// small, and stable; this is the linux/amd64 manifest digest under tag
+	// v1.2.0, resolved once by hand and pinned here the same way any real
+	// caller would pin a third-party base image.
+	digest, err := pullImageRootfs(context.Background(),
+		"ghcr.io/oras-project/oras@sha256:42c524c48e0672568dbd2842d3a0cb34a415347145ee9fe1c8abaf65e7455b46",
+		"amd64", dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("resolved platform manifest digest: %s", digest)
+	binary := filepath.Join(dest, "bin", "oras")
+	if info, err := os.Stat(binary); err != nil || info.Mode()&0o111 == 0 {
+		t.Fatalf("expected an executable oras binary at %s: %v", binary, err)
+	}
+}
