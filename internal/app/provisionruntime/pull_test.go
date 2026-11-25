@@ -335,6 +335,72 @@ func TestPullImageRootfsRejectsMismatchedSinglePlatform(t *testing.T) {
 	}
 }
 
+func TestDefaultRuntimeCacheDirHonorsOverridesInPrecedenceOrder(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_RUNTIME_CACHE_DIR", "")
+	t.Setenv("PLATFORM_FACTORY_CACHE_DIR", "")
+	if got := defaultRuntimeCacheDir(); got == "" {
+		t.Fatal("expected a non-empty default cache dir derived from os.UserCacheDir")
+	}
+
+	t.Setenv("PLATFORM_FACTORY_CACHE_DIR", "/tmp/example-cache")
+	if got, want := defaultRuntimeCacheDir(), filepath.Join("/tmp/example-cache", "runtime-oci"); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+
+	for _, off := range []string{"off", "OFF", "none", "None"} {
+		t.Setenv("PLATFORM_FACTORY_RUNTIME_CACHE_DIR", off)
+		if got := defaultRuntimeCacheDir(); got != "" {
+			t.Fatalf("off=%q: got %q, want empty (disabled)", off, got)
+		}
+	}
+
+	t.Setenv("PLATFORM_FACTORY_RUNTIME_CACHE_DIR", "/tmp/explicit-cache")
+	if got := defaultRuntimeCacheDir(); got != "/tmp/explicit-cache" {
+		t.Fatalf("got %q, want the explicit override unmodified", got)
+	}
+}
+
+func TestReadVerifiedCacheRejectsDisabledCacheAndMalformedDigest(t *testing.T) {
+	if data, ok := readVerifiedCache("", "sha256:"+strings.Repeat("a", 64)); ok || data != nil {
+		t.Fatalf("expected no cache lookup when cacheDir is empty, got data=%v ok=%v", data, ok)
+	}
+	cacheDir := t.TempDir()
+	for _, digest := range []string{"not-a-digest", "sha256:tooshort", "md5:" + strings.Repeat("a", 64)} {
+		if data, ok := readVerifiedCache(cacheDir, digest); ok || data != nil {
+			t.Fatalf("digest=%q: expected a malformed digest to be rejected, got data=%v ok=%v", digest, data, ok)
+		}
+	}
+}
+
+func TestWriteVerifiedCacheRejectsDisabledCacheMalformedDigestAndHashMismatch(t *testing.T) {
+	// A disabled cache or a malformed digest must be silently ignored - no
+	// panic, and definitely nothing written to disk.
+	writeVerifiedCache("", "sha256:"+strings.Repeat("a", 64), []byte("payload"))
+
+	cacheDir := t.TempDir()
+	writeVerifiedCache(cacheDir, "not-a-digest", []byte("payload"))
+	if entries, err := os.ReadDir(cacheDir); err != nil || len(entries) != 0 {
+		t.Fatalf("expected nothing written for a malformed digest: entries=%v err=%v", entries, err)
+	}
+
+	// The digest must match the data's actual SHA-256, or nothing is written.
+	wrongDigest := "sha256:" + strings.Repeat("b", 64)
+	writeVerifiedCache(cacheDir, wrongDigest, []byte("payload"))
+	if _, ok := readVerifiedCache(cacheDir, wrongDigest); ok {
+		t.Fatal("expected a hash-mismatched write to be rejected")
+	}
+
+	// A correctly hashed write must round-trip through readVerifiedCache.
+	data := []byte("real payload")
+	sum := sha256.Sum256(data)
+	validDigest := "sha256:" + hex.EncodeToString(sum[:])
+	writeVerifiedCache(cacheDir, validDigest, data)
+	got, ok := readVerifiedCache(cacheDir, validDigest)
+	if !ok || string(got) != string(data) {
+		t.Fatalf("got=%q ok=%v, want %q", got, ok, data)
+	}
+}
+
 func TestPullImageRootfsAgainstRealDockerHub(t *testing.T) {
 	if os.Getenv("PLATFORM_FACTORY_TEST_LIVE_REGISTRY") != "1" {
 		t.Skip("set PLATFORM_FACTORY_TEST_LIVE_REGISTRY=1 to pull python:3.12-slim from the real Docker Hub")

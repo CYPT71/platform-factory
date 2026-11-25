@@ -54,6 +54,97 @@ func TestArtifactFallbackPreservesIndexAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestListReferrersRejectsMalformedSubjectDigest(t *testing.T) {
+	client := &Client{HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) *http.Response {
+		t.Fatal("ListReferrers must reject a malformed subject digest before making any request")
+		return nil
+	})}}
+	if _, err := client.ListReferrers(context.Background(), Reference{Registry: "registry.example", Repository: "app"}, "not-a-digest"); err == nil {
+		t.Fatal("expected an error for a malformed subject digest")
+	}
+}
+
+func TestListReferrersSurfacesUnexpectedStatusCodes(t *testing.T) {
+	subject := "sha256:" + strings.Repeat("a", 64)
+	target := Reference{Registry: "registry.example", Repository: "app"}
+
+	t.Run("native-error-status", func(t *testing.T) {
+		client := &Client{HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) *http.Response {
+			return response(http.StatusInternalServerError, "", strings.NewReader("boom"))
+		})}}
+		if _, err := client.ListReferrers(context.Background(), target, subject); err == nil {
+			t.Fatal("expected an error for a non-200/404 native referrers response")
+		}
+	})
+
+	t.Run("fallback-not-found", func(t *testing.T) {
+		client := &Client{HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) *http.Response {
+			return response(http.StatusNotFound, "", strings.NewReader("not found"))
+		})}}
+		got, err := client.ListReferrers(context.Background(), target, subject)
+		if err != nil || got != nil {
+			t.Fatalf("got=%+v err=%v, want nil,nil when neither the native endpoint nor the fallback tag exist", got, err)
+		}
+	})
+
+	t.Run("fallback-error-status", func(t *testing.T) {
+		client := &Client{HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) *http.Response {
+			if strings.Contains(r.URL.Path, "/manifests/sha256-") {
+				return response(http.StatusForbidden, "", strings.NewReader("denied"))
+			}
+			return response(http.StatusNotFound, "", strings.NewReader("not found"))
+		})}}
+		if _, err := client.ListReferrers(context.Background(), target, subject); err == nil {
+			t.Fatal("expected an error for a non-200/404 fallback response")
+		}
+	})
+
+	t.Run("oversized-native-body", func(t *testing.T) {
+		client := &Client{HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) *http.Response {
+			return response(http.StatusOK, "", strings.NewReader(strings.Repeat(" ", maxResponseBody+1)))
+		})}}
+		if _, err := client.ListReferrers(context.Background(), target, subject); err == nil {
+			t.Fatal("expected an error for a referrers index past the size limit")
+		}
+	})
+
+	t.Run("malformed-json", func(t *testing.T) {
+		client := &Client{HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) *http.Response {
+			return response(http.StatusOK, "", strings.NewReader("not json"))
+		})}}
+		if _, err := client.ListReferrers(context.Background(), target, subject); err == nil {
+			t.Fatal("expected an error for a non-JSON referrers index")
+		}
+	})
+
+	t.Run("wrong-schema-version", func(t *testing.T) {
+		client := &Client{HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) *http.Response {
+			return response(http.StatusOK, "", strings.NewReader(`{"schemaVersion":1,"manifests":[]}`))
+		})}}
+		if _, err := client.ListReferrers(context.Background(), target, subject); err == nil {
+			t.Fatal("expected an error for an unexpected schemaVersion")
+		}
+	})
+
+	t.Run("invalid-descriptor-digest", func(t *testing.T) {
+		client := &Client{HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) *http.Response {
+			return response(http.StatusOK, "", strings.NewReader(`{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"not-a-digest","size":1}]}`))
+		})}}
+		if _, err := client.ListReferrers(context.Background(), target, subject); err == nil {
+			t.Fatal("expected an error for a referrer descriptor with an invalid digest")
+		}
+	})
+
+	t.Run("negative-descriptor-size", func(t *testing.T) {
+		client := &Client{HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) *http.Response {
+			return response(http.StatusOK, "", strings.NewReader(`{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:`+strings.Repeat("b", 64)+`","size":-1}]}`))
+		})}}
+		if _, err := client.ListReferrers(context.Background(), target, subject); err == nil {
+			t.Fatal("expected an error for a referrer descriptor with a negative size")
+		}
+	})
+}
+
 func TestArtifactSubjectAcknowledgementAndFallbackFailures(t *testing.T) {
 	subject := "sha256:" + strings.Repeat("a", 64)
 	for _, kind := range []string{"acknowledged", "wrong-subject", "absent-index", "non-index", "malformed-index", "denied", "oversized-index"} {

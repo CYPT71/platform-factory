@@ -386,3 +386,159 @@ func TestRunVerifyReleaseRejectsUnknownSourceRef(t *testing.T) {
 		t.Fatalf("code=%d want 2; stderr=%s", code, stderr.String())
 	}
 }
+
+func TestRunVerifyReleasePrintsHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"verify-release", "-h"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d want 0; stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunVerifyReleaseRejectsUnknownFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"verify-release", "--does-not-exist"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code=%d want 2; stderr=%s", code, stderr.String())
+	}
+}
+
+func TestRunVerifyReleaseRejectsWrongArgCount(t *testing.T) {
+	fixture := buildReleaseFixture(t, false)
+	for _, args := range [][]string{
+		{"verify-release", "--allow-incomplete-evidence"},
+		{"verify-release", "--allow-incomplete-evidence", fixture.layoutDir, "extra"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := run(args, &stdout, &stderr)
+		if code != 2 {
+			t.Fatalf("args=%v code=%d want 2; stderr=%s", args, code, stderr.String())
+		}
+		if !bytes.Contains(stderr.Bytes(), []byte("usage: platform-factory verify-release")) {
+			t.Fatalf("args=%v unexpected error: %s", args, stderr.String())
+		}
+	}
+}
+
+func TestRunVerifyReleaseRejectsInvalidFormat(t *testing.T) {
+	fixture := buildReleaseFixture(t, false)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"verify-release", "--allow-incomplete-evidence", "--format", "xml", fixture.layoutDir}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code=%d want 2; stderr=%s", code, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("format must be json or text")) {
+		t.Fatalf("unexpected error: %s", stderr.String())
+	}
+}
+
+func TestRunVerifyReleaseRejectsJournalWithoutProvenance(t *testing.T) {
+	fixture := buildReleaseFixture(t, false)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"verify-release", "--allow-incomplete-evidence", "--journal", fixture.evidence, fixture.layoutDir}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("code=%d want 2; stderr=%s", code, stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("--journal requires --provenance")) {
+		t.Fatalf("unexpected error: %s", stderr.String())
+	}
+}
+
+func TestRunVerifyReleaseRejectsUnverifiableLayout(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"verify-release", "--allow-incomplete-evidence", filepath.Join(t.TempDir(), "does-not-exist")}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !bytes.Contains(stderr.Bytes(), []byte("platform-factory verify-release:")) {
+		t.Fatalf("unexpected error: %s", stderr.String())
+	}
+}
+
+// TestRunVerifyReleaseDirResolvesArtifactsFromBothNamingConventions covers
+// --release-dir, the convenience flag that lets a caller point at a
+// `platform-factory publish` output directory instead of naming every
+// artifact file individually. It must find files under either naming
+// convention publish actually writes (the "*.dsse.json"/"*.spdx.json"
+// forms, and the plain forms these tests' own fixtures use), and an
+// explicit --signature/--sbom/... flag must still win over --release-dir.
+func TestRunVerifyReleaseDirResolvesArtifactsFromBothNamingConventions(t *testing.T) {
+	fixture := buildReleaseFixture(t, false)
+	releaseDir := filepath.Dir(fixture.sigFile)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"verify-release", "--release-dir", releaseDir,
+		"--key-dir", fixture.keyDir, "--key-name", "release",
+		fixture.layoutDir,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code=%d want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	var result releaseVerification
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if !result.Valid || !result.SignatureValid || !result.ProvenanceValid || !result.SBOMValid {
+		t.Fatalf("expected --release-dir to resolve every plain-named artifact: %+v", result)
+	}
+
+	dsseDir := t.TempDir()
+	for _, rename := range []struct{ from, to string }{
+		{fixture.sigFile, filepath.Join(dsseDir, "signature.dsse.json")},
+		{fixture.provFile, filepath.Join(dsseDir, "provenance.dsse.json")},
+		{fixture.sbomFile, filepath.Join(dsseDir, "sbom.spdx.json")},
+	} {
+		data, err := os.ReadFile(rename.from)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(rename.to, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reportsDir := filepath.Join(dsseDir, "reports")
+	if err := os.MkdirAll(reportsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, rename := range []struct{ from, to string }{
+		{fixture.policyFile, filepath.Join(reportsDir, "policy-rules.json")},
+		{fixture.evidence, filepath.Join(reportsDir, "evidence.json")},
+	} {
+		data, err := os.ReadFile(rename.from)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(rename.to, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{
+		"verify-release", "--release-dir", dsseDir,
+		"--key-dir", fixture.keyDir, "--key-name", "release",
+		fixture.layoutDir,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("dsse-named code=%d want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	result = releaseVerification{}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if !result.Valid || !result.SignatureValid || !result.ProvenanceValid || !result.SBOMValid {
+		t.Fatalf("expected --release-dir to resolve every dsse-named artifact: %+v", result)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = run([]string{
+		"verify-release", "--release-dir", t.TempDir(), "--allow-incomplete-evidence",
+		fixture.layoutDir,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("empty-release-dir code=%d want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+}

@@ -232,3 +232,58 @@ func TestRelRuntimePathReturnsSlashesAndFallsBackOnError(t *testing.T) {
 		t.Fatalf("fallback got=%q", got)
 	}
 }
+
+func TestResolveELFSharedLibraryViaOriginTemplate(t *testing.T) {
+	root := t.TempDir()
+	libDir := filepath.Join(root, "opt", "app", "bin", "lib")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "libfoo.so.1"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirs := buildELFSearchDirs(nil, []string{"${ORIGIN}/lib"}, filepath.Join("/opt", "app", "bin"))
+	imgPath, diskPath, viaOrigin, relFromOrigin, err := resolveELFSharedLibrary(root, "libfoo.so.1", dirs)
+	if err != nil {
+		t.Fatalf("resolveELFSharedLibrary: %v", err)
+	}
+	if !viaOrigin || relFromOrigin != "lib/libfoo.so.1" {
+		t.Fatalf("viaOrigin=%v relFromOrigin=%q", viaOrigin, relFromOrigin)
+	}
+	if imgPath != "/opt/app/bin/lib/libfoo.so.1" || diskPath != filepath.Join(libDir, "libfoo.so.1") {
+		t.Fatalf("imgPath=%q diskPath=%q", imgPath, diskPath)
+	}
+}
+
+func TestCopyRuntimeFileCopiesContentIntoNewNestedDestination(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "source.bin")
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "nested", "dest.bin")
+	if err := CopyRuntimeFile(src, dest); err != nil {
+		t.Fatalf("CopyRuntimeFile: %v", err)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "payload" {
+		t.Fatalf("data=%q", data)
+	}
+}
+
+func TestCopyRuntimeFileRejectsNonRegularSource(t *testing.T) {
+	src := t.TempDir()
+	dest := filepath.Join(t.TempDir(), "dest.bin")
+	if err := CopyRuntimeFile(src, dest); err == nil {
+		t.Fatal("expected an error copying a directory as if it were a regular file")
+	}
+}
+
+func TestCopyRuntimeFileRejectsMissingSource(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "dest.bin")
+	if err := CopyRuntimeFile(filepath.Join(t.TempDir(), "does-not-exist"), dest); err == nil {
+		t.Fatal("expected an error for a missing source file")
+	}
+}
