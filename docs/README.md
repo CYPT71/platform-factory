@@ -35,6 +35,7 @@ and evidence. Runnable examples are indexed in [examples](../examples/README.md)
 - [Plugin marketplace](plugin-marketplace.md): publishing and installing releases.
 - [Security model](security/model.md): trust boundaries and enforcement limits.
 - [Technology toolkit](technology-toolkit.md): offline analyzers and their contracts.
+- [Licensing](licensing.md): what the [LICENSE](../LICENSE) grants for free and what needs a commercial license; see also [pricing](legal/pricing.md), [terms of service](legal/terms-of-service.md) and [privacy policy](legal/privacy-policy.md) (drafts).
 - [Contribution guide](../CONTRIBUTING.md): development and review workflow.
 - [Next steps](../todo-next.md): prioritized work and acceptance criteria.
 

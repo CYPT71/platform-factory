@@ -54,6 +54,7 @@ var directCommands = map[string]cliHandler{
 	"plugin-provenance": runPluginProvenance,
 	"pipeline":          runPipeline,
 	"verify-release":    runVerifyRelease,
+	"license":           runLicense,
 	"completion":        runCompletion,
 	"doctor":            runDoctor,
 	"plugin":            runPlugin,
@@ -500,6 +501,7 @@ Usage:
   platform-factory events [--tail N]
   platform-factory publish [OPTIONS] LAYOUT IMAGE
   platform-factory verify-release [OPTIONS] LAYOUT
+  platform-factory license <issue|verify|show> [OPTIONS]
   platform-factory import [--runtime docker|podman] --layout LAYOUT IMAGE
   platform-factory detect [OPTIONS] PATH
   platform-factory run [--isolation=<container|microvm>] [OPTIONS] TARGET [ARG...]
