@@ -305,7 +305,7 @@ func isReadOnlyMethod(method string) bool {
 		"v1.deployment.plan", "v1.deployment.observe",
 		"v1.runtime.logs", "v1.runtime.status",
 		"v1.analyzer.scan", "v1.analyzer.verify", "v1.registry.list",
-		"v1.observe.net-probe", "v1.observe.priv-probe", "v1.observe.isolation-probe", "v1.observe.tmp-probe", "v1.observe.netns-probe",
+		"v1.observe.net-probe", "v1.observe.net-probe-destination", "v1.observe.priv-probe", "v1.observe.isolation-probe", "v1.observe.tmp-probe", "v1.observe.netns-probe",
 		"v1.observe.memory-bomb", "v1.observe.fork-bomb", "v1.observe.env-probe":
 		return true
 	default:

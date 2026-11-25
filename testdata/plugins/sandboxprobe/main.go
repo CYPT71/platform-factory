@@ -35,6 +35,27 @@ func handleNetProbe(_ context.Context, _ json.RawMessage) (any, error) {
 	return map[string]string{"result": "reached"}, nil
 }
 
+// netProbeDestinationParams names a destination handleNetProbeDestination
+// actively tries to reach - unlike handleNetProbe's hardcoded 8.8.8.8:53,
+// this lets a host test pick a destination deliberately absent from
+// whatever Permissions.Network allowlist the plugin was started with.
+type netProbeDestinationParams struct {
+	Address string `json:"address"`
+}
+
+func handleNetProbeDestination(_ context.Context, raw json.RawMessage) (any, error) {
+	var params netProbeDestinationParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return nil, err
+	}
+	conn, err := net.DialTimeout("tcp", params.Address, 3*time.Second)
+	if err != nil {
+		return map[string]string{"result": "denied", "detail": err.Error()}, nil
+	}
+	_ = conn.Close()
+	return map[string]string{"result": "reached"}, nil
+}
+
 func handleIsolationProbe(_ context.Context, _ json.RawMessage) (any, error) {
 	limits := map[string]string{}
 	for name, resource := range map[string]int{
@@ -204,6 +225,7 @@ func handlePrivProbe(_ context.Context, _ json.RawMessage) (any, error) {
 func main() {
 	server := plugin.NewServer("sandboxprobe", "v0.1.0")
 	server.Handle("observe.net-probe", handleNetProbe)
+	server.Handle("observe.net-probe-destination", handleNetProbeDestination)
 	server.Handle("observe.priv-probe", handlePrivProbe)
 	server.Handle("observe.env-probe", handleEnvProbe)
 	server.Handle("observe.isolation-probe", handleIsolationProbe)
