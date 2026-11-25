@@ -27,6 +27,16 @@ type TenantStoreManager struct {
 
 	mu     sync.Mutex
 	stores map[string]*Store
+	// quotaLocks serializes ServeBlob's PUT path (check current usage,
+	// then stream and install the new blob) per tenant. Without this,
+	// concurrent uploads each read the same stale UsageBytes before any
+	// of them is installed, so every one of them can pass the quota
+	// check and all get written anyway - a tenant with several
+	// non-deduplicatable blobs in flight at once (nothing on this API
+	// limits concurrent requests) can install arbitrarily more than its
+	// quota permits. GET and Exists never take this lock: they do not
+	// change usage, so they cannot race the check they did not make.
+	quotaLocks map[string]*sync.Mutex
 }
 
 // OpenTenantManager creates a tenant-isolated CAS manager rooted at root.
@@ -39,7 +49,22 @@ func OpenTenantManager(root string, maxBytesPerTenant int64) (*TenantStoreManage
 		root:              root,
 		maxBytesPerTenant: maxBytesPerTenant,
 		stores:            make(map[string]*Store),
+		quotaLocks:        make(map[string]*sync.Mutex),
 	}, nil
+}
+
+// quotaLockFor returns tenantID's own upload serialization lock,
+// creating it on first use. tenantID is assumed already validated by a
+// prior StoreFor call - this never creates a directory, only a mutex.
+func (m *TenantStoreManager) quotaLockFor(tenantID string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lock, ok := m.quotaLocks[tenantID]
+	if !ok {
+		lock = &sync.Mutex{}
+		m.quotaLocks[tenantID] = lock
+	}
+	return lock
 }
 
 // StoreFor returns the isolated CAS store for tenantID.
@@ -129,6 +154,13 @@ func (m *TenantStoreManager) ServeBlob(w http.ResponseWriter, r *http.Request, t
 			http.Error(w, "invalid content length", http.StatusRequestEntityTooLarge)
 			return
 		}
+		// Serializes this tenant's own check-then-install sequence below
+		// (see quotaLocks' doc comment) - held for the whole PUT, not
+		// just the quota check, since the quota decision is only valid
+		// until the matching install actually lands.
+		quotaLock := m.quotaLockFor(tenantID)
+		quotaLock.Lock()
+		defer quotaLock.Unlock()
 		if m.maxBytesPerTenant > 0 {
 			// Skip quota rejection only if the exact blob already exists for this tenant.
 			if store.Verify(digest) != nil {
