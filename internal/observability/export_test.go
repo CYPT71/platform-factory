@@ -82,10 +82,10 @@ func TestFormatPrometheusAndMetricsHandler(t *testing.T) {
 
 func TestSanitizePromNameReplacesDisallowedCharactersAndLeadingDigits(t *testing.T) {
 	cases := map[string]string{
-		"pf_builds_total":  "pf_builds_total",
-		"pf.builds-total":  "pf_builds_total",
-		"pf:builds_total":  "pf:builds_total",
-		"1st_metric":       "_1st_metric",
+		"pf_builds_total":    "pf_builds_total",
+		"pf.builds-total":    "pf_builds_total",
+		"pf:builds_total":    "pf:builds_total",
+		"1st_metric":         "_1st_metric",
 		"metric with spaces": "metric_with_spaces",
 	}
 	for input, want := range cases {
