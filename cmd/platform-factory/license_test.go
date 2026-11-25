@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -104,5 +105,156 @@ func TestLicenseRequiresAnAction(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"license"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("code=%d, want 2 with no action; stderr=%s", code, stderr.String())
+	}
+}
+
+func TestLicenseSubcommandsRejectUnknownFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"license", "issue", "--does-not-exist"},
+		{"license", "verify", "--does-not-exist"},
+		{"license", "show", "--does-not-exist"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 2 {
+			t.Fatalf("args=%v code=%d, want 2", args, code)
+		}
+	}
+}
+
+func TestLicenseVerifyAndShowRejectWrongArgCount(t *testing.T) {
+	path := issueTestLicense(t, t.TempDir())
+	for _, args := range [][]string{
+		{"license", "verify", "--key-dir", t.TempDir()},
+		{"license", "verify", "--key-dir", t.TempDir(), path, "extra"},
+		{"license", "show"},
+		{"license", "show", path, "extra"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 2 {
+			t.Fatalf("args=%v code=%d, want 2; stderr=%s", args, code, stderr.String())
+		}
+	}
+}
+
+func TestLicenseVerifyAndShowRejectMissingFile(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist.json")
+	for _, args := range [][]string{
+		{"license", "verify", "--key-dir", t.TempDir(), missing},
+		{"license", "show", missing},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 1 {
+			t.Fatalf("args=%v code=%d, want 1; stderr=%s", args, code, stderr.String())
+		}
+	}
+}
+
+func TestLicenseVerifyAndShowRejectMalformedEnvelopeJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "malformed.json")
+	if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"license", "verify", "--key-dir", t.TempDir(), path},
+		{"license", "show", path},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 1 {
+			t.Fatalf("args=%v code=%d, want 1; stderr=%s", args, code, stderr.String())
+		}
+	}
+}
+
+func TestLicenseShowRejectsMalformedPayloadEncoding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad-payload.json")
+	envelope := `{"payloadType":"application/vnd.platform-factory.license.v1+json","payload":"not-valid-base64!!","signatures":[]}`
+	if err := os.WriteFile(path, []byte(envelope), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"license", "show", path}, &stdout, &stderr); code != 1 {
+		t.Fatalf("code=%d, want 1; stderr=%s", code, stderr.String())
+	}
+}
+
+func TestLicenseShowRejectsMalformedPredicateJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bad-predicate.json")
+	// "not json" base64-encoded, so it decodes fine but fails JSON decode.
+	envelope := `{"payloadType":"application/vnd.platform-factory.license.v1+json","payload":"bm90IGpzb24=","signatures":[]}`
+	if err := os.WriteFile(path, []byte(envelope), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"license", "show", path}, &stdout, &stderr); code != 1 {
+		t.Fatalf("code=%d, want 1; stderr=%s", code, stderr.String())
+	}
+}
+
+func TestLicenseVerifyRejectsMalformedTrustedKeyFlag(t *testing.T) {
+	path := issueTestLicense(t, t.TempDir())
+	for _, trustedKey := range []string{
+		"not-ed25519:AAAA",
+		"no-colon-at-all",
+		"ed25519:not-valid-base64!!",
+		"ed25519:AAAA",
+	} {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"license", "verify", "--trusted-key", trustedKey, path}, &stdout, &stderr)
+		if code != 2 {
+			t.Fatalf("trustedKey=%q code=%d, want 2; stderr=%s", trustedKey, code, stderr.String())
+		}
+	}
+}
+
+func TestLicenseRejectsInvalidKeyName(t *testing.T) {
+	keyDir := t.TempDir()
+	path := issueTestLicense(t, keyDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"license", "verify", "--key-dir", keyDir, "--key-name", "Not-Valid", path}, &stdout, &stderr); code != 2 {
+		t.Fatalf("verify: code=%d, want 2; stderr=%s", code, stderr.String())
+	}
+
+	out := filepath.Join(t.TempDir(), "x.license.json")
+	stdout.Reset()
+	stderr.Reset()
+	code := run([]string{
+		"license", "issue", "--key-dir", keyDir, "--key-name", "Not-Valid",
+		"--license-id", "lic-x", "--licensee", "Co", "--edition", "enterprise", "--out", out,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("issue: code=%d, want 1; stderr=%s", code, stderr.String())
+	}
+}
+
+func TestLicenseIssueRejectsAnUnwritableKeyDir(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	keyDir := filepath.Join(blocker, "sub")
+	out := filepath.Join(t.TempDir(), "x.license.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"license", "issue", "--key-dir", keyDir,
+		"--license-id", "lic-x", "--licensee", "Co", "--edition", "enterprise", "--out", out,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d, want 1; stderr=%s", code, stderr.String())
+	}
+}
+
+func TestLicenseIssueRejectsAnUnwritableOutputPath(t *testing.T) {
+	keyDir := t.TempDir()
+	// --out pointing at an existing directory can never be opened for
+	// writing as a regular file.
+	out := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"license", "issue", "--key-dir", keyDir,
+		"--license-id", "lic-x", "--licensee", "Co", "--edition", "enterprise", "--out", out,
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code=%d, want 1; stderr=%s", code, stderr.String())
 	}
 }
