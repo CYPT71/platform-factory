@@ -125,8 +125,16 @@ Sur la révision [`4c16589`](https://github.com/CYPT71/platform-factory/commit/4
   idempotents et découverte des referrers OCI 1.1 (avec repli sur le schéma de
   tag) ajoutés et exercés par le parcours Python sur kind (commits 63f9c3f,
   1fd1316) ; `verify-release --release-dir` charge le lot de preuves depuis un
-  seul répertoire au lieu de cinq flags séparés. Les essais contre de vrais
-  fournisseurs de registry externes restent à faire.
+  seul répertoire au lieu de cinq flags séparés. Interopérabilité élargie à un
+  second fournisseur réel indépendant de Docker Hub : pull anonyme réel contre
+  `ghcr.io` (bascule de jeton OAuth réelle, pas simulée) ; et le push — jusqu'ici
+  jamais exercé que par de faux serveurs `httptest` — tourne maintenant pour de
+  vrai contre un conteneur `registry:2` local (session d'upload de blob, PUT de
+  manifeste, déplacement de tag, relecture par tag et par digest). Les deux
+  gardés par `PLATFORM_FACTORY_TEST_LIVE_REGISTRY`/`PLATFORM_FACTORY_TEST_LIVE_LOCAL_REGISTRY`,
+  absents de la CI par défaut. **Reste à faire :** scénarios négatifs réels
+  (échec d'authentification, run contre un registry qui applique vraiment une
+  limite de débit) et un vrai fournisseur commercial tiers avec identifiants.
 - [x] **Observabilité exploitable.** Export Prometheus déterministe des
   métriques (`internal/observability/export.go`, commit c1882f6), rédaction
   des tags/événements de span sensibles avant export ; corrélation par
@@ -144,18 +152,45 @@ Sur la révision [`4c16589`](https://github.com/CYPT71/platform-factory/commit/4
   testée (`degraded_test.go`, commit c820d17, complété par a0e4cff pour
   capturer le stderr réel de kubectl/virtctl) ; le shim containerd annule
   désormais proprement une création de tâche partiellement faite au lieu de
-  laisser un rootfs monté sans runtime derrière (commit 32e9c1d). Reste à
-  faire : le même parcours sur un vrai cluster désigné avec preuves
-  conservées, pas seulement la classification unitaire.
+  laisser un rootfs monté sans runtime derrière (commit 32e9c1d). Ce même
+  trio de pannes est maintenant aussi prouvé sur un vrai cluster `kind` avec
+  la vraie CRD KubeVirt installée (opérateur v1.10.0,
+  `developerConfiguration.useEmulation: true`, donc sans virtualisation
+  imbriquée) : un vrai `ServiceAccount` sans permission reçoit un vrai
+  `Forbidden` de la couche d'autorisation réelle du serveur API, un
+  kubeconfig pointé sur une adresse injoignable produit un vrai refus de
+  connexion, un contexte annulé produit une vraie interruption — plus de
+  chaînes d'erreur simulées à la main (`live_cluster_test.go`, gardé par
+  `PLATFORM_FACTORY_TEST_LIVE_KUBEVIRT`, absent de la CI). **Reste à faire :**
+  le cycle de vie complet d'une VM sous ces mêmes pannes (pas seulement la
+  classification d'erreur du plugin) et une rétention de preuves durable sur
+  un cluster désigné par l'organisation — une décision humaine, pas un script.
 - [ ] **Isolation des plugins et workers.** Définir la politique réseau par
   destination et le confinement réellement appliqué aux processus ; expliciter
   les permissions larges encore nécessaires. **Terminé si :** une recette
   hostile et une revue indépendante vérifient les frontières annoncées.
-  **Progrès réel :** allowlist réseau par destination (host/wildcard/CIDR/port,
-  fail-closed) et rédaction des variables d'environnement contenant des
-  marqueurs de secret avant qu'un plugin ne les voie (commit 73c4877). La
-  revue indépendante reste à organiser — son périmètre est maintenant écrit
-  dans `docs/architecture-decisions.md` §4.
+  **Progrès réel :** rédaction des variables d'environnement contenant des
+  marqueurs de secret avant qu'un plugin ne les voie, prouvée par un vrai
+  sous-processus séparé qui rapporte son propre environnement
+  (`client_env_test.go`) ; refus réseau par défaut et `NoNewPrivs` prouvés de
+  la même façon contre un vrai binaire externe (`sandbox_linux_test.go`).
+  **Constat vérifié (recette hostile) :** l'allowlist réseau par destination
+  (host/wildcard/CIDR/port) ajoutée au commit 73c4877
+  (`internal/plugin/network_policy.go`) compile, est correctement validée en
+  isolation, mais n'a aucun appelant nulle part dans le module — rien ne la
+  branche sur le chemin réseau réel d'un plugin. `hostNetworkGranted`
+  (`sandbox_linux.go`) n'applique que la bascule grossière tout-ou-rien que
+  son propre commentaire documente déjà ; le mécanisme par destination que ce
+  même commentaire appelle (une paire veth plus une allowlist nftables) n'a
+  jamais été construit. Une nouvelle sonde hostile le prouve directement :
+  un plugin démarré avec une seule destination autorisée atteint quand même
+  une adresse réelle totalement différente
+  (`TestNetworkPolicyAllowlistIsNotYetEnforcedAtTheSandboxBoundary`, vérifié
+  pour de vrai dans un conteneur Linux privilégié). C'est un garde-fou
+  délibéré : son attente passera à "refusé" le jour où l'application réelle
+  sera câblée, pas à supprimer avant ça. La revue indépendante reste à
+  organiser — son périmètre est maintenant écrit dans
+  `docs/architecture-decisions.md` §4.
 - [x] **Distribution multi-tenant.** Identité de tenant extraite et vérifiée
   depuis le certificat mTLS (`OU=tenant:<id>` ou SAN SPIFFE), CAS physiquement
   isolé par tenant (répertoires `0700`, quota disque optionnel), anti-usurpation
