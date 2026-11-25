@@ -211,3 +211,36 @@ func TestReadbackInstallationVerifierRejectsTargetEchoWithoutBytes(t *testing.T)
 		t.Fatal("target echo accepted without matching installed bytes")
 	}
 }
+
+type failingReadback struct{ err error }
+
+func (r failingReadback) ReadInstalledArtifact(context.Context, domainmigration.Resource, string) (io.ReadCloser, error) {
+	return nil, r.err
+}
+
+func TestReadbackInstallationVerifierRejectsIncompleteObservationAndSurfacesReadErrors(t *testing.T) {
+	payload := artifactPayload([]byte("expected"))
+	artifact := VerifiedArtifact{Digest: payload.Digest, Size: payload.Size, Format: payload.Format}
+	resource := domainmigration.Resource{ID: "r"}
+
+	if err := (ReadbackInstallationVerifier{}).VerifyInstallation(context.Background(), resource, artifact, ArtifactObservation{Found: true, NativeBinding: "native/r"}); err == nil {
+		t.Fatal("expected a nil Readback to be rejected")
+	}
+	readback := installedReadback{data: payload.Data}
+	if err := (ReadbackInstallationVerifier{Readback: readback}).VerifyInstallation(context.Background(), resource, artifact, ArtifactObservation{Found: false, NativeBinding: "native/r"}); err == nil {
+		t.Fatal("expected an unobserved installation to be rejected")
+	}
+	if err := (ReadbackInstallationVerifier{Readback: readback}).VerifyInstallation(context.Background(), resource, artifact, ArtifactObservation{Found: true}); err == nil {
+		t.Fatal("expected a missing native binding to be rejected")
+	}
+	readErr := errors.New("read failed")
+	if err := (ReadbackInstallationVerifier{Readback: failingReadback{err: readErr}}).VerifyInstallation(context.Background(), resource, artifact, ArtifactObservation{Found: true, NativeBinding: "native/r"}); !errors.Is(err, readErr) {
+		t.Fatalf("expected the underlying read error to be surfaced, got %v", err)
+	}
+	if err := (ReadbackInstallationVerifier{Readback: installedReadback{data: []byte("short")}}).VerifyInstallation(context.Background(), resource, artifact, ArtifactObservation{Found: true, NativeBinding: "native/r"}); err == nil {
+		t.Fatal("expected a size-mismatched installed artifact to be rejected")
+	}
+	if err := (ReadbackInstallationVerifier{Readback: readback}).VerifyInstallation(context.Background(), resource, artifact, ArtifactObservation{Found: true, NativeBinding: "native/r"}); err != nil {
+		t.Fatalf("expected a matching installed artifact to verify, got %v", err)
+	}
+}

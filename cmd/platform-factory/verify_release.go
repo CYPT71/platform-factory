@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/CYPT71/platform-factory/internal/app/verify"
@@ -31,6 +33,7 @@ type releaseVerification = verify.VerificationResult
 func runVerifyRelease(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("verify-release", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	releaseDir := flags.String("release-dir", "", "directory containing signature/sbom/provenance/policy/evidence release artifacts")
 	signatureFile := flags.String("signature", "", "DSSE envelope JSON for the published subject signature")
 	provenanceFile := flags.String("provenance", "", "provenance predicate JSON, signed (DSSE envelope) or raw")
 	journalFile := flags.String("journal", "", "pipeline journal that --provenance must match exactly")
@@ -62,6 +65,46 @@ func runVerifyRelease(args []string, stdout, stderr io.Writer) int {
 	if !validOutputFormat(*outputFormat) {
 		fmt.Fprintln(stderr, "platform-factory verify-release: format must be json or text")
 		return 2
+	}
+	if *releaseDir != "" {
+		firstExisting := func(candidates ...string) string {
+			for _, candidate := range candidates {
+				if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+					return candidate
+				}
+			}
+			return ""
+		}
+		if *signatureFile == "" {
+			*signatureFile = firstExisting(
+				filepath.Join(*releaseDir, "signature.dsse.json"),
+				filepath.Join(*releaseDir, "signature.json"),
+			)
+		}
+		if *sbomFile == "" {
+			*sbomFile = firstExisting(
+				filepath.Join(*releaseDir, "sbom.spdx.json"),
+				filepath.Join(*releaseDir, "sbom.json"),
+			)
+		}
+		if *provenanceFile == "" {
+			*provenanceFile = firstExisting(
+				filepath.Join(*releaseDir, "provenance.dsse.json"),
+				filepath.Join(*releaseDir, "provenance.json"),
+			)
+		}
+		if *policyFile == "" {
+			*policyFile = firstExisting(
+				filepath.Join(*releaseDir, "reports", "policy-rules.json"),
+				filepath.Join(*releaseDir, "policy.json"),
+			)
+		}
+		if *evidenceFile == "" {
+			*evidenceFile = firstExisting(
+				filepath.Join(*releaseDir, "reports", "evidence.json"),
+				filepath.Join(*releaseDir, "evidence.json"),
+			)
+		}
 	}
 	if !*allowIncomplete && (*signatureFile == "" || *sbomFile == "" || *provenanceFile == "" ||
 		*policyFile == "" || *evidenceFile == "") {

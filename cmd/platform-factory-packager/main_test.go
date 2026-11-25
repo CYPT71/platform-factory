@@ -87,3 +87,27 @@ func (r *byteReader) Read(p []byte) (int, error) {
 	r.offset += n
 	return n, nil
 }
+
+func TestRunRejectsBadFlagsAndMissingArguments(t *testing.T) {
+	if err := run([]string{"--unknown-flag"}); err == nil {
+		t.Fatal("expected an error for an unrecognized flag")
+	}
+	if err := run([]string{}); err == nil {
+		t.Fatal("expected an error when --env/--out are both missing")
+	}
+	if err := run([]string{"--env", t.TempDir()}); err == nil {
+		t.Fatal("expected an error when --out is missing")
+	}
+	if err := run([]string{"--verify", t.TempDir(), "--out", "x.tar.gz"}); err == nil {
+		t.Fatal("expected --verify combined with --out to be rejected")
+	}
+	if err := run([]string{"--verify", t.TempDir(), "extra-positional-arg"}); err == nil {
+		t.Fatal("expected a positional argument alongside --verify to be rejected")
+	}
+}
+
+func TestRunVerifyDelegatesToPackagerVerify(t *testing.T) {
+	if err := run([]string{"--verify", filepath.Join(t.TempDir(), "does-not-exist")}); err == nil {
+		t.Fatal("expected verifying a nonexistent distribution to fail")
+	}
+}

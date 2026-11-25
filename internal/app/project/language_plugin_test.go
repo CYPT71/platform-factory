@@ -184,3 +184,17 @@ func TestRuntimeEnvironmentUsesOnlyPackagedPythonDependencies(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeEnvironmentSetsDotnetRootWhenStagedRuntimePresent(t *testing.T) {
+	staged := []project.ExtraFile{{Dest: "/runtime/shared"}}
+	got := RuntimeEnvironment("dotnet", map[string]string{"ASPNETCORE_URLS": "http://+:8080"}, staged)
+	if got["DOTNET_ROOT"] != "/runtime" || got["ASPNETCORE_URLS"] != "http://+:8080" {
+		t.Fatalf("environment=%v", got)
+	}
+	if override := RuntimeEnvironment("dotnet", map[string]string{"DOTNET_ROOT": "/custom"}, staged); override["DOTNET_ROOT"] != "/custom" {
+		t.Fatalf("override changed: %v", override)
+	}
+	if none := RuntimeEnvironment("dotnet", nil, []project.ExtraFile{{Dest: "/app/app.dll"}}); none != nil {
+		t.Fatalf("unexpected DOTNET_ROOT without staged runtime: %v", none)
+	}
+}

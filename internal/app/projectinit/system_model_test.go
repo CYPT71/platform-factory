@@ -119,3 +119,20 @@ func TestWithSystemProposalCopiesExistingPlan(t *testing.T) {
 		t.Fatal("source plan aliases the returned plan")
 	}
 }
+
+func TestSortUnknownsOrdersBySubjectThenReason(t *testing.T) {
+	unknowns := []Unknown{
+		{Subject: "gateway", Reason: "zeta"},
+		{Subject: "database", Reason: "beta"},
+		{Subject: "database", Reason: "alpha"},
+	}
+	sortUnknowns(unknowns)
+	want := []Unknown{
+		{Subject: "database", Reason: "alpha"},
+		{Subject: "database", Reason: "beta"},
+		{Subject: "gateway", Reason: "zeta"},
+	}
+	if !reflect.DeepEqual(unknowns, want) {
+		t.Fatalf("got %+v, want %+v", unknowns, want)
+	}
+}

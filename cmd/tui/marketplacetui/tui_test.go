@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/CYPT71/platform-factory/internal/marketplace"
 )
@@ -307,5 +308,36 @@ func TestSearchCharactersNeverTriggerListShortcuts(t *testing.T) {
 		if m.search.Value() != query {
 			t.Fatalf("query=%q", m.search.Value())
 		}
+	}
+}
+
+func TestSmallTerminalFitsListAndDetailWithoutOverflow(t *testing.T) {
+	idx := sampleIndexForTUI()
+	m := newTestModel(t, idx, t.TempDir())
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	m = updated.(*model)
+	for _, line := range strings.Split(m.View(), "\n") {
+		if lipgloss.Width(line) > 40 {
+			t.Fatalf("list view overflows 40 columns: width=%d line=%q", lipgloss.Width(line), line)
+		}
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(*model)
+	for _, line := range strings.Split(m.View(), "\n") {
+		if lipgloss.Width(line) > 40 {
+			t.Fatalf("detail view overflows 40 columns: width=%d line=%q", lipgloss.Width(line), line)
+		}
+	}
+	// Cancel removal with any key other than y does not delete or quit.
+	m.installed[m.detail.Name] = marketplace.InstalledPlugin{Name: m.detail.Name, Version: m.selectedVersion()}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	m = updated.(*model)
+	if !m.confirmRemove {
+		t.Fatal("expected confirmRemove prompt")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m = updated.(*model)
+	if m.confirmRemove || m.working || !strings.Contains(m.status, "canceled") {
+		t.Fatalf("expected canceled removal, got confirmRemove=%v working=%v status=%q", m.confirmRemove, m.working, m.status)
 	}
 }

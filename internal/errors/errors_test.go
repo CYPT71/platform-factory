@@ -540,3 +540,44 @@ func TestErrorCodesAreUnique(t *testing.T) {
 		seen[code] = true
 	}
 }
+
+func TestWrappedErrorIsMatchesByTypedErrorCode(t *testing.T) {
+	wrapped := Wrap(CodeNotFound, "missing", stderrors.New("underlying")).(*wrappedError)
+	sameCode := Wrap(CodeNotFound, "a different message entirely", stderrors.New("a different underlying error"))
+	if !wrapped.Is(sameCode) {
+		t.Error("expected a match against a TypedError target sharing the same code")
+	}
+	differentCode := Wrap(CodeInternal, "missing", stderrors.New("underlying"))
+	if wrapped.Is(differentCode) {
+		t.Error("expected no match against a TypedError target with a different code")
+	}
+}
+
+// customMessageError is deliberately not *errors.errorString, so comparing
+// against it isolates wrappedError.Is's value-based fallback (matching %v)
+// from its type-based check (matching %T) - both stdlib errors.New errors
+// share the same unexported type regardless of message, so a same-type
+// comparison alone cannot tell those two fallback branches apart.
+type customMessageError string
+
+func (e customMessageError) Error() string { return string(e) }
+
+func TestWrappedErrorIsFallsBackToWrappedErrorComparison(t *testing.T) {
+	wrapped := Wrap(CodeInternal, "msg", stderrors.New("boom")).(*wrappedError)
+	if !wrapped.Is(stderrors.New("boom")) {
+		t.Error("expected a match against a plain error of the same underlying type")
+	}
+	if !wrapped.Is(customMessageError("boom")) {
+		t.Error("expected a match against a different-typed error with an identical message")
+	}
+	if wrapped.Is(customMessageError("a completely different message")) {
+		t.Error("expected no match against a different-typed error with a different message")
+	}
+}
+
+func TestWrappedErrorIsOnNilReceiver(t *testing.T) {
+	var wrapped *wrappedError
+	if wrapped.Is(stderrors.New("anything")) {
+		t.Error("expected a nil receiver to never match")
+	}
+}

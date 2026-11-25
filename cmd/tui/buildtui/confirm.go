@@ -86,6 +86,11 @@ func validReference(image string) bool {
 	return trimmed != "" && trimmed == image && !strings.ContainsAny(image, " \t\r\n\x00")
 }
 
+func validTag(tag string) bool {
+	trimmed := strings.TrimSpace(tag)
+	return !strings.ContainsAny(trimmed, " \t\r\n\x00")
+}
+
 func normalizedTag(tag string) string {
 	tag = strings.TrimSpace(tag)
 	if tag == "" {
@@ -112,6 +117,10 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.err = "image must be non-empty with no surrounding or embedded whitespace"
 				return m, nil
 			}
+			if !validTag(m.tag.Value()) {
+				m.err = "tag must not contain embedded whitespace"
+				return m, nil
+			}
 			m.err = ""
 			m.result = Result{Image: m.image.Value(), Tag: normalizedTag(m.tag.Value()), Confirmed: true}
 			m.done = true
@@ -125,6 +134,7 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		m.err = ""
 	}
 	var commands [2]tea.Cmd
 	m.image, commands[0] = m.image.Update(message)

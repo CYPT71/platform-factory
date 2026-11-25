@@ -35,6 +35,7 @@ type Server struct {
 	StatePath string
 	Audit     *control.AuditJournal
 	CAS       *cache.Store
+	TenantCAS *cache.TenantStoreManager
 
 	// Provenance, if non-nil, stores verified signed completion records
 	// (see verifyCompletionProvenance). Nil disables both storage and, by
@@ -174,19 +175,76 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /lease/submit", s.handleSubmitLease)
 	mux.HandleFunc("GET /lease/status", s.handleLeaseStatus)
 	mux.HandleFunc("GET /workers", s.handleWorkers)
-	if s.CAS != nil {
-		blobs := http.StripPrefix("/cas/blobs/", cache.BlobHandler(s.CAS, cache.DefaultRemoteBlobLimit))
+	metricsHandler := observability.MetricsHandler(observability.DefaultMetrics(), s.controlPlaneMetrics)
+	mux.Handle("GET /metrics", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.VerifiedChains[0]) == 0 || r.TLS.VerifiedChains[0][0] == nil {
+			writeError(w, http.StatusUnauthorized, errors.New("verified mTLS client certificate required"))
+			return
+		}
+		metricsHandler.ServeHTTP(w, r)
+	}))
+	if s.CAS != nil || s.TenantCAS != nil {
+		var sharedBlobs http.Handler
+		if s.CAS != nil {
+			sharedBlobs = http.StripPrefix("/cas/blobs/", cache.BlobHandler(s.CAS, cache.DefaultRemoteBlobLimit))
+		}
 		mux.Handle("/cas/blobs/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Shared CAS has the same CA trust domain as operator submissions.
-			// Also enforce authentication when Routes is embedded by another server.
 			if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.VerifiedChains[0]) == 0 || r.TLS.VerifiedChains[0][0] == nil {
 				writeError(w, http.StatusUnauthorized, errors.New("verified mTLS client certificate required"))
 				return
 			}
-			blobs.ServeHTTP(w, r)
+			leaf := r.TLS.VerifiedChains[0][0]
+			if tenant := mtls.TenantID(leaf); tenant != "" {
+				if s.TenantCAS == nil {
+					writeError(w, http.StatusServiceUnavailable, errors.New("tenant-isolated CAS is not configured"))
+					return
+				}
+				stripped := r.Clone(r.Context())
+				stripped.URL.Path = "/" + r.URL.Path[len("/cas/blobs/"):]
+				s.TenantCAS.ServeBlob(w, stripped, tenant, cache.DefaultRemoteBlobLimit)
+				return
+			}
+			if sharedBlobs == nil {
+				writeError(w, http.StatusForbidden, errors.New("tenant-scoped client certificate required for CAS access"))
+				return
+			}
+			sharedBlobs.ServeHTTP(w, r)
 		}))
 	}
 	return mux
+}
+
+func (s *Server) controlPlaneMetrics() []observability.Metric {
+	now := time.Now().UTC()
+	workers := s.Plane.WorkerStatuses()
+	leases := s.Plane.Leases()
+	var pending, assigned, completed, canceled float64
+	for _, l := range leases {
+		switch l.State {
+		case control.LeasePending:
+			pending++
+		case control.LeaseAssigned:
+			assigned++
+		case control.LeaseCompleted:
+			completed++
+		case control.LeaseCanceled:
+			canceled++
+		}
+	}
+	return []observability.Metric{
+		{Name: "platform_factory_workers_registered", Type: observability.MetricTypeGauge, Value: float64(len(workers)), Timestamp: now, Description: "Registered workers"},
+		{Name: "platform_factory_leases_pending", Type: observability.MetricTypeGauge, Value: pending, Timestamp: now, Description: "Pending leases"},
+		{Name: "platform_factory_leases_assigned", Type: observability.MetricTypeGauge, Value: assigned, Timestamp: now, Description: "Assigned leases"},
+		{Name: "platform_factory_leases_completed_total", Type: observability.MetricTypeCounter, Value: completed, Timestamp: now, Description: "Completed leases"},
+		{Name: "platform_factory_leases_canceled_total", Type: observability.MetricTypeCounter, Value: canceled, Timestamp: now, Description: "Canceled leases"},
+	}
+}
+
+func verifiedTenantID(r *http.Request) string {
+	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.VerifiedChains[0]) == 0 {
+		return ""
+	}
+	return mtls.TenantID(r.TLS.VerifiedChains[0][0])
 }
 
 // verifiedWorkerID returns the CommonName of the request's verified mTLS
@@ -446,6 +504,13 @@ func (s *Server) handleSubmitLease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if certTenant := verifiedTenantID(r); certTenant != "" {
+		if req.Tenant != "" && req.Tenant != certTenant {
+			writeError(w, http.StatusForbidden, fmt.Errorf("certificate tenant %q cannot submit lease for tenant %q", certTenant, req.Tenant))
+			return
+		}
+		req.Tenant = certTenant
+	}
 	if err := s.reserveTenantSlot(req.Tenant); err != nil {
 		observability.Warn("lease submission refused by tenant quota", observability.Fields{"tenant": req.Tenant, "error": err.Error()})
 		writeError(w, http.StatusTooManyRequests, err)
@@ -488,6 +553,10 @@ func (s *Server) handleLeaseStatus(w http.ResponseWriter, r *http.Request) {
 	lease, ok := s.Plane.LeaseStatus(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, fmt.Errorf("%w: %q", control.ErrUnknownLease, id))
+		return
+	}
+	if certTenant := verifiedTenantID(r); certTenant != "" && lease.Tenant != certTenant {
+		writeError(w, http.StatusForbidden, errors.New("certificate tenant cannot inspect another tenant's lease"))
 		return
 	}
 	writeJSON(w, http.StatusOK, lease)

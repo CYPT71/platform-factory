@@ -90,25 +90,40 @@ func LanguagePluginLayer(loaded project.Loaded, stderr io.Writer, execute func(n
 	return tarPath, cleanup, nil
 }
 
-// RuntimeEnvironment makes frozen Python dependencies importable only when
-// those files are actually packaged. An explicitly configured value wins.
-// The source configuration is never mutated, including its environment map.
+// RuntimeEnvironment configures default runtime lookup variables (PYTHONPATH
+// for frozen Python dependencies, DOTNET_ROOT for staged .NET runtimes) without
+// mutating the source configuration. Explicitly configured values always win.
 func RuntimeEnvironment(language string, configured map[string]string, files []project.ExtraFile) map[string]string {
-	if language != "python" {
-		return configured
-	}
-	if _, explicit := configured["PYTHONPATH"]; explicit {
-		return configured
-	}
-	const prefix = "/app/.platform-factory/deps/python/"
-	for _, file := range files {
-		if strings.HasPrefix(file.Dest, prefix) && !strings.HasPrefix(file.Dest, prefix+"runtime/") {
-			env := make(map[string]string, len(configured)+1)
-			for key, value := range configured {
-				env[key] = value
+	switch language {
+	case "python":
+		if _, explicit := configured["PYTHONPATH"]; explicit {
+			return configured
+		}
+		const prefix = "/app/.platform-factory/deps/python/"
+		for _, file := range files {
+			if strings.HasPrefix(file.Dest, prefix) && !strings.HasPrefix(file.Dest, prefix+"runtime/") {
+				env := make(map[string]string, len(configured)+1)
+				for key, value := range configured {
+					env[key] = value
+				}
+				env["PYTHONPATH"] = strings.TrimSuffix(prefix, "/")
+				return env
 			}
-			env["PYTHONPATH"] = strings.TrimSuffix(prefix, "/")
-			return env
+		}
+	case "dotnet":
+		if _, explicit := configured["DOTNET_ROOT"]; explicit {
+			return configured
+		}
+		for _, file := range files {
+			if file.Dest == "/runtime/host" || file.Dest == "/runtime/shared" ||
+				strings.HasPrefix(file.Dest, "/runtime/host/") || strings.HasPrefix(file.Dest, "/runtime/shared/") {
+				env := make(map[string]string, len(configured)+1)
+				for key, value := range configured {
+					env[key] = value
+				}
+				env["DOTNET_ROOT"] = "/runtime"
+				return env
+			}
 		}
 	}
 	return configured

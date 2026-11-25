@@ -370,7 +370,7 @@ func runInit(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "\nreview pf.yaml before running `pf build`")
 	}
 	if ecosystem.Result.Kind != "" {
-		autoProvisionRuntime(context.Background(), dir, ecosystem.Result.Kind, stdout, stderr)
+		autoProvisionRuntime(context.Background(), dir, ecosystem.Result.Kind, *assumeYes, stdout, stderr)
 	}
 	keepArchiveDestination = true
 	return 0

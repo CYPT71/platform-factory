@@ -19,6 +19,7 @@ Options:
   --arch GOARCH          target architecture (default: host)
   --yes                skip the confirmation prompt
   --list               print available components and exit
+  --rollback           restore the previous installation backup in --prefix
   --rosetta         skip Rosetta 2 verification of darwin/amd64 binaries
                        when cross-building from an Apple Silicon host
   -h, --help           show this help
@@ -107,8 +108,16 @@ box_width() {
   done
   echo "$max"
 }
-box_top() { printf '%s\n' "$(accent "╭$(printf '%*s' "$(($1 + 2))" '' | tr ' ' '─')╮")"; }
-box_bottom() { printf '%s\n' "$(accent "╰$(printf '%*s' "$(($1 + 2))" '' | tr ' ' '─')╯")"; }
+box_rule() {
+  local n=$1 out=""
+  while [ "$n" -gt 0 ]; do
+    out="${out}─"
+    n=$((n - 1))
+  done
+  printf '%s' "$out"
+}
+box_top() { printf '%s\n' "$(accent "╭$(box_rule "$(($1 + 2))")╮")"; }
+box_bottom() { printf '%s\n' "$(accent "╰$(box_rule "$(($1 + 2))")╯")"; }
 # box_line WIDTH STYLEFN TEXT — width and padding are computed from the
 # plain TEXT so ANSI escapes from STYLEFN never throw off the alignment.
 box_line() {
@@ -150,6 +159,7 @@ flag_os=$(go env GOHOSTOS)
 flag_arch=$(go env GOHOSTARCH)
 flag_yes=false
 flag_list=false
+flag_rollback=false
 flag_rosetta_verify=false
 
 while [ "$#" -gt 0 ]; do
@@ -160,11 +170,35 @@ while [ "$#" -gt 0 ]; do
     --arch) [ "$#" -ge 2 ] || { echo "error: --arch requires a value" >&2; exit 2; }; flag_arch=$2; shift 2 ;;
     --yes) flag_yes=true; shift ;;
     --list) flag_list=true; shift ;;
+    --rollback) flag_rollback=true; shift ;;
     --rosetta) flag_rosetta_verify=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [ "$flag_rollback" = true ]; then
+  [ -d "$flag_prefix" ] || { echo "error: install directory '$flag_prefix' does not exist" >&2; exit 1; }
+  flag_prefix=$(cd "$flag_prefix" && pwd)
+  latest_link="$flag_prefix/.pf-backup/latest"
+  [ -L "$latest_link" ] || [ -d "$latest_link" ] || { echo "error: no backup found under $flag_prefix/.pf-backup" >&2; exit 1; }
+  backup_dir=$(cd "$latest_link" && pwd)
+  restored=0
+  for item in "$backup_dir"/*; do
+    [ -e "$item" ] || continue
+    base=$(basename "$item")
+    cp -f "$item" "$flag_prefix/.pf-restore-$base"
+    chmod 0755 "$flag_prefix/.pf-restore-$base"
+    mv -f "$flag_prefix/.pf-restore-$base" "$flag_prefix/$base"
+    restored=$((restored + 1))
+  done
+  if [ "$restored" -eq 0 ]; then
+    echo "error: backup directory $backup_dir is empty" >&2
+    exit 1
+  fi
+  echo "rolled back $restored binaries into $flag_prefix from $backup_dir"
+  exit 0
+fi
 
 if [ "$flag_list" = true ]; then
   print_banner
@@ -296,12 +330,17 @@ if [ "$interactive" = true ]; then
   echo
 fi
 
-# --- build --------------------------------------------------------------
+# --- build (atomic staging + backup for safe upgrade & rollback) --------
 mkdir -p "$flag_prefix"
 # Builds run from individual module directories. Resolve the user-facing
 # prefix first so a relative path always remains relative to the directory
 # where install.sh was invoked, not to whichever module is being compiled.
 flag_prefix=$(cd "$flag_prefix" && pwd)
+stage_dir=$(mktemp -d "$flag_prefix/.pf-install-stage.XXXXXX")
+cleanup_stage() {
+  rm -rf "$stage_dir"
+}
+trap cleanup_stage EXIT INT TERM
 version=$(git -C "$repo_root" describe --tags --always --dirty 2>/dev/null || echo dev)
 suffix=
 [ "$flag_os" = windows ] && suffix=.exe
@@ -337,6 +376,7 @@ spin() {
   return "$status"
 }
 
+staged_names=()
 build_failed=false
 for key in $final_keys; do
   idx=$(component_index "$key")
@@ -345,7 +385,7 @@ for key in $final_keys; do
       echo "  $(dim "–") $name skipped: OCI runtime integration requires linux/amd64 (target is $flag_os/$flag_arch)"
       continue
     fi
-    out="$flag_prefix/$name$suffix"
+    out="$stage_dir/$name$suffix"
     ldflags="-s -w"
     [ "$name" = platform-factory ] && ldflags="$ldflags -X main.version=$version"
     cgo=0
@@ -363,6 +403,7 @@ for key in $final_keys; do
       cd "$module_dir"
       CGO_ENABLED="$cgo" GOOS="$flag_os" GOARCH="$flag_arch" \
         go build -trimpath -ldflags="$ldflags" -o "$out" "$package"
+      chmod 0755 "$out"
       if [ "$cgo" = 1 ]; then
         codesign --force --sign - --entitlements "$repo_root/scripts/microvm/hvf.entitlements" "$out"
       fi
@@ -372,12 +413,15 @@ for key in $final_keys; do
       echo "$(red "build failed:") $name" >&2
       cat "$log" >&2
       build_failed=true
+    else
+      staged_names+=("$name$suffix")
     fi
     rm -f "$log"
   done
 done
 
 if [ "$build_failed" = true ]; then
+  echo "error: build failed; existing binaries in $flag_prefix were left untouched" >&2
   exit 1
 fi
 
@@ -388,18 +432,21 @@ case " $final_keys " in
   *" core "*)
     for language in go python node java dotnet rust ruby php; do
       name="platform-factory-lang-$language"
-      out="$flag_prefix/$name$suffix"
+      out="$stage_dir/$name$suffix"
       log=$(mktemp)
       (
         cd "$repo_root/plugins/lang-$language"
         CGO_ENABLED=0 GOOS="$flag_os" GOARCH="$flag_arch" \
           go build -trimpath -ldflags="-s -w" -o "$out" .
+        chmod 0755 "$out"
       ) >"$log" 2>&1 &
       build_pid=$!
       if ! spin "$build_pid" "$name"; then
         echo "$(red "build failed:") $name" >&2
         cat "$log" >&2
         build_failed=true
+      else
+        staged_names+=("$name$suffix")
       fi
       rm -f "$log"
     done
@@ -407,26 +454,18 @@ case " $final_keys " in
 esac
 
 if [ "$build_failed" = true ]; then
+  echo "error: build failed; existing binaries in $flag_prefix were left untouched" >&2
   exit 1
 fi
 
-# A successful cross-build only proves `go build` accepted the target
-# triple - it says nothing about whether the result can actually launch.
-# darwin/amd64 on an Apple Silicon host is the one target this repo can
-# actually execute and verify locally, through Rosetta 2 - so do that, on
-# everything with a plain, side-effect-free entry point: the two commands
-# respond to `-h`, and every language plugin prints its usage and exits
-# on a bare invocation with no args (sdk/langplugin.Dispatch /
-# plugins/lang-go's own check). The rest are a guest-only init process, a
-# long-running daemon, or a distributed-mode binary not meant for direct
-# invocation on the host. Skippable with --no-rosetta.
+# Verify Rosetta 2 on staged binaries before touching the live prefix.
 if [ "$flag_rosetta_verify" = true ] && [ "$flag_os/$flag_arch" = darwin/amd64 ] && [ "$host_goos/$host_goarch" = darwin/arm64 ]; then
   if ! arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
     echo "error: Rosetta 2 is required to verify darwin/amd64 binaries on this Apple Silicon host; install it with: softwareupdate --install-rosetta --agree-to-license" >&2
     exit 1
   fi
   for name in platform-factory oci-builder; do
-    out="$flag_prefix/$name$suffix"
+    out="$stage_dir/$name$suffix"
     [ -e "$out" ] || continue
     echo "verifying $name runs under Rosetta 2 (darwin/amd64 on $host_goos/$host_goarch)..." >&2
     output=$(arch -x86_64 "$out" -h 2>&1) || true
@@ -439,7 +478,7 @@ if [ "$flag_rosetta_verify" = true ] && [ "$flag_os/$flag_arch" = darwin/amd64 ]
     *" core "*)
       for language in go python node java dotnet rust ruby php; do
         name="platform-factory-lang-$language"
-        out="$flag_prefix/$name$suffix"
+        out="$stage_dir/$name$suffix"
         [ -e "$out" ] || continue
         echo "verifying $name runs under Rosetta 2 (darwin/amd64 on $host_goos/$host_goarch)..." >&2
         output=$(arch -x86_64 "$out" 2>&1) || true
@@ -451,6 +490,45 @@ if [ "$flag_rosetta_verify" = true ] && [ "$flag_os/$flag_arch" = darwin/amd64 ]
       ;;
   esac
 fi
+
+# Back up any previously installed binaries before committing the staged set.
+backup_dir=""
+backed_up=0
+for bin_file in "${staged_names[@]}"; do
+  if [ -f "$flag_prefix/$bin_file" ] && [ ! -L "$flag_prefix/$bin_file" ]; then
+    if [ -z "$backup_dir" ]; then
+      backup_stamp=$(date -u +%Y%m%dT%H%M%SZ)-$$
+      backup_dir="$flag_prefix/.pf-backup/$backup_stamp"
+      mkdir -p "$backup_dir"
+    fi
+    cp -p "$flag_prefix/$bin_file" "$backup_dir/$bin_file"
+    backed_up=$((backed_up + 1))
+  fi
+done
+if [ -n "$backup_dir" ] && [ "$backed_up" -gt 0 ]; then
+  ln -sfn "$backup_dir" "$flag_prefix/.pf-backup/latest"
+fi
+
+# Atomically commit staged binaries into the prefix; restore backup on error.
+installed_manifest="$stage_dir/.pf-install-manifest.sha256"
+: > "$installed_manifest"
+for bin_file in "${staged_names[@]}"; do
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$stage_dir" && sha256sum "$bin_file") >> "$installed_manifest"
+  elif command -v shasum >/dev/null 2>&1; then
+    (cd "$stage_dir" && shasum -a 256 "$bin_file") >> "$installed_manifest"
+  fi
+  if ! mv -f "$stage_dir/$bin_file" "$flag_prefix/$bin_file"; then
+    echo "error: failed to install $bin_file; restoring previous binaries" >&2
+    if [ -n "$backup_dir" ]; then
+      for old in "$backup_dir"/*; do
+        [ -e "$old" ] && mv -f "$old" "$flag_prefix/$(basename "$old")" || true
+      done
+    fi
+    exit 1
+  fi
+done
+mv -f "$installed_manifest" "$flag_prefix/.pf-install-manifest.sha256"
 
 # pf is a plain alias for platform-factory. Only created if
 # platform-factory was actually part of this install. A symlink on POSIX

@@ -204,6 +204,19 @@ func TestImageFilesIncludesProjectAndSharedDependencies(t *testing.T) {
 	if err := loaded.VerifyFreezeInventory(); err == nil || !strings.Contains(err.Error(), "changed after") {
 		t.Fatalf("changed input was accepted: %v", err)
 	}
+	// Restore app.py, then add an untracked file after freeze: must fail closed.
+	if err := os.WriteFile(filepath.Join(root, "app.py"), []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := loaded.VerifyFreezeInventory(); err != nil {
+		t.Fatalf("restored input should verify: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "extra.py"), []byte("print('unfrozen')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := loaded.VerifyFreezeInventory(); err == nil || !strings.Contains(err.Error(), "changed after") {
+		t.Fatalf("added file after freeze was accepted: %v", err)
+	}
 }
 
 // TestVerifyFreezeInventoryRejectsAddedInput proves a file added to an
@@ -343,5 +356,35 @@ include:
 	loaded.Config.Include[0].Source = "missing"
 	if _, err := loaded.ImageFiles(); err == nil {
 		t.Fatal("expected missing source error")
+	}
+}
+
+func TestImageFilesExcludesKeysAndLifecycleReceipts(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "app.py"), "print('ok')\n", 0o644)
+	writeTestFile(t, filepath.Join(root, ".platform-factory", "keys", "release.key"), "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n", 0o600)
+	writeTestFile(t, filepath.Join(root, ".platform-factory", "published.json"), `{"reference":"r@sha256:a"}`, 0o644)
+	writeTestFile(t, filepath.Join(root, ".platform-factory", "deployed.json"), `{"name":"svc"}`, 0o644)
+	writeTestFile(t, filepath.Join(root, ".platform-factory", "deps", "python", "pkg.py"), "x = 1\n", 0o644)
+	writeTestFile(t, filepath.Join(root, "pf.yaml"), "version: 1\nlanguage: python\nartifact: app.py\n", 0o644)
+	loaded, err := Load(filepath.Join(root, "pf.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := loaded.ImageFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, file := range files {
+		seen[file.Dest] = true
+		if strings.Contains(file.Dest, "/.platform-factory/keys/") ||
+			file.Dest == "/app/.platform-factory/published.json" ||
+			file.Dest == "/app/.platform-factory/deployed.json" {
+			t.Fatalf("unexpected sensitive or lifecycle file swept into image: %s", file.Dest)
+		}
+	}
+	if !seen["/app/app.py"] || !seen["/app/.platform-factory/deps/python/pkg.py"] {
+		t.Fatalf("expected app and deps in image files, got %v", seen)
 	}
 }

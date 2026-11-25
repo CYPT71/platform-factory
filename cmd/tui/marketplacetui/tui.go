@@ -97,7 +97,8 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch message := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = message.Width, message.Height
-		m.list.SetSize(max(message.Width-2, 20), max(message.Height-9, 5))
+		m.search.Width = max(1, min(60, message.Width-16))
+		m.list.SetSize(max(1, message.Width-2), max(3, message.Height-10))
 	case actionResult:
 		m.working = false
 		m.status, m.statusIsError = message.status, message.err != nil

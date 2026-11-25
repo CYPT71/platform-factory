@@ -40,12 +40,32 @@ func TestDownThenEnterSelectsImageAndPromptsForAReference(t *testing.T) {
 	if got.done || !got.editingImage {
 		t.Fatalf("expected the image reference prompt to open, got done=%v editingImage=%v", got.done, got.editingImage)
 	}
-	updated, _ = got.Update(key("p"))
-	got = updated.(*model)
+	pinned := "python@sha256:" + strings.Repeat("a", 64)
+	got.imageInput.SetValue(pinned)
 	updated, _ = got.Update(key("enter"))
 	got = updated.(*model)
-	if !got.done || got.result.Source != SourceImage || got.result.Image != "p" {
+	if !got.done || got.result.Source != SourceImage || got.result.Image != pinned {
 		t.Fatalf("result=%+v", got.result)
+	}
+}
+
+func TestUnpinnedImageReferenceIsRejectedAndRetryable(t *testing.T) {
+	m := newTestModel("")
+	updated, _ := m.Update(key("enter"))
+	got := updated.(*model)
+	got.imageInput.SetValue("python:3.12-slim")
+	updated, _ = got.Update(key("enter"))
+	got = updated.(*model)
+	if got.done || !strings.Contains(got.err, "digest-pinned") {
+		t.Fatalf("expected digest-pinned validation error, got done=%v err=%q", got.done, got.err)
+	}
+	// Editing clears error and lets user retry cleanly.
+	pinned := "python@sha256:" + strings.Repeat("b", 64)
+	got.imageInput.SetValue(pinned)
+	updated, _ = got.Update(key("enter"))
+	got = updated.(*model)
+	if !got.done || got.result.Source != SourceImage || got.result.Image != pinned {
+		t.Fatalf("expected confirmation after retry, got done=%v result=%+v", got.done, got.result)
 	}
 }
 

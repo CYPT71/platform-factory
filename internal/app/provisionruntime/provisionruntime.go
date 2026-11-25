@@ -25,6 +25,7 @@ import (
 	"github.com/CYPT71/platform-factory/internal/atomicfile"
 	"github.com/CYPT71/platform-factory/internal/project"
 	"github.com/CYPT71/platform-factory/internal/shellquote"
+	"gopkg.in/yaml.v3"
 )
 
 // Manifest is what a language plugin's "runtime" subcommand reports:
@@ -133,10 +134,27 @@ func (s *service) ProvisionFromRoot(loaded project.Loaded, language, imageRoot s
 	if manifest.Runtime == "" {
 		return Manifest{}, errors.New("plugin reported no runtime path")
 	}
-	if err := appendRuntimeToConfig(loaded.File, manifest, loaded.Config.Artifact); err != nil {
+	detectedArch := detectRuntimeELFArch(filepath.Join(loaded.Root, filepath.FromSlash(manifest.Runtime)))
+	if err := appendRuntimeToConfigWithArch(loaded.File, manifest, loaded.Config.Artifact, detectedArch); err != nil {
 		return Manifest{}, fmt.Errorf("update %s: %w", filepath.Base(loaded.File), err)
 	}
 	return manifest, nil
+}
+
+func detectRuntimeELFArch(path string) string {
+	f, err := elf.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	switch f.Machine {
+	case elf.EM_AARCH64:
+		return "arm64"
+	case elf.EM_X86_64:
+		return "amd64"
+	default:
+		return ""
+	}
 }
 
 // appendRuntimeToConfig appends runtime/args/include YAML to the end of
@@ -147,11 +165,28 @@ func (s *service) ProvisionFromRoot(loaded project.Loaded, language, imageRoot s
 // file: a malformed append must fail here, on this command, not
 // silently corrupt the project's config for the next one.
 func appendRuntimeToConfig(configPath string, manifest Manifest, artifact string) error {
+	return appendRuntimeToConfigWithArch(configPath, manifest, artifact, "")
+}
+
+func appendRuntimeToConfigWithArch(configPath string, manifest Manifest, artifact, targetArch string) error {
 	existing, err := os.ReadFile(configPath)
 	if err != nil {
 		return err
 	}
+	var rawMeta struct {
+		Platform string `yaml:"platform"`
+	}
+	_ = yaml.Unmarshal(existing, &rawMeta)
 	var addition strings.Builder
+	if targetArch != "" {
+		wantPlatform := "linux/" + targetArch
+		if rawMeta.Platform != "" && rawMeta.Platform != wantPlatform {
+			return fmt.Errorf("existing platform %q conflicts with provisioned runtime architecture %q", rawMeta.Platform, wantPlatform)
+		}
+		if rawMeta.Platform == "" && targetArch != "amd64" {
+			fmt.Fprintf(&addition, "platform: %s\n", yamlQuoteRuntime(wantPlatform))
+		}
+	}
 	fmt.Fprintf(&addition, "runtime: %s\n", yamlQuoteRuntime(manifest.Runtime))
 	if artifact != "" {
 		// project.Config has no working_dir field, and the interpreter's
@@ -210,7 +245,11 @@ func yamlQuoteRuntime(s string) string {
 // registry pull entirely on a matching host. Extend this as more
 // language plugins implement a "runtime" subcommand (currently only
 // plugins/lang-python does).
-var hostInterpreterNames = map[string]string{"python": "python3"}
+var hostInterpreterNames = map[string]string{
+	"python": "python3",
+	"node":   "node",
+	"dotnet": "dotnet",
+}
 
 // ResolveHostCandidate looks for language's own interpreter already on
 // PATH and returns its path only if it's a real ELF binary for

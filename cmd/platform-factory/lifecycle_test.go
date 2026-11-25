@@ -2318,3 +2318,22 @@ func TestTcpProbeAndResourceRequestsShapes(t *testing.T) {
 		t.Fatalf("resources=%v", resources)
 	}
 }
+
+func TestWriteDeployJSONSurfacesEncodeErrors(t *testing.T) {
+	var out, diagnostics bytes.Buffer
+	if code := writeDeployJSON(&out, &diagnostics, map[string]any{"value": func() {}}); code != 1 {
+		t.Fatalf("code=%d, want 1 for an unencodable value", code)
+	}
+	if !strings.Contains(diagnostics.String(), "platform-factory deploy: encode output:") {
+		t.Fatalf("unexpected stderr: %s", diagnostics.String())
+	}
+
+	out.Reset()
+	diagnostics.Reset()
+	if code := writeDeployJSON(&out, &diagnostics, map[string]any{"status": "deployed"}); code != 0 {
+		t.Fatalf("code=%d, want 0 for an encodable value; stderr=%s", code, diagnostics.String())
+	}
+	if !strings.Contains(out.String(), `"status":"deployed"`) {
+		t.Fatalf("unexpected output: %s", out.String())
+	}
+}

@@ -129,8 +129,8 @@ func noLangpluginResolve(string) (string, error) {
 
 func TestResolveHostCandidateReportsNoneForAnUnsupportedLanguage(t *testing.T) {
 	svc := New(noLangpluginResolve)
-	if got := svc.ResolveHostCandidate("node", "amd64"); got != "" {
-		t.Fatalf("got=%q, want empty - no language plugin implements a runtime subcommand for node yet", got)
+	if got := svc.ResolveHostCandidate("ruby", "amd64"); got != "" {
+		t.Fatalf("got=%q, want empty - no language plugin implements a runtime subcommand for ruby yet", got)
 	}
 }
 
@@ -369,5 +369,23 @@ func TestServicePullImageRootfsDelegatesToTheInjectedFunc(t *testing.T) {
 	}
 	if gotRef != "python@sha256:abc" || gotArch != "amd64" || gotDest != "/dest" {
 		t.Fatalf("ref=%q arch=%q dest=%q", gotRef, gotArch, gotDest)
+	}
+}
+
+func TestDetectRuntimeELFArchMapsMachineToArchName(t *testing.T) {
+	dir := t.TempDir()
+	for machine, want := range map[elf.Machine]string{
+		elf.EM_X86_64:  "amd64",
+		elf.EM_AARCH64: "arm64",
+		elf.EM_386:     "",
+	} {
+		path := filepath.Join(dir, "bin-"+want+machine.String())
+		writeMinimalELF(t, path, machine)
+		if got := detectRuntimeELFArch(path); got != want {
+			t.Errorf("machine=%v: got %q, want %q", machine, got, want)
+		}
+	}
+	if got := detectRuntimeELFArch(filepath.Join(dir, "does-not-exist")); got != "" {
+		t.Errorf("missing file: got %q, want empty", got)
 	}
 }

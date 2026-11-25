@@ -83,6 +83,13 @@ func ParseBuildLayerFlags(args []string) (root, output, dest string, err error) 
 // BuildLayer validates the dependency directory and packages it using the
 // deterministic layer format shared by every language plugin.
 func BuildLayer(args []string, dependenciesPath, pluginName string) error {
+	return BuildLayerExcluding(args, dependenciesPath, pluginName, nil)
+}
+
+// BuildLayerExcluding is BuildLayer with an optional set of relative
+// subdirectories (slash-separated, relative to dependenciesPath, e.g. ".bin")
+// to omit from the layer.
+func BuildLayerExcluding(args []string, dependenciesPath, pluginName string, skipRelDirs map[string]bool) error {
 	root, output, dest, err := ParseBuildLayerFlags(args)
 	if err != nil {
 		return err
@@ -95,7 +102,7 @@ func BuildLayer(args []string, dependenciesPath, pluginName string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("%s is not a directory", dependenciesPath)
 	}
-	return WriteDeterministicTar(source, dest, output)
+	return WriteDeterministicTarExcluding(source, dest, output, skipRelDirs)
 }
 
 // WriteDeterministicTar tars every regular file and directory under
@@ -106,6 +113,12 @@ func BuildLayer(args []string, dependenciesPath, pluginName string) error {
 // (oci/extralayers.go) would reject them anyway - refusing
 // here gives a clearer, earlier error.
 func WriteDeterministicTar(source, destPrefix, output string) error {
+	return WriteDeterministicTarExcluding(source, destPrefix, output, nil)
+}
+
+// WriteDeterministicTarExcluding is WriteDeterministicTar with optional
+// relative subdirectories skipped during traversal.
+func WriteDeterministicTarExcluding(source, destPrefix, output string, skipRelDirs map[string]bool) error {
 	info, err := os.Lstat(source)
 	if err != nil {
 		return fmt.Errorf("read layer source: %w", err)
@@ -154,13 +167,17 @@ func WriteDeterministicTar(source, destPrefix, output string) error {
 		if err != nil {
 			return err
 		}
+		relSlash := filepath.ToSlash(rel)
+		if info.IsDir() && skipRelDirs[relSlash] {
+			return filepath.SkipDir
+		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("refusing to package symlink %s (host-supplied layers may not contain them)", rel)
 		}
 		if !info.Mode().IsRegular() && !info.IsDir() {
 			return fmt.Errorf("refusing to package non-regular file %s (mode %s)", rel, info.Mode())
 		}
-		entries = append(entries, entry{relPath: filepath.ToSlash(rel), info: info})
+		entries = append(entries, entry{relPath: relSlash, info: info})
 		return nil
 	})
 	if err != nil {

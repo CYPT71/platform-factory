@@ -73,6 +73,10 @@ type Client struct {
 	// images - that every other Client caller (publish, verify-release)
 	// neither needs nor should opt into.
 	FollowBlobRedirects bool
+	// RetryBaseDelay configures the initial backoff between retries for
+	// idempotent GET/HEAD requests on transient HTTP 429/502/503/504 responses.
+	// Zero defaults to 100ms; negative disables transient retries.
+	RetryBaseDelay time.Duration
 
 	referrersMu sync.Mutex
 	mu          sync.RWMutex
@@ -781,7 +785,51 @@ func (c *Client) doAccept(ctx context.Context, method string, target Reference, 
 	return c.doURL(ctx, method, endpoint, body, contentType, accept, size)
 }
 
+func isRetryableTransientStatus(code int) bool {
+	return code == http.StatusTooManyRequests ||
+		code == http.StatusBadGateway ||
+		code == http.StatusServiceUnavailable ||
+		code == http.StatusGatewayTimeout
+}
+
+func (c *Client) retryDelay(attempt int) time.Duration {
+	if c.RetryBaseDelay < 0 {
+		return 0
+	}
+	base := c.RetryBaseDelay
+	if base == 0 {
+		base = 100 * time.Millisecond
+	}
+	return base << attempt
+}
+
 func (c *Client) doURL(ctx context.Context, method string, endpoint *url.URL, body io.Reader, contentType, accept string, size int64) (*http.Response, error) {
+	canRetryTransient := body == nil && (method == http.MethodGet || method == http.MethodHead) && c.RetryBaseDelay >= 0
+	maxAttempts := 1
+	if canRetryTransient {
+		maxAttempts = 3
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		response, err := c.doURLOnce(ctx, method, endpoint, body, contentType, accept, size)
+		if err != nil {
+			return nil, err
+		}
+		if !canRetryTransient || !isRetryableTransientStatus(response.StatusCode) || attempt+1 >= maxAttempts {
+			return response, nil
+		}
+		_ = response.Body.Close()
+		timer := time.NewTimer(c.retryDelay(attempt))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, errors.New("registry: request retry loop exhausted")
+}
+
+func (c *Client) doURLOnce(ctx context.Context, method string, endpoint *url.URL, body io.Reader, contentType, accept string, size int64) (*http.Response, error) {
 	request, err := c.newRequest(ctx, method, endpoint, body, contentType, accept, size)
 	if err != nil {
 		return nil, err
@@ -790,10 +838,13 @@ func (c *Client) doURL(ctx context.Context, method string, endpoint *url.URL, bo
 	if err != nil {
 		return nil, fmt.Errorf("registry: %s %s: %w", method, endpoint.Redacted(), err)
 	}
-	if response.StatusCode != http.StatusUnauthorized || request.Header.Get("Authorization") != "" && c.currentToken() != "" {
+	if response.StatusCode != http.StatusUnauthorized {
 		return response, nil
 	}
 	challenge := response.Header.Get("WWW-Authenticate")
+	if strings.TrimSpace(challenge) == "" {
+		return response, nil
+	}
 	_ = response.Body.Close()
 	if err := c.authorize(ctx, challenge); err != nil {
 		return nil, err

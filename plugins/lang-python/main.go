@@ -118,6 +118,16 @@ func pythonImports(source string) ([]string, bool) {
 // dependencies end up during freeze, only how they reach the image.
 const depsRelPath = ".platform-factory/deps/python"
 
+func pythonExecutable() string {
+	if _, err := exec.LookPath("python"); err == nil {
+		return "python"
+	}
+	if _, err := exec.LookPath("python3"); err == nil {
+		return "python3"
+	}
+	return "python"
+}
+
 func runFreeze(args []string) error {
 	root, err := langplugin.ParseRootFlag("freeze", args)
 	if err != nil {
@@ -130,8 +140,9 @@ func runFreeze(args []string) error {
 	if !langplugin.FileExists(filepath.Join(root, requirements)) {
 		return fmt.Errorf("no requirements.lock or requirements.txt found in %s", root)
 	}
+	py := pythonExecutable()
 	target := filepath.Join(root, depsRelPath)
-	if err := langplugin.RunIn(root, "python", "-m", "pip", "install", "--requirement", requirements, "--target", depsRelPath); err != nil {
+	if err := langplugin.RunIn(root, py, "-m", "pip", "install", "--requirement", requirements, "--target", depsRelPath); err != nil {
 		return fmt.Errorf("pip install: %w", err)
 	}
 	lockFile, err := os.Create(filepath.Join(root, "requirements.lock"))
@@ -139,7 +150,7 @@ func runFreeze(args []string) error {
 		return fmt.Errorf("create requirements.lock: %w", err)
 	}
 	defer lockFile.Close()
-	cmd := exec.Command("python", "-m", "pip", "freeze", "--path", target)
+	cmd := exec.Command(py, "-m", "pip", "freeze", "--path", target)
 	cmd.Dir = root
 	cmd.Stdout = lockFile
 	cmd.Stderr = os.Stderr

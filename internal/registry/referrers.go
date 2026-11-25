@@ -12,6 +12,80 @@ import (
 	"strings"
 )
 
+// ReferrerDescriptor describes one OCI 1.1 artifact attached to a subject digest.
+type ReferrerDescriptor struct {
+	MediaType    string            `json:"mediaType"`
+	ArtifactType string            `json:"artifactType,omitempty"`
+	Digest       string            `json:"digest"`
+	Size         int64             `json:"size"`
+	Annotations  map[string]string `json:"annotations,omitempty"`
+}
+
+// ListReferrers queries the OCI 1.1 referrers API for subjectDigest and falls
+// back to the OCI 1.1 referrers tag schema (sha256-<hex>) when the registry
+// returns HTTP 404 for /referrers/<digest>.
+func (c *Client) ListReferrers(ctx context.Context, target Reference, subjectDigest string) ([]ReferrerDescriptor, error) {
+	wantHex, err := digestHex(subjectDigest)
+	if err != nil {
+		return nil, err
+	}
+	response, err := c.doAccept(ctx, http.MethodGet, target, "/referrers/"+url.PathEscape(subjectDigest), nil, "", indexMediaType, -1)
+	if err != nil {
+		return nil, err
+	}
+	var body []byte
+	switch response.StatusCode {
+	case http.StatusOK:
+		body, err = io.ReadAll(io.LimitReader(response.Body, maxResponseBody+1))
+		_ = response.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("registry: read referrers: %w", err)
+		}
+	case http.StatusNotFound:
+		_ = response.Body.Close()
+		tag := "sha256-" + wantHex
+		fallbackResp, fallbackErr := c.doAccept(ctx, http.MethodGet, target, "/manifests/"+url.PathEscape(tag), nil, "", indexMediaType, -1)
+		if fallbackErr != nil {
+			return nil, fallbackErr
+		}
+		if fallbackResp.StatusCode == http.StatusNotFound {
+			_ = fallbackResp.Body.Close()
+			return nil, nil
+		}
+		if fallbackResp.StatusCode != http.StatusOK {
+			defer fallbackResp.Body.Close()
+			return nil, responseError("get referrers fallback", fallbackResp)
+		}
+		body, err = io.ReadAll(io.LimitReader(fallbackResp.Body, maxResponseBody+1))
+		_ = fallbackResp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("registry: read referrers fallback: %w", err)
+		}
+	default:
+		defer response.Body.Close()
+		return nil, responseError("list referrers", response)
+	}
+	if len(body) > maxResponseBody {
+		return nil, errors.New("registry: referrers index exceeds size limit")
+	}
+	var parsed struct {
+		SchemaVersion int                  `json:"schemaVersion"`
+		Manifests     []ReferrerDescriptor `json:"manifests"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("registry: decode referrers index: %w", err)
+	}
+	if parsed.SchemaVersion != 2 {
+		return nil, fmt.Errorf("registry: unexpected referrers schemaVersion %d", parsed.SchemaVersion)
+	}
+	for _, d := range parsed.Manifests {
+		if _, err := digestHex(d.Digest); err != nil || d.Size < 0 {
+			return nil, fmt.Errorf("registry: invalid referrer descriptor %q", d.Digest)
+		}
+	}
+	return parsed.Manifests, nil
+}
+
 // updateReferrersFallback implements the OCI Distribution referrers tag schema
 // when a registry does not acknowledge subject processing with OCI-Subject.
 // Preserve unknown metadata, deduplicate descriptors, and never replace a

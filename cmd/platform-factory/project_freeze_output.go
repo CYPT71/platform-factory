@@ -6,16 +6,27 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+func runFreezeExec(execute projectExecutor, name string, args []string, dir string, stdout, stderr io.Writer) error {
+	err := execute(name, args, dir, stdout, stderr)
+	if err != nil && name == "python" && errors.Is(err, exec.ErrNotFound) {
+		if _, lookErr := exec.LookPath("python3"); lookErr == nil {
+			return execute("python3", args, dir, stdout, stderr)
+		}
+	}
+	return err
+}
 
 // executeFreezeStep publishes redirected output only after the producer has
 // succeeded. Root-relative operations prevent lockfile symlinks escaping the
 // project. Failure leaves the previous lock and its permissions intact.
 func executeFreezeStep(loadedRoot string, step freezeStep, diagnostics io.Writer, execute projectExecutor) error {
 	if step.output == "" {
-		return execute(step.args[0], step.args[1:], loadedRoot, diagnostics, diagnostics)
+		return runFreezeExec(execute, step.args[0], step.args[1:], loadedRoot, diagnostics, diagnostics)
 	}
 	relative := filepath.Clean(step.output)
 	if filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
@@ -46,7 +57,7 @@ func executeFreezeStep(loadedRoot string, step freezeStep, diagnostics io.Writer
 	}
 	defer root.Remove(temporary)
 	defer file.Close()
-	if err := execute(step.args[0], step.args[1:], loadedRoot, file, diagnostics); err != nil {
+	if err := runFreezeExec(execute, step.args[0], step.args[1:], loadedRoot, file, diagnostics); err != nil {
 		return err
 	}
 	if err := file.Chmod(mode); err != nil {

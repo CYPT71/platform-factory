@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGetManifestFetchesByTagAndVerifiesDigestFetch(t *testing.T) {
@@ -137,5 +138,81 @@ func TestGetBlobEnforcesFetchSizeLimit(t *testing.T) {
 	if _, err := client.GetBlob(context.Background(), target, digest); err == nil ||
 		!strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("expected a fetch-limit error, got %v", err)
+	}
+}
+
+func TestGetManifestRetriesTransientErrorsAndRefreshesExpiredBearerToken(t *testing.T) {
+	payload := []byte(`{"schemaVersion":2}`)
+	sum := sha256.Sum256(payload)
+	digest := "sha256:" + hex.EncodeToString(sum[:])
+	target := Reference{Registry: "registry.example", Repository: "team/service"}
+
+	attempts := 0
+	tokenFetches := 0
+	client := &Client{
+		Scheme:         "https",
+		RetryBaseDelay: time.Millisecond,
+		token:          "expired-token",
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) *http.Response {
+			if r.URL.Host == "auth.example" {
+				tokenFetches++
+				return response(http.StatusOK, "", strings.NewReader(`{"token":"fresh-token"}`))
+			}
+			attempts++
+			if attempts == 1 {
+				resp := response(http.StatusUnauthorized, "", strings.NewReader("expired"))
+				resp.Header.Set("WWW-Authenticate", `Bearer realm="https://auth.example/token",service="registry.example",scope="repository:team/service:pull"`)
+				return resp
+			}
+			if attempts == 2 {
+				return response(http.StatusServiceUnavailable, "", strings.NewReader("try again"))
+			}
+			if r.Header.Get("Authorization") != "Bearer fresh-token" {
+				return response(http.StatusUnauthorized, "", strings.NewReader("wrong token"))
+			}
+			return response(http.StatusOK, "", bytes.NewReader(payload))
+		})},
+	}
+
+	got, _, err := client.GetManifest(context.Background(), target, digest)
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("got=%s want %s", got, payload)
+	}
+	if tokenFetches != 1 || attempts != 3 {
+		t.Fatalf("tokenFetches=%d attempts=%d, want 1 and 3", tokenFetches, attempts)
+	}
+}
+
+func TestListReferrersNativeAndFallback(t *testing.T) {
+	subject := "sha256:" + strings.Repeat("a", 64)
+	artDigest := "sha256:" + strings.Repeat("b", 64)
+	target := Reference{Registry: "registry.example", Repository: "team/service"}
+	indexJSON := `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","artifactType":"application/vnd.example.sig","digest":"` + artDigest + `","size":42}]}`
+
+	// Native OCI 1.1 /referrers/<digest>
+	nativeClient := &Client{HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) *http.Response {
+		if r.URL.Path == "/v2/team/service/referrers/"+subject {
+			return response(http.StatusOK, "", strings.NewReader(indexJSON))
+		}
+		return response(http.StatusNotFound, "", strings.NewReader("not found"))
+	})}}
+	got, err := nativeClient.ListReferrers(context.Background(), target, subject)
+	if err != nil || len(got) != 1 || got[0].Digest != artDigest || got[0].ArtifactType != "application/vnd.example.sig" {
+		t.Fatalf("native referrers=%+v err=%v", got, err)
+	}
+
+	// Fallback tag sha256-<hex> when /referrers/ returns 404
+	fallbackClient := &Client{HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) *http.Response {
+		if r.URL.Path == "/v2/team/service/manifests/sha256-"+strings.Repeat("a", 64) {
+			return response(http.StatusOK, "", strings.NewReader(indexJSON))
+		}
+		return response(http.StatusNotFound, "", strings.NewReader("not found"))
+	})}}
+	got, err = fallbackClient.ListReferrers(context.Background(), target, subject)
+	if err != nil || len(got) != 1 || got[0].Digest != artDigest {
+		t.Fatalf("fallback referrers=%+v err=%v", got, err)
 	}
 }

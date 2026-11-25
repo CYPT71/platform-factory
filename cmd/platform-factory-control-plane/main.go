@@ -36,6 +36,7 @@ func run(args []string) error {
 	statePath := fs.String("state-file", "", "durable scheduler snapshot path (required for restart recovery)")
 	auditPath := fs.String("audit-file", "", "append-only hash-chained lifecycle journal path")
 	casDir := fs.String("cas-dir", "", "optional shared content-addressed blob directory; exposes /cas/blobs/ to authenticated mTLS clients")
+	tenantCASQuota := fs.Int64("tenant-cas-quota-bytes", 0, "optional per-tenant disk quota in bytes for isolated tenant CAS storage under -cas-dir")
 	tenantMaxParallel := fs.Int("tenant-max-parallel", 0, "if greater than zero, cap concurrent leases per tenant "+
 		"(POST /lease/submit's optional \"tenant\" field); leases that omit a tenant are never limited; "+
 		"open-lease accounting is restored when -state-file is configured")
@@ -98,6 +99,11 @@ func run(args []string) error {
 			return fmt.Errorf("open CAS: %w", err)
 		}
 		server.CAS = store
+		tenantCAS, err := cache.OpenTenantManager(*casDir, *tenantCASQuota)
+		if err != nil {
+			return fmt.Errorf("open tenant CAS: %w", err)
+		}
+		server.TenantCAS = tenantCAS
 	}
 	if *tenantMaxParallel > 0 {
 		server.Scheduler = quota.NewFairScheduler(quota.NewTenantQuota(quota.Quota{MaxParallel: *tenantMaxParallel}))
