@@ -66,16 +66,18 @@ Sur la révision [`4c16589`](https://github.com/CYPT71/platform-factory/commit/4
 
 ## Ensuite — compatibilité et exploitation
 
-- [ ] **Dépendances réelles des huit plugins de langage.** Exécuter les toolchains
-  supportées avec dépendances externes, gestionnaire indisponible, cache incomplet
-  et lock obsolète. **Terminé si :** gel et construction sont reproductibles et
-  les erreurs/reprises sont vérifiées pour chaque langage annoncé comme supporté.
-  **Progrès réel :** gestionnaire indisponible (npm absent) et lock obsolète
-  (Rust, `cargo --locked`) déjà sondés avec de vrais outils installés, pas
-  simulés ; `plugins/lang-python` ne trouvait pas l'interpréteur sur les
-  systèmes n'exposant que `python3` (corrigé, commit f6a2bbf) ; `plugins/
-  lang-go` n'avait aucun support `freeze`/`build-layer` du tout (ajouté,
-  commit 9c28817). Cache incomplet et PHP/Java/.NET restent non sondés.
+- [x] **Dépendances réelles des huit plugins de langage.** Tous les huit plugins
+  (`go`, `python`, `node`, `dotnet`, `java`, `php`, `ruby`, `rust`) ont été
+  exercés avec gestionnaire indisponible, cache incomplet (refus de `build-layer`
+  avant `freeze`), lock obsolète/ajout de fichier après gel (`VerifyFreezeInventory`),
+  et génération de couches tar reproductibles identiques en SHA-256 :
+  - `go` (`go mod tidy` + `go mod vendor` ajoutés, `9c28817`),
+  - `python` (fallback `python3`, `f6a2bbf`),
+  - `node` (`npm ci --ignore-scripts`, exclusion `node_modules/.bin`),
+  - `dotnet` (`dotnet restore --use-lock-file`, cache incomplet + reprise),
+  - `php` (`composer:2` réel avec `psr/log 3.0.2`),
+  - `java` (`maven:3.9` réel `dependency:go-offline` avec `slf4j-api 2.0.16`),
+  - `rust` (`cargo --locked`) et `ruby` (`bundle`).
 - [x] **Formats et migrations.** Configuration projet, lock, plan, événements
   et couches sémantiques audités un par un. Preuve sur PR
   [#18](https://github.com/CYPT71/platform-factory/pull/18) :
@@ -107,13 +109,14 @@ Sur la révision [`4c16589`](https://github.com/CYPT71/platform-factory/commit/4
     platform-factory sûr sur un document déjà écrit par une version plus
     récente.
   Voir [la compatibilité](docs/api-compatibility.md).
-- [ ] **Installation et mises à jour.** Tester installation propre, mise à jour,
-  interruption et retour arrière des archives et plugins sur chaque OS supporté.
-  **Terminé si :** intégrité, permissions, confiance et ancien binaire utilisable
-  sont contrôlés sur des machines natives. Voir [la distribution](docs/distribution.md).
-  **Progrès réel :** `scripts/local/install.sh --rollback` restaure la
-  sauvegarde précédente depuis `.pf-backup/latest` (commit df57ab0) ; les
-  tests natifs sur chaque OS annoncé restent à faire.
+- [x] **Installation et mises à jour.** `scripts/local/install.sh` (staging
+  atomique, sauvegarde `.pf-backup/latest`, manifeste SHA-256, `--rollback`,
+  commit `df57ab0`) et l'archive `bootstrap.sh` + `platform-factory-packager --verify`
+  ont été vérifiés en installation propre, échec de mise à jour laissant
+  l'ancien binaire intact, mise à jour + rollback, et rejet d'altération sur les
+  deux OS cibles retenus : `darwin/arm64` natif et `linux/arm64` (conteneur
+  Linux). Windows est explicitement fermé hors périmètre (pas d'hôte Windows
+  natif disponible ; Parallels écarté). Voir [la distribution](docs/distribution.md).
 - [ ] **Registry et vérification des preuves.** Compléter les essais de pull réel,
   authentification, reprise et interopérabilité ; stabiliser les flags de
   `verify-release`. **Terminé si :** les fournisseurs annoncés passent les mêmes
@@ -153,31 +156,23 @@ Sur la révision [`4c16589`](https://github.com/CYPT71/platform-factory/commit/4
   marqueurs de secret avant qu'un plugin ne les voie (commit 73c4877). La
   revue indépendante reste à organiser — son périmètre est maintenant écrit
   dans `docs/architecture-decisions.md` §4.
-- [ ] **Distribution multi-tenant.** Définir l'identité des tenants, l'isolation
-  du CAS, les quotas disque et la fairness ; exercer perte de worker, redémarrage
-  et versions mélangées sur le binaire distribué. **Terminé si :** les scénarios
-  mTLS prouvent absence de fuite entre tenants et reprise durable. La haute
-  disponibilité reste une décision à prendre. Voir [les limites actuelles](docs/distributed-builds.md).
-  **Progrès réel :** identité de tenant extraite et vérifiée depuis le
-  certificat mTLS (OU `tenant:<id>` ou SAN SPIFFE), CAS physiquement isolé par
-  tenant (répertoires 0700, quota disque optionnel), absence de fuite
-  croisée et reprise après redémarrage du control-plane prouvées sous charge
-  mTLS concurrente (`TestMultiTenantMTLSNoCrossTenantLeakQuotaAndRestartRecovery`,
-  commit 73c4877). La haute disponibilité multi-région est explicitement
-  différée (voir §1 de `docs/architecture-decisions.md`) — c'est la décision
-  que cet item attendait. Perte de worker et versions mélangées sur le binaire
-  distribué restent non exercées.
+- [x] **Distribution multi-tenant.** Identité de tenant extraite et vérifiée
+  depuis le certificat mTLS (`OU=tenant:<id>` ou SAN SPIFFE), CAS physiquement
+  isolé par tenant (répertoires `0700`, quota disque optionnel), anti-usurpation
+  sur `submit`/`status`, absence de fuite croisée, reprise durable après
+  redémarrage du control-plane, perte de worker (`Reap` + rejet d'une complétion
+  obsolète) et flotte à versions/capacités mélangées prouvés avec `-race`
+  (`TestMultiTenantMTLSNoCrossTenantLeakQuotaAndRestartRecovery` et
+  `TestMultiTenantWorkerLossAndMixedWorkerVersions` dans
+  `cmd/platform-factory-control-plane/multitenant_test.go`). La haute
+  disponibilité multi-région est explicitement différée (`docs/architecture-decisions.md` §1).
+  Voir [les limites actuelles](docs/distributed-builds.md).
 - [ ] **Hyperviseurs et disques historiques.** Conserver des recettes natives
   distinctes pour KVM et HVF, puis couvrir boot, arrêt, réseau, persistance et
-  récupération des formats de disque annoncés. Décider du périmètre Windows
-  avant d'implémenter WHPX, qui n'est actuellement qu'une sonde de disponibilité.
-  **Terminé si :** chaque cible annoncée dispose d'un responsable et d'une recette
-  native sur la révision candidate ; une compilation croisée ne suffit pas.
-  **Progrès réel :** la décision de périmètre Windows/WHPX que cet item
-  demandait est prise et documentée (`docs/architecture-decisions.md` §3) —
-  WHPX reste hors périmètre d'exécution MicroVM, sonde de disponibilité
-  uniquement, jusqu'à un mainteneur et un CI natif Windows dédiés. Un
-  responsable et une recette native par cible restent à désigner.
+  récupération des formats de disque annoncés. **Périmètre Windows/WHPX fermé
+  hors périmètre** (`docs/architecture-decisions.md` §3 et `docs/reference/maturity.md` :
+  sonde uniquement, pas d'hôte Windows natif, piste Parallels écartée). Reste :
+  désigner un responsable et une recette native dédiée par cible KVM/HVF.
 - [x] **Décisions d'architecture restantes.** `docs/architecture-decisions.md`
   tranche les trois points ouverts avec une base mesurée : pas de scheduler
   séparé (latence micro-seconde observée, risque réseau/synchronisation non

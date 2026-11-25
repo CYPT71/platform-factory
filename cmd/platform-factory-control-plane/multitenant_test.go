@@ -286,3 +286,112 @@ func TestMultiTenantMTLSNoCrossTenantLeakQuotaAndRestartRecovery(t *testing.T) {
 		t.Fatalf("recovered lease mismatch: %+v", recovered)
 	}
 }
+
+func TestMultiTenantWorkerLossAndMixedWorkerVersions(t *testing.T) {
+	pki := newTestPKI(t)
+	serverCert := pki.issueCert(t, "control-plane", []string{"control-plane"}, nil, true)
+	tenantACert := pki.issueCert(t, "tenant-alpha", []string{"worker"}, []string{"tenant:alpha"}, false)
+	legacyWorkerCert := pki.issueCert(t, "worker-v1-legacy", []string{"worker"}, nil, false)
+	modernWorkerCert := pki.issueCert(t, "worker-v2-modern", []string{"worker"}, nil, false)
+
+	serverTLS, err := mtls.ServerConfig(mtls.Options{
+		Certificates: []tls.Certificate{serverCert},
+		CAPEM:        pki.caPEM,
+		MutualTLS:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plane := control.NewControlPlane(100 * time.Millisecond)
+	srv := &Server{
+		Plane:     plane,
+		Scheduler: quota.NewFairScheduler(quota.NewTenantQuota(quota.Quota{MaxParallel: 1})),
+	}
+	ts := httptest.NewUnstartedServer(srv.Routes())
+	ts.TLS = serverTLS
+	ts.StartTLS()
+	defer ts.Close()
+
+	clientA := pki.mtlsClient(t, tenantACert)
+	workerV1 := pki.mtlsClient(t, legacyWorkerCert)
+	workerV2 := pki.mtlsClient(t, modernWorkerCert)
+
+	// 1. Legacy worker (v1, no public_key, basic capabilities) registers.
+	resp, err := workerV1.Post(ts.URL+"/register", "application/json", strings.NewReader(`{"platform":"linux/amd64","capabilities":["oci"],"max_parallel":1}`))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("worker v1 register failed: resp=%v err=%v", resp, err)
+	}
+	resp.Body.Close()
+
+	// 2. Tenant A submits a lease (consumes its 1 parallel quota slot).
+	resp, err = clientA.Post(ts.URL+"/lease/submit", "application/json", strings.NewReader(`{"payload":"job-1","required_platform":"linux/amd64"}`))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("submit failed: resp=%v err=%v", resp, err)
+	}
+	var sub struct {
+		LeaseID string `json:"lease_id"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&sub)
+	resp.Body.Close()
+
+	// 3. Legacy worker claims the lease, then crashes / stops heartbeating.
+	resp, err = workerV1.Post(ts.URL+"/lease/next", "application/json", strings.NewReader(`{}`))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("worker v1 lease/next failed: resp=%v err=%v", resp, err)
+	}
+	var claimed1 control.Lease
+	_ = json.NewDecoder(resp.Body).Decode(&claimed1)
+	resp.Body.Close()
+	if claimed1.ID != sub.LeaseID || claimed1.Attempt != 1 {
+		t.Fatalf("unexpected first claim: %+v", claimed1)
+	}
+
+	// 4. Simulate worker loss: heartbeat timeout elapses and control-plane reaps.
+	requeued := plane.Reap(time.Now().Add(time.Second))
+	if len(requeued) != 1 || requeued[0] != sub.LeaseID {
+		t.Fatalf("expected lease %s to be requeued, got %v", sub.LeaseID, requeued)
+	}
+
+	// 5. Modern worker (v2, richer capabilities) registers concurrently in mixed fleet and finishes the requeued lease.
+	resp, err = workerV2.Post(ts.URL+"/register", "application/json", strings.NewReader(`{"platform":"linux/amd64","capabilities":["oci","microvm","sbom"],"max_parallel":2}`))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("worker v2 register failed: resp=%v err=%v", resp, err)
+	}
+	resp.Body.Close()
+
+	resp, err = workerV2.Post(ts.URL+"/lease/next", "application/json", strings.NewReader(`{}`))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("worker v2 lease/next failed: resp=%v err=%v", resp, err)
+	}
+	var claimed2 control.Lease
+	_ = json.NewDecoder(resp.Body).Decode(&claimed2)
+	resp.Body.Close()
+	if claimed2.ID != sub.LeaseID || claimed2.Attempt != 2 {
+		t.Fatalf("expected attempt 2 on worker v2, got %+v", claimed2)
+	}
+
+	// Stale completion from lost worker v1 MUST be rejected!
+	resp, err = workerV1.Post(ts.URL+"/lease/complete", "application/json", strings.NewReader(`{"lease_id":"`+sub.LeaseID+`","result":"stale"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("stale completion from lost worker v1 must be rejected")
+	}
+
+	// Worker v2 completes the lease -> releases Tenant A's quota slot.
+	resp, err = workerV2.Post(ts.URL+"/lease/complete", "application/json", strings.NewReader(`{"lease_id":"`+sub.LeaseID+`","result":"ok-v2"}`))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("worker v2 complete failed: resp=%v err=%v", resp, err)
+	}
+	resp.Body.Close()
+
+	// Verify Tenant A can immediately submit a second lease (quota slot released).
+	resp, err = clientA.Post(ts.URL+"/lease/submit", "application/json", strings.NewReader(`{"payload":"job-2","required_platform":"linux/amd64"}`))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("second submit after completion failed: resp=%v err=%v", resp, err)
+	}
+	resp.Body.Close()
+}
