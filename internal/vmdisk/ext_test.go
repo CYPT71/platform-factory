@@ -164,3 +164,21 @@ func writeExtDirEntry(target []byte, inode uint32, recordLength int, name string
 	target[6], target[7] = byte(len(name)), fileType
 	copy(target[8:], name)
 }
+
+func TestInodeKindMapsEveryModeBits(t *testing.T) {
+	cases := map[uint16]string{
+		0x4000: "directory",
+		0x8000: "file",
+		0xa000: "symlink",
+		0x2000: "character_device",
+		0x6000: "block_device",
+		0x1000: "fifo",
+		0xc000: "socket",
+		0x0000: "unknown",
+	}
+	for mode, want := range cases {
+		if got := inodeKind(mode | 0o644); got != want {
+			t.Errorf("inodeKind(%#o) = %q, want %q", mode, got, want)
+		}
+	}
+}

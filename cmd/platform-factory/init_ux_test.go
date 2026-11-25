@@ -155,3 +155,34 @@ func TestConfirmPlanRespectsYesOrNoAnswer(t *testing.T) {
 		t.Fatalf("expected the plan to be printed, got %q", stdout.String())
 	}
 }
+
+func TestResolveDependencyModeExplicitDetectedAndInteractivePaths(t *testing.T) {
+	var discard bytes.Buffer
+
+	if mode, ok := resolveDependencyMode("unresolved", "manifest", false, nil, &discard); mode != "manifest" || !ok {
+		t.Fatalf("explicit valid: mode=%q ok=%v", mode, ok)
+	}
+	if mode, ok := resolveDependencyMode("unresolved", "not-a-real-mode", false, nil, &discard); mode != "not-a-real-mode" || ok {
+		t.Fatalf("explicit invalid: mode=%q ok=%v", mode, ok)
+	}
+	if mode, ok := resolveDependencyMode("none", "", false, nil, &discard); mode != "none" || !ok {
+		t.Fatalf("detected none: mode=%q ok=%v", mode, ok)
+	}
+	if mode, ok := resolveDependencyMode("manifest", "", false, nil, &discard); mode != "manifest" || !ok {
+		t.Fatalf("detected manifest: mode=%q ok=%v", mode, ok)
+	}
+	if mode, ok := resolveDependencyMode("unresolved", "", true, nil, &discard); mode != "" || ok {
+		t.Fatalf("assumeYes with unresolved: mode=%q ok=%v", mode, ok)
+	}
+	if mode, ok := resolveDependencyMode("unresolved", "", false, nil, &discard); mode != "" || ok {
+		t.Fatalf("nil stdin with unresolved: mode=%q ok=%v", mode, ok)
+	}
+
+	for choice, want := range map[string]string{"1": "unresolved", "2": "external", "3": "none", "9": ""} {
+		stdin := bufio.NewReader(strings.NewReader(choice + "\n"))
+		mode, ok := resolveDependencyMode("unresolved", "", false, stdin, &discard)
+		if mode != want || ok != (want != "") {
+			t.Fatalf("choice=%q: mode=%q ok=%v, want %q", choice, mode, ok, want)
+		}
+	}
+}

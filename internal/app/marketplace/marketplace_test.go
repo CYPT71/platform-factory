@@ -1,6 +1,8 @@
 package marketplace
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/CYPT71/platform-factory/internal/marketplace"
@@ -49,5 +51,31 @@ func TestPaths(t *testing.T) {
 func TestLoadKeysRejectsMissingFile(t *testing.T) {
 	if _, err := LoadKeys([]string{"/does/not/exist.pem"}); err == nil {
 		t.Fatal("expected an error for a missing key file")
+	}
+}
+
+func TestPathsHonorsMarketplaceDirOverride(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_MARKETPLACE_DIR", "/tmp/example-marketplace")
+	indexPath, sourcesPath, pluginsDir, err := Paths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexPath == "" || sourcesPath == "" {
+		t.Fatalf("indexPath=%q sourcesPath=%q", indexPath, sourcesPath)
+	}
+	wantPluginsDir := filepath.Join("/tmp/example-marketplace", "plugins")
+	if pluginsDir != wantPluginsDir {
+		t.Fatalf("pluginsDir=%q, want %q", pluginsDir, wantPluginsDir)
+	}
+}
+
+func TestPathsFallsBackToUserConfigDirWhenUnset(t *testing.T) {
+	t.Setenv("PLATFORM_FACTORY_MARKETPLACE_DIR", "")
+	_, _, pluginsDir, err := Paths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(pluginsDir, filepath.Join("platform-factory", "marketplace", "plugins")) {
+		t.Fatalf("pluginsDir=%q", pluginsDir)
 	}
 }
