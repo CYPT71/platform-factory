@@ -62,7 +62,7 @@ func ValidateCatalogRepositoryURL(ctx context.Context, raw string) (string, erro
 	if host == "" {
 		return "", fmt.Errorf("marketplace: repository URL %q has no host", trimmed)
 	}
-	if err := checkHostSafe(ctx, host); err != nil {
+	if _, err := checkHostSafe(ctx, host); err != nil {
 		return "", fmt.Errorf("marketplace: repository URL %q: %w", trimmed, err)
 	}
 	return trimmed, nil
@@ -73,26 +73,34 @@ func ValidateCatalogRepositoryURL(ctx context.Context, raw string) (string, erro
 // least one address, and every address it resolves to must be safe -
 // failing closed on a single unsafe answer rather than trusting the
 // first safe one a hostile or rebinding-capable resolver hands back.
-func checkHostSafe(ctx context.Context, host string) error {
+//
+// The returned IP is the one address this lookup itself validated -
+// callers that go on to connect must dial that exact address rather
+// than resolving host a second time (see catalogHTTPClient's
+// DialContext): a second, independent lookup at connect time reopens
+// the DNS-rebinding window a validate-then-separately-resolve sequence
+// leaves open even though the validating lookup here is already a real
+// one, not a string match.
+func checkHostSafe(ctx context.Context, host string) (net.IP, error) {
 	if ip := net.ParseIP(host); ip != nil {
 		if isBlockedIP(ip) {
-			return fmt.Errorf("host %s is not a permitted destination", host)
+			return nil, fmt.Errorf("host %s is not a permitted destination", host)
 		}
-		return nil
+		return ip, nil
 	}
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
-		return fmt.Errorf("resolve host %s: %w", host, err)
+		return nil, fmt.Errorf("resolve host %s: %w", host, err)
 	}
 	if len(addrs) == 0 {
-		return fmt.Errorf("host %s did not resolve to any address", host)
+		return nil, fmt.Errorf("host %s did not resolve to any address", host)
 	}
 	for _, addr := range addrs {
 		if isBlockedIP(addr.IP) {
-			return fmt.Errorf("host %s resolves to %s, not a permitted destination", host, addr.IP)
+			return nil, fmt.Errorf("host %s resolves to %s, not a permitted destination", host, addr.IP)
 		}
 	}
-	return nil
+	return addrs[0].IP, nil
 }
 
 // isBlockedIP reports whether ip is loopback, RFC 1918/4193 private,
@@ -128,7 +136,7 @@ func checkRedirectSafe(req *http.Request, via []*http.Request) error {
 	if host == "" {
 		return errors.New("marketplace: redirect target has no host")
 	}
-	if err := checkHostSafe(req.Context(), host); err != nil {
+	if _, err := checkHostSafe(req.Context(), host); err != nil {
 		return fmt.Errorf("marketplace: redirect target refused: %w", err)
 	}
 	return nil

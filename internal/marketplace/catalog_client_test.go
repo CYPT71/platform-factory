@@ -1,8 +1,11 @@
 package marketplace
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -86,5 +89,49 @@ func TestFetchCatalogTimesOutOnASlowServer(t *testing.T) {
 	_, _, _, err := FetchCatalog(context.Background(), server.URL, client)
 	if err == nil {
 		t.Fatal("want a slow server to time out")
+	}
+}
+
+// TestDialPinnedIPConnectsToTheGivenAddressNotTheOriginalHost proves, with
+// a real TCP listener, that dialPinnedIP actually controls which address
+// gets connected to, regardless of what hostname or address a caller's
+// own "addr" argument named - the mechanism
+// dialValidatedRedirectTarget/catalogHTTPClient's DialContext rely on to
+// close the DNS-rebinding TOCTOU window a validate-the-hostname-then-
+// separately-let-the-transport-resolve-it-again sequence would otherwise
+// leave open. checkHostSafe's own tests already prove the validation
+// itself rejects unsafe targets; this proves the other half - that a
+// validated result is what actually gets dialed, not re-resolved.
+func TestDialPinnedIPConnectsToTheGivenAddressNotTheOriginalHost(t *testing.T) {
+	const sentinel = "dial-pinned-ip-reached-the-real-server"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(sentinel))
+	}))
+	defer server.Close()
+	_, port, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := dialPinnedIP(context.Background(), &net.Dialer{}, "tcp", port, net.ParseIP("127.0.0.1"))
+	if err != nil {
+		t.Fatalf("dialPinnedIP: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte(sentinel)) {
+		t.Fatalf("response did not come from the pinned server: %q", body)
+	}
+}
+
+func TestDialValidatedRedirectTargetRejectsAnUnsafeHost(t *testing.T) {
+	if _, err := dialValidatedRedirectTarget(context.Background(), &net.Dialer{}, "tcp", "127.0.0.1:9"); err == nil {
+		t.Fatal("expected a loopback redirect target to be rejected before any dial was attempted")
 	}
 }

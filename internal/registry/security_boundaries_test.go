@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,27 +17,31 @@ import (
 )
 
 func TestCheckRedirectHostSafeRejectsEmptyAndBlockedLiterals(t *testing.T) {
-	if err := checkRedirectHostSafe(context.Background(), ""); err == nil {
+	if _, err := checkRedirectHostSafe(context.Background(), ""); err == nil {
 		t.Fatal("expected an error for an empty host")
 	}
 	for _, blocked := range []string{"127.0.0.1", "10.0.0.5", "169.254.169.254", "::1", "224.0.0.1"} {
-		if err := checkRedirectHostSafe(context.Background(), blocked); err == nil {
+		if _, err := checkRedirectHostSafe(context.Background(), blocked); err == nil {
 			t.Fatalf("expected %q to be rejected as a blocked literal address", blocked)
 		}
 	}
-	if err := checkRedirectHostSafe(context.Background(), "93.184.216.34"); err != nil {
+	ip, err := checkRedirectHostSafe(context.Background(), "93.184.216.34")
+	if err != nil {
 		t.Fatalf("expected a globally-routable literal address to be accepted: %v", err)
+	}
+	if ip.String() != "93.184.216.34" {
+		t.Fatalf("expected the returned IP to be the literal address itself, got %v", ip)
 	}
 }
 
 func TestCheckRedirectHostSafeRejectsAHostnameResolvingToLoopback(t *testing.T) {
-	if err := checkRedirectHostSafe(context.Background(), "localhost"); err == nil {
+	if _, err := checkRedirectHostSafe(context.Background(), "localhost"); err == nil {
 		t.Fatal("expected localhost to resolve to a blocked loopback address")
 	}
 }
 
 func TestCheckRedirectHostSafeRejectsAnUnresolvableHostname(t *testing.T) {
-	if err := checkRedirectHostSafe(context.Background(), "this-host-does-not-exist.invalid"); err == nil {
+	if _, err := checkRedirectHostSafe(context.Background(), "this-host-does-not-exist.invalid"); err == nil {
 		t.Fatal("expected an error for a hostname that cannot resolve")
 	}
 }
@@ -496,4 +502,48 @@ func TestUploadBlobDoesNotHideSourceOrReconciliationErrors(t *testing.T) {
 			t.Fatalf("err=%v", err)
 		}
 	})
+}
+
+// TestPinnedDialClientConnectsToTheValidatedIPNotTheHostname proves, with
+// a real *http.Transport and a real TCP listener (not the roundTripFunc
+// mock every other redirect test in this file uses), that pinnedDialClient
+// actually controls which address gets connected to - the fix for the
+// DNS-rebinding TOCTOU window a validate-the-hostname-then-let-the-
+// transport-independently-resolve-the-hostname sequence would otherwise
+// leave open. The request targets a hostname that cannot resolve at all;
+// if pinnedDialClient's DialContext override were not taking effect
+// (i.e. if the transport fell back to resolving that hostname itself),
+// this would fail with a DNS error instead of reaching the real server.
+func TestPinnedDialClientConnectsToTheValidatedIPNotTheHostname(t *testing.T) {
+	const sentinel = "pinned-dial-reached-the-real-server"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, sentinel)
+	}))
+	defer server.Close()
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(serverURL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := (&Client{}).pinnedDialClient(net.ParseIP("127.0.0.1"))
+	request, err := http.NewRequest(http.MethodGet, "http://this-hostname-does-not-resolve.invalid:"+port+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("request to an unresolvable hostname failed instead of using the pinned IP: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != sentinel {
+		t.Fatalf("got=%q, want the real server's response - the pinned dial target was not actually used", body)
+	}
 }
